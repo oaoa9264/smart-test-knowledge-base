@@ -1,0 +1,129 @@
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.models.entities import Project, Requirement, RuleNode, RulePath, TestCase
+from app.schemas.testcase import TestCaseCreate, TestCaseRead, TestCaseUpdate
+
+router = APIRouter(prefix="/api/testcases", tags=["testcases"])
+
+
+def _to_read_model(case: TestCase) -> TestCaseRead:
+    risk_value = case.risk_level.value if hasattr(case.risk_level, "value") else str(case.risk_level)
+    status_value = case.status.value if hasattr(case.status, "value") else str(case.status)
+    return TestCaseRead(
+        id=case.id,
+        project_id=case.project_id,
+        title=case.title,
+        steps=case.steps,
+        expected_result=case.expected_result,
+        risk_level=risk_value,
+        status=status_value,
+        bound_rule_node_ids=[n.id for n in case.bound_rule_nodes],
+        bound_path_ids=[p.id for p in case.bound_paths],
+    )
+
+
+@router.post("", response_model=TestCaseRead, status_code=status.HTTP_201_CREATED)
+def create_testcase(payload: TestCaseCreate, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(Project.id == payload.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    case = TestCase(
+        project_id=payload.project_id,
+        title=payload.title,
+        steps=payload.steps,
+        expected_result=payload.expected_result,
+        risk_level=payload.risk_level,
+        status=payload.status,
+    )
+
+    if payload.bound_rule_node_ids:
+        nodes = db.query(RuleNode).filter(RuleNode.id.in_(payload.bound_rule_node_ids)).all()
+        case.bound_rule_nodes = nodes
+    if payload.bound_path_ids:
+        paths = db.query(RulePath).filter(RulePath.id.in_(payload.bound_path_ids)).all()
+        case.bound_paths = paths
+
+    db.add(case)
+    db.commit()
+    db.refresh(case)
+    return _to_read_model(case)
+
+
+@router.get("/projects/{project_id}", response_model=List[TestCaseRead])
+def list_testcases(project_id: int, requirement_id: Optional[int] = None, db: Session = Depends(get_db)):
+    query = db.query(TestCase).filter(TestCase.project_id == project_id)
+
+    if requirement_id is not None:
+        requirement = (
+            db.query(Requirement)
+            .filter(Requirement.id == requirement_id, Requirement.project_id == project_id)
+            .first()
+        )
+        if not requirement:
+            raise HTTPException(status_code=404, detail="requirement not found")
+
+        query = (
+            query.outerjoin(TestCase.bound_rule_nodes)
+            .outerjoin(TestCase.bound_paths)
+            .filter(
+                or_(
+                    RuleNode.requirement_id == requirement_id,
+                    RulePath.requirement_id == requirement_id,
+                )
+            )
+            .distinct()
+        )
+
+    cases = query.order_by(TestCase.id.desc()).all()
+    return [_to_read_model(case) for case in cases]
+
+
+@router.get("/{case_id}", response_model=TestCaseRead)
+def get_testcase(case_id: int, db: Session = Depends(get_db)):
+    case = db.query(TestCase).filter(TestCase.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="testcase not found")
+    return _to_read_model(case)
+
+
+@router.put("/{case_id}", response_model=TestCaseRead)
+def update_testcase(case_id: int, payload: TestCaseUpdate, db: Session = Depends(get_db)):
+    case = db.query(TestCase).filter(TestCase.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="testcase not found")
+
+    case.title = payload.title
+    case.steps = payload.steps
+    case.expected_result = payload.expected_result
+    case.risk_level = payload.risk_level
+    case.status = payload.status
+
+    nodes = db.query(RuleNode).filter(RuleNode.id.in_(payload.bound_rule_node_ids)).all() if payload.bound_rule_node_ids else []
+    if len(nodes) != len(set(payload.bound_rule_node_ids)):
+        raise HTTPException(status_code=400, detail="invalid bound_rule_node_ids")
+    case.bound_rule_nodes = nodes
+
+    paths = db.query(RulePath).filter(RulePath.id.in_(payload.bound_path_ids)).all() if payload.bound_path_ids else []
+    if len(paths) != len(set(payload.bound_path_ids)):
+        raise HTTPException(status_code=400, detail="invalid bound_path_ids")
+    case.bound_paths = paths
+
+    db.commit()
+    db.refresh(case)
+    return _to_read_model(case)
+
+
+@router.delete("/{case_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_testcase(case_id: int, db: Session = Depends(get_db)):
+    case = db.query(TestCase).filter(TestCase.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="testcase not found")
+    db.delete(case)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

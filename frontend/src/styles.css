@@ -1,0 +1,22 @@
+:root {
+  --bg-main: #f2f5f9;
+  --panel-bg: #ffffff;
+  --text-main: #112b44;
+  --text-subtle: #597187;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: "IBM Plex Sans", "PingFang SC", "Noto Sans SC", sans-serif;
+  color: var(--text-main);
+  background: radial-gradient(circle at 15% 20%, #e6f1ff 0, #f2f5f9 30%, #edf4fb 100%);
+}
