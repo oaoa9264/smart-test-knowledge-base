@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -53,6 +54,7 @@ const statusOptions = [
 ];
 
 export default function TestCasesPage() {
+  const location = useLocation();
   const { selectedProjectId, selectedRequirementId } = useAppStore();
   const [form] = Form.useForm();
   const selectedNodeIds = Form.useWatch<string[]>("bound_rule_node_ids", form) || [];
@@ -60,6 +62,8 @@ export default function TestCasesPage() {
   const selectedEditNodeIds = Form.useWatch<string[]>("bound_rule_node_ids", editForm) || [];
 
   const [cases, setCases] = useState<TestCase[]>([]);
+  const [casesLoaded, setCasesLoaded] = useState(false);
+  const [highlightedCaseId, setHighlightedCaseId] = useState<number | null>(null);
   const [nodes, setNodes] = useState<RuleNode[]>([]);
   const [paths, setPaths] = useState<RulePath[]>([]);
   const [viewingCase, setViewingCase] = useState<TestCase | null>(null);
@@ -70,14 +74,66 @@ export default function TestCasesPage() {
   const [createFormCollapsed, setCreateFormCollapsed] = useState(true);
 
   useEffect(() => {
-    if (!selectedProjectId || !selectedRequirementId) {
-      setCases([]);
+    const searchParams = new URLSearchParams(location.search);
+    const focusCaseId = searchParams.get("focusCaseId");
+    if (!focusCaseId) {
+      setHighlightedCaseId(null);
       return;
     }
+
+    const parsed = Number(focusCaseId);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      setHighlightedCaseId(parsed);
+      return;
+    }
+
+    setHighlightedCaseId(null);
+  }, [location.search]);
+
+  useEffect(() => {
+    if (!selectedProjectId || !selectedRequirementId) {
+      setCases([]);
+      setCasesLoaded(false);
+      return;
+    }
+    setCasesLoaded(false);
     fetchTestCases(selectedProjectId, selectedRequirementId)
-      .then(setCases)
-      .catch(() => message.error("加载用例失败"));
+      .then((data) => {
+        setCases(data);
+        setCasesLoaded(true);
+      })
+      .catch(() => {
+        setCasesLoaded(true);
+        message.error("加载用例失败");
+      });
   }, [selectedProjectId, selectedRequirementId]);
+
+  useEffect(() => {
+    if (!casesLoaded || highlightedCaseId === null) return;
+
+    const targetExists = cases.some((item) => item.id === highlightedCaseId);
+    if (!targetExists) {
+      message.warning(`未找到用例 #${highlightedCaseId}，请确认当前需求下是否存在该用例`);
+      setHighlightedCaseId(null);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const targetRow = document.querySelector(`tr[data-row-key="${highlightedCaseId}"]`);
+      if (targetRow instanceof HTMLElement) {
+        targetRow.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [cases, casesLoaded, highlightedCaseId]);
+
+  useEffect(() => {
+    if (highlightedCaseId === null) return;
+    const timer = window.setTimeout(() => {
+      setHighlightedCaseId(null);
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [highlightedCaseId]);
 
   useEffect(() => {
     if (!selectedRequirementId) {
@@ -346,6 +402,7 @@ export default function TestCasesPage() {
           >
             <Table<TestCase>
               rowKey="id"
+              rowClassName={(row) => (row.id === highlightedCaseId ? "focus-case-row" : "")}
               size="small"
               pagination={{ pageSize: 8 }}
               scroll={{ x: createFormCollapsed ? 1450 : 1650 }}
@@ -488,6 +545,8 @@ export default function TestCasesPage() {
       <Modal
         open={!!viewingCase}
         title="用例详情"
+        width={920}
+        className="test-case-detail-modal"
         footer={null}
         onCancel={() => setViewingCase(null)}
         destroyOnClose
@@ -499,11 +558,11 @@ export default function TestCasesPage() {
             <Tag color={getRiskTagColor(viewingCase?.risk_level)}>{getRiskLevelLabel(viewingCase?.risk_level)}</Tag>
           </Descriptions.Item>
           <Descriptions.Item label="状态">{getTestCaseStatusLabel(viewingCase?.status)}</Descriptions.Item>
-          <Descriptions.Item label="执行步骤">{viewingCase?.steps}</Descriptions.Item>
-          <Descriptions.Item label="预期结果">{viewingCase?.expected_result}</Descriptions.Item>
+          <Descriptions.Item label="执行步骤">{viewingCase?.steps || "-"}</Descriptions.Item>
+          <Descriptions.Item label="预期结果">{viewingCase?.expected_result || "-"}</Descriptions.Item>
           <Descriptions.Item label="绑定节点">
             {viewingCase?.bound_rule_node_ids?.length ? (
-              <Space wrap>
+              <Space wrap className="detail-chip-list">
                 {viewingCase.bound_rule_node_ids.map((nodeId) => (
                   <Tag key={nodeId}>{getNodeDisplay(nodeId)}</Tag>
                 ))}
@@ -514,7 +573,7 @@ export default function TestCasesPage() {
           </Descriptions.Item>
           <Descriptions.Item label="绑定路径">
             {viewingCase?.bound_path_ids?.length ? (
-              <Space direction="vertical" size={4}>
+              <Space direction="vertical" size={4} className="detail-chip-list" style={{ width: "100%" }}>
                 {viewingCase.bound_path_ids.map((pathId) => (
                   <Tag key={pathId}>{getPathDisplay(pathId)}</Tag>
                 ))}

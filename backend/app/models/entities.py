@@ -5,6 +5,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -56,6 +57,11 @@ class AnalysisStatus(str, enum.Enum):
     imported = "imported"
 
 
+class RecoMode(str, enum.Enum):
+    full = "FULL"
+    change = "CHANGE"
+
+
 case_rule_node_assoc = Table(
     "case_rule_node_assoc",
     Base.metadata,
@@ -102,6 +108,7 @@ class Requirement(Base):
     rule_nodes = relationship("RuleNode", back_populates="requirement", cascade="all, delete-orphan")
     rule_paths = relationship("RulePath", back_populates="requirement", cascade="all, delete-orphan")
     architecture_analyses = relationship("ArchitectureAnalysis", back_populates="requirement")
+    reco_runs = relationship("RecoRun", back_populates="requirement", cascade="all, delete-orphan")
 
 
 class RuleNode(Base):
@@ -148,6 +155,7 @@ class TestCase(Base):
     project = relationship("Project", back_populates="testcases")
     bound_rule_nodes = relationship("RuleNode", secondary=case_rule_node_assoc, back_populates="bound_cases")
     bound_paths = relationship("RulePath", secondary=case_rule_path_assoc, back_populates="bound_cases")
+    reco_results = relationship("RecoResult", back_populates="test_case")
 
 
 class ArchitectureAnalysis(Base):
@@ -165,3 +173,36 @@ class ArchitectureAnalysis(Base):
 
     project = relationship("Project", back_populates="architecture_analyses")
     requirement = relationship("Requirement", back_populates="architecture_analyses")
+
+
+class RecoRun(Base):
+    __tablename__ = "reco_run"
+
+    id = Column(Integer, primary_key=True, index=True)
+    requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False, index=True)
+    mode = Column(Enum(RecoMode), default=RecoMode.full, nullable=False)
+    k = Column(Integer, nullable=False)
+    input_changed_node_ids = Column(Text, nullable=True)
+    total_target_risk = Column(Float, default=0.0, nullable=False)
+    covered_risk = Column(Float, default=0.0, nullable=False)
+    coverage_ratio = Column(Float, default=0.0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    requirement = relationship("Requirement", back_populates="reco_runs")
+    results = relationship("RecoResult", back_populates="run", cascade="all, delete-orphan")
+
+
+class RecoResult(Base):
+    __tablename__ = "reco_result"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, ForeignKey("reco_run.id"), nullable=False, index=True)
+    rank = Column(Integer, nullable=False)
+    case_id = Column(Integer, ForeignKey("test_cases.id"), nullable=False, index=True)
+    gain_risk = Column(Float, default=0.0, nullable=False)
+    gain_node_ids = Column(Text, nullable=False)
+    top_contributors = Column(Text, nullable=False)
+    why_selected = Column(String(255), nullable=False)
+
+    run = relationship("RecoRun", back_populates="results")
+    test_case = relationship("TestCase", back_populates="reco_results")

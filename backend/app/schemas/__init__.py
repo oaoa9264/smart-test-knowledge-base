@@ -6,6 +6,13 @@ from .architecture import (
     ArchitectureImportResult,
 )
 from .project import ProjectCreate, ProjectRead, RequirementCreate, RequirementRead
+from .recommendation import (
+    RecoRequest,
+    RecoResponse,
+    RecoResultRead,
+    RecoRunDetailRead,
+    RecoRunRead,
+)
 from .rule import RuleNodeCreate, RuleNodeRead, RuleNodeUpdate, RulePathRead
 from .testcase import TestCaseCreate, TestCaseRead, TestCaseUpdateStatus
 
@@ -17,6 +24,11 @@ __all__ = [
     "ArchitectureImportResult",
     "ProjectCreate",
     "ProjectRead",
+    "RecoRequest",
+    "RecoResponse",
+    "RecoResultRead",
+    "RecoRunDetailRead",
+    "RecoRunRead",
     "RequirementCreate",
     "RequirementRead",
     "RuleNodeCreate",

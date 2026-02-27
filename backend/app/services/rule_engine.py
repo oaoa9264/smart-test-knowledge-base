@@ -18,17 +18,22 @@ def derive_rule_paths(nodes: List[Dict[str, str]]) -> List[List[str]]:
 
     paths = []
 
-    def dfs(node_id: str, path: List[str]) -> None:
+    def dfs(node_id: str, path: List[str], visited: set) -> None:
         children = by_parent.get(node_id, [])
-        if not children:
-            paths.append(path[:])
-            return
+        advanced = False
         for child in children:
+            if child in visited:
+                continue
+            advanced = True
             path.append(child)
-            dfs(child, path)
+            visited.add(child)
+            dfs(child, path, visited)
+            visited.remove(child)
             path.pop()
+        if not advanced:
+            paths.append(path[:])
 
     for root_id in roots:
-        dfs(root_id, [root_id])
+        dfs(root_id, [root_id], {root_id})
 
     return paths

@@ -8,7 +8,7 @@ import type {
 
 export async function analyzeArchitecture(formData: FormData): Promise<ArchitectureAnalysisResult> {
   const { data } = await http.post<ArchitectureAnalysisResult>("/api/ai/architecture/analyze", formData, {
-    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 120000,
   });
   return data;
 }

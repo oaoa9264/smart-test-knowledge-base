@@ -1,22 +1,37 @@
 import os
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+from app.schemas.architecture import ArchitectureAnalysisResult
+from app.services.llm_client import LLMClient
+from app.services.prompts.architecture import (
+    GENERATE_SYSTEM_PROMPT,
+    GENERATE_USER_TEMPLATE,
+    VISION_SYSTEM_PROMPT,
+    VISION_USER_TEMPLATE,
+)
 from app.services.rule_engine import derive_rule_paths
 
 
 class ArchitectureAnalyzerProvider:
     """Abstract provider for architecture analysis engines."""
 
+    def __init__(self):
+        self._analysis_mode = "mock"
+
     def analyze(self, image_path: Optional[str], description: str, title: Optional[str] = None) -> Dict:
         raise NotImplementedError
+
+    def get_analysis_mode(self) -> str:
+        return self._analysis_mode
 
 
 class MockAnalyzerProvider(ArchitectureAnalyzerProvider):
     """Rule/template based analyzer used before integrating real LLM providers."""
 
     def analyze(self, image_path: Optional[str], description: str, title: Optional[str] = None) -> Dict:
-        cleaned_description = (description or "").strip()
+        self._analysis_mode = "mock"
+        cleaned_description = _compose_analysis_description(description=description, image_path=image_path)
         cleaned_title = (title or "").strip()
         sentences = _split_sentences(cleaned_description)
 
@@ -34,10 +49,81 @@ class MockAnalyzerProvider(ArchitectureAnalyzerProvider):
 
 
 class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
-    """Placeholder for future LLM analyzer integration."""
+    """LLM-based analyzer with a two-stage multimodal strategy."""
+
+    def __init__(self, llm_client=None):
+        super().__init__()
+        self.llm = llm_client
 
     def analyze(self, image_path: Optional[str], description: str, title: Optional[str] = None) -> Dict:
-        return MockAnalyzerProvider().analyze(image_path=image_path, description=description, title=title)
+        normalized_desc = (description or "").strip()
+        normalized_title = (title or "").strip()
+
+        try:
+            architecture_understanding = normalized_desc
+            if image_path:
+                architecture_understanding = self._vision_analyze(image_path=image_path, description=normalized_desc)
+
+            generated = self._generate_artifacts(
+                architecture_understanding=architecture_understanding,
+                description=normalized_desc,
+                title=normalized_title,
+            )
+            validated, used_mock_fallback = self._validate_and_fallback(
+                generated,
+                image_path=image_path,
+                description=normalized_desc,
+                title=normalized_title,
+            )
+            self._analysis_mode = "mock_fallback" if used_mock_fallback else "llm"
+            return validated
+        except Exception:
+            self._analysis_mode = "mock_fallback"
+            return MockAnalyzerProvider().analyze(
+                image_path=image_path,
+                description=normalized_desc,
+                title=normalized_title,
+            )
+
+    def _get_llm(self):
+        if self.llm is None:
+            self.llm = LLMClient()
+        return self.llm
+
+    def _vision_analyze(self, image_path: str, description: str) -> str:
+        llm = self._get_llm()
+        image_url = llm.image_to_base64_url(image_path)
+        user_prompt = VISION_USER_TEMPLATE.format(description=description or "无")
+        user_content = [
+            {"type": "text", "text": user_prompt},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
+        understanding = llm.chat_with_vision(system_prompt=VISION_SYSTEM_PROMPT, user_content=user_content)
+        return (understanding or description or "")[:2000]
+
+    def _generate_artifacts(self, architecture_understanding: str, description: str, title: str) -> Dict:
+        llm = self._get_llm()
+        user_prompt = GENERATE_USER_TEMPLATE.format(
+            title=title or "未命名架构分析",
+            description=description or "无补充文字描述",
+            architecture_understanding=architecture_understanding or "无架构理解",
+        )
+        return llm.chat_with_json(system_prompt=GENERATE_SYSTEM_PROMPT, user_prompt=user_prompt)
+
+    def _validate_and_fallback(
+        self,
+        payload: Dict,
+        image_path: Optional[str],
+        description: str,
+        title: str,
+    ) -> Tuple[Dict, bool]:
+        try:
+            validated = ArchitectureAnalysisResult.parse_obj(payload).dict()
+            _validate_related_node_ids(validated)
+            return validated, False
+        except Exception:
+            fallback_result = MockAnalyzerProvider().analyze(image_path=image_path, description=description, title=title)
+            return fallback_result, True
 
 
 def get_analyzer_provider() -> ArchitectureAnalyzerProvider:
@@ -45,6 +131,31 @@ def get_analyzer_provider() -> ArchitectureAnalyzerProvider:
     if provider == "llm":
         return LLMAnalyzerProvider()
     return MockAnalyzerProvider()
+
+
+def _compose_analysis_description(description: str, image_path: Optional[str]) -> str:
+    text = (description or "").strip()
+    image_hint = _extract_image_hint(image_path)
+    if text and image_hint:
+        return "{0}。流程图参考信息：{1}".format(text, image_hint)
+    if text:
+        return text
+    if image_hint:
+        return "流程图参考信息：{0}".format(image_hint)
+    return ""
+
+
+def _extract_image_hint(image_path: Optional[str]) -> str:
+    if not image_path:
+        return ""
+
+    filename = os.path.basename(image_path).strip()
+    if not filename:
+        return "已上传流程图"
+
+    stem = os.path.splitext(filename)[0]
+    normalized = re.sub(r"[_\-]+", " ", stem).strip()
+    return normalized or filename
 
 
 def _split_sentences(text: str) -> List[str]:
@@ -255,3 +366,18 @@ def _path_risk_level(risk_levels: List[str]) -> str:
     if not risk_levels:
         return "medium"
     return sorted(risk_levels, key=lambda level: weight.get(level, 0), reverse=True)[0]
+
+
+def _validate_related_node_ids(payload: Dict) -> None:
+    node_ids = {node.get("id") for node in payload.get("decision_tree", {}).get("nodes", [])}
+    node_ids.discard(None)
+
+    for risk in payload.get("risk_points", []):
+        for node_id in risk.get("related_node_ids", []):
+            if node_id not in node_ids:
+                raise ValueError("risk_points.related_node_ids contains unknown node id")
+
+    for test_case in payload.get("test_cases", []):
+        for node_id in test_case.get("related_node_ids", []):
+            if node_id not in node_ids:
+                raise ValueError("test_cases.related_node_ids contains unknown node id")

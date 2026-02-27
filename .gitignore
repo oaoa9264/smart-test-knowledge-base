@@ -5,6 +5,7 @@ __pycache__/
 *.sqlite3
 .pytest_cache/
 .venv/
+.venv38/
 
 # Node
 node_modules/

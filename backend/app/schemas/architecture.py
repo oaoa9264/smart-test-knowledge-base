@@ -42,6 +42,7 @@ class ArchitectureAnalysisResult(BaseModel):
     test_plan: TestPlanResult
     risk_points: List[RiskPoint]
     test_cases: List[GeneratedTestCase]
+    analysis_mode: Optional[str] = None
 
 
 class ArchitectureAnalysisRead(BaseModel):
@@ -72,4 +73,3 @@ class ArchitectureImportResult(BaseModel):
     imported_rule_nodes: int
     imported_test_cases: int
     updated_risk_nodes: int
-

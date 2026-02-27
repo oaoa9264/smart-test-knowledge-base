@@ -39,6 +39,43 @@ const riskTagColor: Record<string, string> = {
   low: "green",
 };
 
+const analysisModeMeta: Record<string, { label: string; color: string; hint?: string }> = {
+  llm: {
+    label: "LLM",
+    color: "blue",
+  },
+  mock: {
+    label: "Mock",
+    color: "default",
+  },
+  mock_fallback: {
+    label: "Mock（LLM降级）",
+    color: "orange",
+    hint: "LLM 调用失败，已自动降级到规则模板分析",
+  },
+  unknown: {
+    label: "未知",
+    color: "default",
+    hint: "后端未返回分析引擎标识，请重启后端后重试",
+  },
+};
+
+function resolveUploadFile(fileItem?: UploadFile): File | undefined {
+  if (!fileItem) return undefined;
+
+  const wrappedFile = (fileItem as UploadFile & { originFileObj?: File }).originFileObj;
+  if (wrappedFile instanceof File) {
+    return wrappedFile;
+  }
+
+  const rawFile = fileItem as unknown as File;
+  if (rawFile instanceof File) {
+    return rawFile;
+  }
+
+  return undefined;
+}
+
 function toFlowNodes(nodes: DecisionTreeNode[]): Node[] {
   const byId = new Map(nodes.map((item) => [item.id, item]));
   const levelMap = new Map<string, number>();
@@ -101,6 +138,8 @@ export default function ArchitectureAnalysisPage() {
 
   const flowNodes = useMemo(() => toFlowNodes(analysis?.decision_tree.nodes || []), [analysis]);
   const flowEdges = useMemo(() => toFlowEdges(analysis?.decision_tree.nodes || []), [analysis]);
+  const modeKey = analysis?.analysis_mode && analysisModeMeta[analysis.analysis_mode] ? analysis.analysis_mode : "unknown";
+  const modeMeta = analysisModeMeta[modeKey];
 
   const startAnalyze = async () => {
     if (!selectedProjectId) {
@@ -109,19 +148,29 @@ export default function ArchitectureAnalysisPage() {
     }
 
     const values = await form.validateFields();
+    const descriptionText = String(values.description_text || "").trim();
+    const uploadFile = resolveUploadFile(fileList[0]);
+    if (!descriptionText && !uploadFile) {
+      message.warning("请上传流程图或填写架构描述");
+      return;
+    }
+
     const formData = new FormData();
     formData.append("project_id", String(selectedProjectId));
     formData.append("title", values.title);
-    formData.append("description_text", values.description_text);
+    formData.append("description_text", descriptionText);
 
-    if (fileList[0]?.originFileObj) {
-      formData.append("image", fileList[0].originFileObj as File);
+    if (uploadFile) {
+      formData.append("image", uploadFile);
     }
 
     setLoading(true);
     try {
       const result = await analyzeArchitecture(formData);
       setAnalysis(result);
+      if (!result.analysis_mode) {
+        message.warning("后端未返回分析引擎标识，请重启后端后重试");
+      }
       message.success("架构拆解完成");
     } catch {
       message.error("分析失败，请检查输入后重试");
@@ -177,7 +226,7 @@ export default function ArchitectureAnalysisPage() {
                 <InboxOutlined style={{ fontSize: 28 }} />
               </p>
               <p>点击或拖拽上传流程图</p>
-              <p style={{ color: "#75869a" }}>可选项，不上传则仅基于文字描述分析</p>
+              <p style={{ color: "#75869a" }}>上传后可直接分析；如填写文字描述将与流程图联合分析</p>
             </Upload.Dragger>
           </Card>
         </Col>
@@ -197,7 +246,6 @@ export default function ArchitectureAnalysisPage() {
               <Form.Item
                 name="description_text"
                 label="文字描述"
-                rules={[{ required: true, message: "请输入架构描述" }]}
               >
                 <Input.TextArea
                   rows={8}
@@ -216,6 +264,12 @@ export default function ArchitectureAnalysisPage() {
         <Alert style={{ marginTop: 16 }} type="info" message="完成分析后将在下方展示判断树、测试方案、风险点和用例矩阵" />
       ) : (
         <Card style={{ marginTop: 16 }}>
+          <Space style={{ marginBottom: 12 }} wrap>
+            <Typography.Text type="secondary">分析引擎</Typography.Text>
+            <Tag color={modeMeta.color}>{modeMeta.label}</Tag>
+            {modeMeta.hint ? <Typography.Text type="secondary">{modeMeta.hint}</Typography.Text> : null}
+          </Space>
+
           <Tabs
             items={[
               {

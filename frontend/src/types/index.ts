@@ -115,6 +115,7 @@ export interface GeneratedTestCase {
 
 export interface ArchitectureAnalysisResult {
   id: number;
+  analysis_mode: "llm" | "mock" | "mock_fallback";
   decision_tree: { nodes: DecisionTreeNode[] };
   test_plan: { markdown: string; sections: string[] };
   risk_points: RiskPoint[];
@@ -145,4 +146,82 @@ export interface ArchitectureImportResult {
   imported_rule_nodes: number;
   imported_test_cases: number;
   updated_risk_nodes: number;
+}
+
+export type RecoMode = "FULL" | "CHANGE";
+
+export interface RecoContributor {
+  node_id: string;
+  risk: number;
+}
+
+export interface RecoCaseResult {
+  rank: number;
+  case_id: number;
+  gain_risk: number;
+  gain_nodes: string[];
+  top_contributors: RecoContributor[];
+  why_selected: string;
+}
+
+export interface RecoSummary {
+  k: number;
+  picked: number;
+  covered_risk: number;
+  total_target_risk: number;
+  coverage_ratio: number;
+}
+
+export interface RecoGap {
+  node_id: string;
+  risk: number;
+}
+
+export interface RecoResponse {
+  run_id: number;
+  summary: RecoSummary;
+  cases: RecoCaseResult[];
+  remaining_high_risk_gaps: RecoGap[];
+}
+
+export interface RecoRun {
+  id: number;
+  requirement_id: number;
+  mode: RecoMode;
+  k: number;
+  input_changed_node_ids: string[];
+  total_target_risk: number;
+  covered_risk: number;
+  coverage_ratio: number;
+  created_at: string;
+}
+
+export interface RecoResultRow {
+  id: number;
+  run_id: number;
+  rank: number;
+  case_id: number;
+  gain_risk: number;
+  gain_node_ids: string[];
+  top_contributors: RecoContributor[];
+  why_selected: string;
+}
+
+export interface RecoRunDetail {
+  run: RecoRun;
+  results: RecoResultRow[];
+}
+
+export interface RecoCaseFilter {
+  status_in?: TestCaseStatus[];
+  case_ids?: number[];
+}
+
+export interface RecoRequest {
+  requirement_id: number;
+  mode: RecoMode;
+  k: number;
+  changed_node_ids?: string[];
+  case_filter?: RecoCaseFilter;
+  cost_mode?: "UNIT" | "TIME";
 }

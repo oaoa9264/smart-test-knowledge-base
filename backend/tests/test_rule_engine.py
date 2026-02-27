@@ -23,3 +23,14 @@ def test_derive_rule_paths_empty_when_no_roots():
     nodes = [{"id": "n1", "parent_id": "missing"}]
 
     assert derive_rule_paths(nodes) == []
+
+
+def test_derive_rule_paths_handles_cycle_without_recursion_error():
+    nodes = [
+        {"id": "root", "parent_id": None},
+        {"id": "a", "parent_id": "root"},
+        {"id": "b", "parent_id": "a"},
+        {"id": "a", "parent_id": "b"},
+    ]
+
+    assert derive_rule_paths(nodes) == [["root", "a", "b"]]

@@ -127,13 +127,19 @@ async def analyze_architecture(request: Request, db: Session = Depends(get_db)):
     requirement_id_raw = form.get("requirement_id")
     requirement_id = int(requirement_id_raw) if requirement_id_raw else None
     title = str(form.get("title") or "AI 架构拆解")
-    description_text = str(form.get("description_text") or "")
+    description_text = str(form.get("description_text") or "").strip()
 
     uploaded_file = form.get("image")
+    has_image = bool(uploaded_file and getattr(uploaded_file, "filename", None))
+    if not description_text and not has_image:
+        raise HTTPException(status_code=400, detail="description_text or image is required")
+
     image_path = _save_upload_file(uploaded_file)
 
     provider = get_analyzer_provider()
     result = provider.analyze(image_path=image_path, description=description_text, title=title)
+    analysis_mode = provider.get_analysis_mode()
+    persisted_result = {**result, "analysis_mode": analysis_mode}
 
     analysis = ArchitectureAnalysis(
         project_id=project_id,
@@ -141,14 +147,14 @@ async def analyze_architecture(request: Request, db: Session = Depends(get_db)):
         title=title,
         image_path=image_path,
         description_text=description_text,
-        analysis_result=json.dumps(result, ensure_ascii=False),
+        analysis_result=json.dumps(persisted_result, ensure_ascii=False),
         status=AnalysisStatus.completed,
     )
     db.add(analysis)
     db.commit()
     db.refresh(analysis)
 
-    return {"id": analysis.id, **result}
+    return {"id": analysis.id, **persisted_result}
 
 
 @router.get("/{analysis_id}", response_model=ArchitectureAnalysisRead)

@@ -237,3 +237,51 @@ def test_deleted_node_is_hidden_from_coverage_matrix():
     assert project_coverage_resp.status_code == 200
     assert project_coverage_resp.json()["summary"]["total_nodes"] == 0
     assert project_coverage_resp.json()["rows"] == []
+
+
+def test_update_node_rejects_cycle_parent_assignment():
+    project_resp = client.post(
+        "/api/projects",
+        json={"name": "P5-{0}".format(uuid4().hex[:8]), "description": "cycle-check"},
+    )
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    requirement_resp = client.post(
+        f"/api/projects/{project_id}/requirements",
+        json={"title": "环检测需求", "raw_text": "禁止形成环", "source_type": "prd"},
+    )
+    assert requirement_resp.status_code == 201
+    requirement_id = requirement_resp.json()["id"]
+
+    root_resp = client.post(
+        "/api/rules/nodes",
+        json={
+            "requirement_id": requirement_id,
+            "parent_id": None,
+            "node_type": "root",
+            "content": "root",
+            "risk_level": "high",
+        },
+    )
+    assert root_resp.status_code == 201
+    root_id = root_resp.json()["id"]
+
+    child_resp = client.post(
+        "/api/rules/nodes",
+        json={
+            "requirement_id": requirement_id,
+            "parent_id": root_id,
+            "node_type": "condition",
+            "content": "child",
+            "risk_level": "medium",
+        },
+    )
+    assert child_resp.status_code == 201
+    child_id = child_resp.json()["id"]
+
+    cycle_resp = client.put(
+        f"/api/rules/nodes/{root_id}",
+        json={"parent_id": child_id},
+    )
+    assert cycle_resp.status_code == 400

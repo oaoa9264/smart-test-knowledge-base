@@ -8,6 +8,7 @@ from app.api.architecture import BACKEND_DIR, router as architecture_router
 from app.api.ai_parse import router as ai_router
 from app.api.coverage import router as coverage_router
 from app.api.projects import router as project_router
+from app.api.recommendation import router as recommendation_router
 from app.api.rules import router as rule_router
 from app.api.testcases import router as testcase_router
 from app.core.database import engine
@@ -38,5 +39,6 @@ app.include_router(project_router)
 app.include_router(rule_router)
 app.include_router(testcase_router)
 app.include_router(coverage_router)
+app.include_router(recommendation_router)
 app.include_router(ai_router)
 app.include_router(architecture_router)

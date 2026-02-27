@@ -20,3 +20,48 @@ body,
   color: var(--text-main);
   background: radial-gradient(circle at 15% 20%, #e6f1ff 0, #f2f5f9 30%, #edf4fb 100%);
 }
+
+.focus-case-row > td {
+  background: #fff7e6 !important;
+  transition: background-color 0.3s ease;
+}
+
+.focus-case-row:hover > td {
+  background: #ffe7ba !important;
+}
+
+.test-case-detail-modal .ant-modal-body {
+  max-height: 72vh;
+  overflow-y: auto;
+}
+
+.test-case-detail-modal .ant-descriptions-view {
+  table-layout: fixed;
+}
+
+.test-case-detail-modal .ant-descriptions-item-label {
+  width: 96px;
+  white-space: normal;
+}
+
+.test-case-detail-modal .ant-descriptions-item-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.test-case-detail-modal .detail-chip-list {
+  width: 100%;
+}
+
+.test-case-detail-modal .detail-chip-list .ant-space-item {
+  max-width: 100%;
+}
+
+.test-case-detail-modal .detail-chip-list .ant-tag {
+  max-width: 100%;
+  height: auto;
+  margin-right: 0;
+  white-space: normal;
+  word-break: break-all;
+}

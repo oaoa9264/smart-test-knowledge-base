@@ -12,6 +12,48 @@ from app.services.rule_engine import derive_rule_paths
 router = APIRouter(prefix="/api/rules", tags=["rules"])
 
 
+def _assert_parent_chain_no_cycle(
+    db: Session,
+    requirement_id: int,
+    node_id: str,
+    parent_id: str,
+):
+    if parent_id == node_id:
+        raise HTTPException(status_code=400, detail="cycle detected in parent chain")
+
+    parent = (
+        db.query(RuleNode)
+        .filter(
+            RuleNode.id == parent_id,
+            RuleNode.requirement_id == requirement_id,
+            RuleNode.status != NodeStatus.deleted,
+        )
+        .first()
+    )
+    if not parent:
+        raise HTTPException(status_code=400, detail="invalid parent_id")
+
+    cursor = parent
+    visited = set()
+    while cursor:
+        if cursor.id == node_id or cursor.id in visited:
+            raise HTTPException(status_code=400, detail="cycle detected in parent chain")
+        visited.add(cursor.id)
+
+        if not cursor.parent_id:
+            break
+
+        cursor = (
+            db.query(RuleNode)
+            .filter(
+                RuleNode.id == cursor.parent_id,
+                RuleNode.requirement_id == requirement_id,
+                RuleNode.status != NodeStatus.deleted,
+            )
+            .first()
+        )
+
+
 def _regenerate_paths(db: Session, requirement_id: int):
     db.query(RulePath).filter(RulePath.requirement_id == requirement_id).delete()
 
@@ -66,8 +108,17 @@ def create_node(payload: RuleNodeCreate, db: Session = Depends(get_db)):
     if not requirement:
         raise HTTPException(status_code=404, detail="requirement not found")
 
+    node_id = str(uuid.uuid4())
+    if payload.parent_id:
+        _assert_parent_chain_no_cycle(
+            db=db,
+            requirement_id=payload.requirement_id,
+            node_id=node_id,
+            parent_id=payload.parent_id,
+        )
+
     node = RuleNode(
-        id=str(uuid.uuid4()),
+        id=node_id,
         requirement_id=payload.requirement_id,
         parent_id=payload.parent_id,
         node_type=payload.node_type,
@@ -102,6 +153,14 @@ def update_node(node_id: str, payload: RuleNodeUpdate, db: Session = Depends(get
     node = db.query(RuleNode).filter(RuleNode.id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="node not found")
+
+    if payload.parent_id is not None:
+        _assert_parent_chain_no_cycle(
+            db=db,
+            requirement_id=node.requirement_id,
+            node_id=node.id,
+            parent_id=payload.parent_id,
+        )
 
     changed_node_ids = [node.id]
     for field in ["parent_id", "node_type", "content", "risk_level", "status"]:

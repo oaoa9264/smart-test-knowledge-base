@@ -5,6 +5,7 @@ import {
   AppstoreOutlined,
   ClusterOutlined,
   DeploymentUnitOutlined,
+  FireOutlined,
   FolderOpenOutlined,
   TableOutlined,
 } from "@ant-design/icons";
@@ -15,6 +16,7 @@ import RuleTreePage from "./pages/RuleTree";
 import TestCasesPage from "./pages/TestCases";
 import CoveragePage from "./pages/Coverage";
 import ArchitectureAnalysisPage from "./pages/ArchitectureAnalysis";
+import RecommendationPage from "./pages/Recommendation";
 
 const { Header, Sider, Content } = Layout;
 
@@ -23,6 +25,7 @@ const menuItems = [
   { key: "/rule-tree", label: <Link to="/rule-tree">规则树</Link>, icon: <ClusterOutlined /> },
   { key: "/test-cases", label: <Link to="/test-cases">用例管理</Link>, icon: <AppstoreOutlined /> },
   { key: "/coverage", label: <Link to="/coverage">覆盖矩阵</Link>, icon: <TableOutlined /> },
+  { key: "/recommendation", label: <Link to="/recommendation">回归推荐</Link>, icon: <FireOutlined /> },
   { key: "/architecture", label: <Link to="/architecture">架构拆解</Link>, icon: <DeploymentUnitOutlined /> },
 ];
 
@@ -127,6 +130,7 @@ function AppShell() {
             <Route path="/rule-tree" element={<RuleTreePage />} />
             <Route path="/test-cases" element={<TestCasesPage />} />
             <Route path="/coverage" element={<CoveragePage />} />
+            <Route path="/recommendation" element={<RecommendationPage />} />
             <Route path="/architecture" element={<ArchitectureAnalysisPage />} />
           </Routes>
         </Content>
