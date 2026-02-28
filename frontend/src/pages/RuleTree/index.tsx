@@ -22,6 +22,7 @@ import {
   Modal,
   Select,
   Space,
+  Tree,
   Table,
   Tag,
   Typography,
@@ -29,7 +30,7 @@ import {
 } from "antd";
 import { aiParse, createRuleNode, deleteRuleNode, fetchRuleTree, updateRuleNode } from "../../api/rules";
 import { useAppStore } from "../../stores/appStore";
-import type { AIParseNode, RiskLevel, RuleNode } from "../../types";
+import type { AIParseNode, AIParseResult, RiskLevel, RuleNode } from "../../types";
 import { getNodeTypeLabel, riskLevelLabels } from "../../utils/enumLabels";
 
 const riskOptions: { label: string; value: RiskLevel }[] = [
@@ -47,7 +48,34 @@ const nodeTypeOptions = [
   { label: "异常", value: "exception" },
 ];
 
-function toFlowNodes(nodes: RuleNode[]): Node[] {
+const aiParseModeMeta: Record<
+  AIParseResult["analysis_mode"],
+  { label: string; alertType: "success" | "warning" | "info"; hint: string }
+> = {
+  llm: {
+    label: "LLM",
+    alertType: "success",
+    hint: "当前草稿由 LLM 生成。",
+  },
+  mock_fallback: {
+    label: "Mock（LLM降级）",
+    alertType: "warning",
+    hint: "LLM 不可用或返回异常，已自动降级到规则分句解析。",
+  },
+  mock: {
+    label: "Mock",
+    alertType: "info",
+    hint: "当前使用规则分句解析。",
+  },
+};
+
+type RuleTreeNavNode = {
+  key: string;
+  title: React.ReactNode;
+  children?: RuleTreeNavNode[];
+};
+
+function toFlowNodes(nodes: RuleNode[], focusedNodeId: string | null): Node[] {
   const levelMap = new Map<string, number>();
   const siblings: Record<string, number> = {};
 
@@ -68,6 +96,7 @@ function toFlowNodes(nodes: RuleNode[]): Node[] {
     const siblingKey = node.parent_id || "root";
     siblings[siblingKey] = (siblings[siblingKey] || 0) + 1;
     const order = siblings[siblingKey] - 1;
+    const isFocused = focusedNodeId === node.id;
 
     return {
       id: node.id,
@@ -78,10 +107,11 @@ function toFlowNodes(nodes: RuleNode[]): Node[] {
       },
       style: {
         borderRadius: 10,
-        border: "1px solid #84a9d5",
+        border: isFocused ? "2px solid #1677ff" : "1px solid #84a9d5",
         padding: 8,
         width: 180,
-        background: "#f8fcff",
+        background: isFocused ? "#eef6ff" : "#f8fcff",
+        boxShadow: isFocused ? "0 0 0 2px rgba(22, 119, 255, 0.15)" : undefined,
       },
     };
   });
@@ -98,12 +128,49 @@ function toFlowEdges(nodes: RuleNode[]): Edge[] {
     }));
 }
 
+function collectFocusSubgraphIds(
+  focusedNodeId: string,
+  nodeMap: Map<string, RuleNode>,
+  childrenMap: Map<string, string[]>,
+  maxChildDepth: number,
+): Set<string> {
+  if (!nodeMap.has(focusedNodeId)) return new Set();
+
+  const result = new Set<string>();
+
+  let currentId: string | null = focusedNodeId;
+  while (currentId) {
+    result.add(currentId);
+    const currentNode = nodeMap.get(currentId);
+    currentId = currentNode?.parent_id || null;
+  }
+
+  const queue: Array<{ id: string; depth: number }> = [{ id: focusedNodeId, depth: 0 }];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) break;
+    if (current.depth >= maxChildDepth) continue;
+    const childIds = childrenMap.get(current.id) || [];
+    childIds.forEach((childId) => {
+      result.add(childId);
+      queue.push({ id: childId, depth: current.depth + 1 });
+    });
+  }
+
+  return result;
+}
+
 export default function RuleTreePage() {
   const { selectedRequirementId } = useAppStore();
   const [domainNodes, setDomainNodes] = useState<RuleNode[]>([]);
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [showFullGraph, setShowFullGraph] = useState(false);
+  const [childDepth, setChildDepth] = useState(2);
+  const [treeSearch, setTreeSearch] = useState("");
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
 
   const [editingNode, setEditingNode] = useState<RuleNode | null>(null);
   const [form] = Form.useForm();
@@ -114,6 +181,7 @@ export default function RuleTreePage() {
   const [aiOpen, setAiOpen] = useState(false);
   const [aiText, setAiText] = useState("");
   const [aiDraft, setAiDraft] = useState<AIParseNode[]>([]);
+  const [aiParseMode, setAiParseMode] = useState<AIParseResult["analysis_mode"] | null>(null);
 
   const [lastImpact, setLastImpact] = useState<number[]>([]);
 
@@ -122,12 +190,12 @@ export default function RuleTreePage() {
       setDomainNodes([]);
       setNodes([]);
       setEdges([]);
+      setFocusedNodeId(null);
+      setExpandedKeys([]);
       return;
     }
     const tree = await fetchRuleTree(selectedRequirementId);
     setDomainNodes(tree.nodes);
-    setNodes(toFlowNodes(tree.nodes));
-    setEdges(toFlowEdges(tree.nodes));
   };
 
   useEffect(() => {
@@ -155,9 +223,150 @@ export default function RuleTreePage() {
     return map;
   }, [domainNodes]);
 
+  const childrenMap = useMemo(() => {
+    const map = new Map<string, string[]>();
+    domainNodes.forEach((node) => {
+      if (!node.parent_id) return;
+      const siblings = map.get(node.parent_id) || [];
+      siblings.push(node.id);
+      map.set(node.parent_id, siblings);
+    });
+    return map;
+  }, [domainNodes]);
+
+  const rootIds = useMemo(
+    () =>
+      domainNodes
+        .filter((node) => !node.parent_id || !nodeMap.has(node.parent_id))
+        .map((node) => node.id),
+    [domainNodes, nodeMap],
+  );
+
+  const allNodeIds = useMemo(() => domainNodes.map((node) => node.id), [domainNodes]);
+
+  const defaultExpandedKeys = useMemo(() => {
+    const keys: string[] = [];
+    const visited = new Set<string>();
+    const queue = rootIds.map((id) => ({ id, depth: 0 }));
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current || visited.has(current.id)) continue;
+      visited.add(current.id);
+      keys.push(current.id);
+
+      if (current.depth >= 2) continue;
+      const childIds = childrenMap.get(current.id) || [];
+      childIds.forEach((childId) => queue.push({ id: childId, depth: current.depth + 1 }));
+    }
+
+    return keys;
+  }, [childrenMap, rootIds]);
+
+  useEffect(() => {
+    if (domainNodes.length === 0) return;
+    if (!focusedNodeId || !nodeMap.has(focusedNodeId)) {
+      setFocusedNodeId(rootIds[0] || domainNodes[0].id);
+    }
+    if (expandedKeys.length === 0) {
+      setExpandedKeys(defaultExpandedKeys);
+    }
+  }, [defaultExpandedKeys, domainNodes, expandedKeys.length, focusedNodeId, nodeMap, rootIds]);
+
+  const matchedKeySet = useMemo(() => {
+    const keyword = treeSearch.trim().toLowerCase();
+    if (!keyword) return new Set<string>();
+
+    const keys = new Set<string>();
+    domainNodes.forEach((node) => {
+      if (!node.content.toLowerCase().includes(keyword)) return;
+
+      let cursor: RuleNode | undefined = node;
+      while (cursor) {
+        keys.add(cursor.id);
+        cursor = cursor.parent_id ? nodeMap.get(cursor.parent_id) : undefined;
+      }
+    });
+
+    return keys;
+  }, [domainNodes, nodeMap, treeSearch]);
+
+  useEffect(() => {
+    if (!treeSearch.trim()) return;
+    setExpandedKeys((prev) => Array.from(new Set([...prev, ...matchedKeySet])));
+  }, [matchedKeySet, treeSearch]);
+
+  const treeData = useMemo<RuleTreeNavNode[]>(() => {
+    const built = new Set<string>();
+    const buildNode = (nodeId: string, path: Set<string>): RuleTreeNavNode => {
+      const node = nodeMap.get(nodeId);
+      if (!node) {
+        return { key: nodeId, title: nodeId };
+      }
+
+      built.add(nodeId);
+      const shortText = node.content.length > 26 ? `${node.content.slice(0, 26)}...` : node.content;
+      if (path.has(nodeId)) {
+        return { key: nodeId, title: `${shortText} (循环)` };
+      }
+
+      const nextPath = new Set(path);
+      nextPath.add(nodeId);
+      const children = (childrenMap.get(nodeId) || []).map((childId) => buildNode(childId, nextPath));
+
+      return {
+        key: nodeId,
+        title: <span title={node.content}>{shortText}</span>,
+        children: children.length > 0 ? children : undefined,
+      };
+    };
+
+    const roots = rootIds.length > 0 ? rootIds : allNodeIds;
+    const data = roots.map((nodeId) => buildNode(nodeId, new Set<string>()));
+    allNodeIds.forEach((nodeId) => {
+      if (!built.has(nodeId)) {
+        data.push(buildNode(nodeId, new Set<string>()));
+      }
+    });
+    return data;
+  }, [allNodeIds, childrenMap, nodeMap, rootIds]);
+
+  const filteredTreeData = useMemo(() => {
+    if (!treeSearch.trim()) return treeData;
+
+    const filterNode = (node: RuleTreeNavNode): RuleTreeNavNode | null => {
+      const children = (node.children || [])
+        .map((child) => filterNode(child))
+        .filter((child): child is RuleTreeNavNode => child !== null);
+      const keepSelf = matchedKeySet.has(node.key);
+
+      if (!keepSelf && children.length === 0) return null;
+      return { ...node, children: children.length > 0 ? children : undefined };
+    };
+
+    return treeData
+      .map((node) => filterNode(node))
+      .filter((node): node is RuleTreeNavNode => node !== null);
+  }, [matchedKeySet, treeData, treeSearch]);
+
+  const visibleDomainNodes = useMemo(() => {
+    if (showFullGraph || !focusedNodeId) return domainNodes;
+
+    const visibleIds = collectFocusSubgraphIds(focusedNodeId, nodeMap, childrenMap, childDepth);
+    if (visibleIds.size === 0) return domainNodes;
+    return domainNodes.filter((node) => visibleIds.has(node.id));
+  }, [childDepth, childrenMap, domainNodes, focusedNodeId, nodeMap, showFullGraph]);
+
+  useEffect(() => {
+    setNodes(toFlowNodes(visibleDomainNodes, focusedNodeId));
+    setEdges(toFlowEdges(visibleDomainNodes));
+  }, [focusedNodeId, setEdges, setNodes, visibleDomainNodes]);
+
   const onNodeClick = (_event: React.MouseEvent, node: Node) => {
     const domainNode = nodeMap.get(node.id);
     if (!domainNode) return;
+    setFocusedNodeId(node.id);
+    setShowFullGraph(false);
     setEditingNode(domainNode);
     form.setFieldsValue(domainNode);
   };
@@ -203,6 +412,7 @@ export default function RuleTreePage() {
   const runAIParse = async () => {
     const result = await aiParse(aiText);
     setAiDraft(result.nodes);
+    setAiParseMode(result.analysis_mode);
   };
 
   const importAIDraft = async () => {
@@ -228,6 +438,7 @@ export default function RuleTreePage() {
     setAiOpen(false);
     setAiText("");
     setAiDraft([]);
+    setAiParseMode(null);
     await reload();
   };
 
@@ -251,26 +462,124 @@ export default function RuleTreePage() {
       {!selectedRequirementId ? (
         <Alert type="info" message="请先在顶部选择需求" />
       ) : (
-        <div style={{ flex: 1, border: "1px solid #d7e2ee", borderRadius: 10 }}>
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onNodeClick={onNodeClick}
-            onInit={setFlowInstance}
-            panOnDrag
-            panOnScroll
-            panOnScrollMode={PanOnScrollMode.Free}
-            fitView
-            fitViewOptions={{ padding: 0.2, minZoom: 0.05 }}
-            minZoom={0.05}
+        <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
+          <div
+            style={{
+              width: 320,
+              border: "1px solid #d7e2ee",
+              borderRadius: 10,
+              padding: 10,
+              display: "flex",
+              flexDirection: "column",
+            }}
           >
-            <Background gap={14} size={1} />
-            <Controls />
-            <MiniMap />
-          </ReactFlow>
+            <Typography.Text strong style={{ marginBottom: 8 }}>
+              规则目录
+            </Typography.Text>
+            <Input.Search
+              placeholder="搜索节点内容"
+              allowClear
+              value={treeSearch}
+              onChange={(event) => setTreeSearch(event.target.value)}
+            />
+            <Space style={{ marginTop: 8, marginBottom: 8 }}>
+              <Button size="small" onClick={() => setExpandedKeys(allNodeIds)}>
+                展开全部
+              </Button>
+              <Button size="small" onClick={() => setExpandedKeys(rootIds)}>
+                仅根节点
+              </Button>
+            </Space>
+            <Typography.Text type="secondary" style={{ marginBottom: 8 }}>
+              总节点 {domainNodes.length}，当前展示 {visibleDomainNodes.length}
+            </Typography.Text>
+            <div
+              style={{
+                flex: 1,
+                minHeight: 0,
+                overflow: "auto",
+                border: "1px solid #eef2f7",
+                borderRadius: 8,
+                padding: 6,
+              }}
+            >
+              <Tree
+                blockNode
+                showLine
+                selectedKeys={focusedNodeId ? [focusedNodeId] : []}
+                expandedKeys={expandedKeys}
+                onExpand={(keys) => setExpandedKeys(keys as string[])}
+                onSelect={(keys) => {
+                  const selectedId = keys[0] as string | undefined;
+                  if (!selectedId) return;
+                  setFocusedNodeId(selectedId);
+                  setShowFullGraph(false);
+                }}
+                treeData={filteredTreeData}
+              />
+            </div>
+          </div>
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              border: "1px solid #d7e2ee",
+              borderRadius: 10,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div style={{ padding: 10, borderBottom: "1px solid #eef2f7" }}>
+              <Space wrap>
+                <Typography.Text>
+                  {showFullGraph
+                    ? "当前：全图视图"
+                    : `焦点节点：${focusedNodeId ? nodeMap.get(focusedNodeId)?.content || focusedNodeId : "-"}`}
+                </Typography.Text>
+                <Select
+                  size="small"
+                  value={childDepth}
+                  disabled={showFullGraph || !focusedNodeId}
+                  onChange={(value) => setChildDepth(value)}
+                  options={[
+                    { label: "子节点 0 层", value: 0 },
+                    { label: "子节点 1 层", value: 1 },
+                    { label: "子节点 2 层", value: 2 },
+                    { label: "子节点 3 层", value: 3 },
+                    { label: "子节点 4 层", value: 4 },
+                  ]}
+                />
+                <Button
+                  size="small"
+                  onClick={() => setShowFullGraph((prev) => !prev)}
+                  disabled={!focusedNodeId && !showFullGraph}
+                >
+                  {showFullGraph ? "切回焦点视图" : "查看全图"}
+                </Button>
+              </Space>
+            </div>
+            <div style={{ flex: 1 }}>
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                onNodesChange={onNodesChange}
+                onEdgesChange={onEdgesChange}
+                onConnect={onConnect}
+                onNodeClick={onNodeClick}
+                onInit={setFlowInstance}
+                panOnDrag
+                panOnScroll
+                panOnScrollMode={PanOnScrollMode.Free}
+                fitView
+                fitViewOptions={{ padding: 0.2, minZoom: 0.05 }}
+                minZoom={0.05}
+              >
+                <Background gap={14} size={1} />
+                <Controls />
+                <MiniMap />
+              </ReactFlow>
+            </div>
+          </div>
         </div>
       )}
 
@@ -316,7 +625,10 @@ export default function RuleTreePage() {
       <Modal
         title="AI 半自动解析需求"
         open={aiOpen}
-        onCancel={() => setAiOpen(false)}
+        onCancel={() => {
+          setAiOpen(false);
+          setAiParseMode(null);
+        }}
         onOk={importAIDraft}
         okText="确认导入"
         width={840}
@@ -335,6 +647,15 @@ export default function RuleTreePage() {
             生成草稿
           </Button>
         </div>
+        {aiParseMode && (
+          <Alert
+            style={{ marginBottom: 10 }}
+            type={aiParseModeMeta[aiParseMode].alertType}
+            message={`解析引擎：${aiParseModeMeta[aiParseMode].label}`}
+            description={aiParseModeMeta[aiParseMode].hint}
+            showIcon
+          />
+        )}
         <Table
           size="small"
           rowKey="id"

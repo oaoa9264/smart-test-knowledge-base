@@ -26,7 +26,7 @@ const menuItems = [
   { key: "/test-cases", label: <Link to="/test-cases">用例管理</Link>, icon: <AppstoreOutlined /> },
   { key: "/coverage", label: <Link to="/coverage">覆盖矩阵</Link>, icon: <TableOutlined /> },
   { key: "/recommendation", label: <Link to="/recommendation">回归推荐</Link>, icon: <FireOutlined /> },
-  { key: "/architecture", label: <Link to="/architecture">架构拆解</Link>, icon: <DeploymentUnitOutlined /> },
+  { key: "/architecture", label: <Link to="/architecture">需求拆解</Link>, icon: <DeploymentUnitOutlined /> },
 ];
 
 function AppShell() {
@@ -84,7 +84,7 @@ function AppShell() {
   return (
     <Layout style={{ minHeight: "100vh" }}>
       <Sider theme="light" width={220}>
-        <div style={{ padding: 18, fontWeight: 700, color: "#0f3255" }}>测试知识库 MVP</div>
+        <div style={{ padding: 18, fontWeight: 700, color: "#0f3255" }}>智能测试结构平台</div>
         <Menu selectedKeys={[location.pathname]} mode="inline" items={menuItems} />
       </Sider>
       <Layout>

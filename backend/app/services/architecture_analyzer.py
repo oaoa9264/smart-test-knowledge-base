@@ -1,6 +1,7 @@
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+import logging
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.schemas.architecture import ArchitectureAnalysisResult
 from app.services.llm_client import LLMClient
@@ -11,6 +12,8 @@ from app.services.prompts.architecture import (
     VISION_USER_TEMPLATE,
 )
 from app.services.rule_engine import derive_rule_paths
+
+logger = logging.getLogger(__name__)
 
 
 class ArchitectureAnalyzerProvider:
@@ -58,17 +61,21 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
     def analyze(self, image_path: Optional[str], description: str, title: Optional[str] = None) -> Dict:
         normalized_desc = (description or "").strip()
         normalized_title = (title or "").strip()
+        stage = "init"
 
         try:
             architecture_understanding = normalized_desc
             if image_path:
+                stage = "vision"
                 architecture_understanding = self._vision_analyze(image_path=image_path, description=normalized_desc)
 
+            stage = "generate"
             generated = self._generate_artifacts(
                 architecture_understanding=architecture_understanding,
                 description=normalized_desc,
                 title=normalized_title,
             )
+            stage = "validate"
             validated, used_mock_fallback = self._validate_and_fallback(
                 generated,
                 image_path=image_path,
@@ -78,6 +85,13 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
             self._analysis_mode = "mock_fallback" if used_mock_fallback else "llm"
             return validated
         except Exception:
+            logger.exception(
+                "LLM analyze failed at stage=%s, fallback to mock (title=%s, has_image=%s, desc_len=%d)",
+                stage,
+                normalized_title or "<empty>",
+                bool(image_path),
+                len(normalized_desc),
+            )
             self._analysis_mode = "mock_fallback"
             return MockAnalyzerProvider().analyze(
                 image_path=image_path,
@@ -117,13 +131,31 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
         description: str,
         title: str,
     ) -> Tuple[Dict, bool]:
+        payload_summary = _summarize_payload_structure(payload)
         try:
             validated = ArchitectureAnalysisResult.parse_obj(payload).dict()
             _validate_related_node_ids(validated)
             return validated, False
-        except Exception:
-            fallback_result = MockAnalyzerProvider().analyze(image_path=image_path, description=description, title=title)
-            return fallback_result, True
+        except Exception as exc:
+            try:
+                normalized_payload = _normalize_llm_payload(payload, title=title)
+                normalized = ArchitectureAnalysisResult.parse_obj(normalized_payload).dict()
+                _validate_related_node_ids(normalized)
+                logger.info(
+                    "LLM payload normalized and accepted (title=%s, payload_summary=%s)",
+                    (title or "").strip() or "<empty>",
+                    payload_summary,
+                )
+                return normalized, False
+            except Exception as normalize_exc:
+                logger.warning(
+                    "LLM payload invalid, fallback to mock (%s, raw_error=%s, normalize_error=%s)",
+                    payload_summary,
+                    exc,
+                    normalize_exc,
+                )
+                fallback_result = MockAnalyzerProvider().analyze(image_path=image_path, description=description, title=title)
+                return fallback_result, True
 
 
 def get_analyzer_provider() -> ArchitectureAnalyzerProvider:
@@ -366,6 +398,406 @@ def _path_risk_level(risk_levels: List[str]) -> str:
     if not risk_levels:
         return "medium"
     return sorted(risk_levels, key=lambda level: weight.get(level, 0), reverse=True)[0]
+
+
+def _normalize_llm_payload(payload: Any, title: str) -> Dict:
+    if not isinstance(payload, dict):
+        raise ValueError("LLM payload must be object to normalize")
+
+    normalized_payload = _unwrap_payload_envelope(payload)
+    if not _has_artifact_signal(normalized_payload):
+        raise ValueError("LLM payload missing recognizable artifact fields")
+
+    decision_tree = _pick_payload_value(normalized_payload, ["decision_tree", "decisionTree", "tree", "rule_tree"])
+    nodes = _normalize_decision_tree_nodes(_extract_items(decision_tree, ["nodes", "items", "list", "children"]))
+    node_ids = {node["id"] for node in nodes}
+    root_node_id = nodes[0]["id"] if nodes else None
+
+    test_plan_payload = _pick_payload_value(normalized_payload, ["test_plan", "testPlan", "plan", "test_strategy"])
+    if isinstance(test_plan_payload, dict):
+        markdown = _coerce_text(
+            _pick_payload_value(test_plan_payload, ["markdown", "content", "plan", "text", "body"])
+        )
+        sections = _normalize_sections(_pick_payload_value(test_plan_payload, ["sections", "outline", "items", "list"]))
+    elif isinstance(test_plan_payload, str):
+        markdown = _coerce_text(test_plan_payload)
+        sections = []
+    else:
+        markdown = ""
+        sections = []
+
+    if not markdown:
+        markdown = "# AI 生成测试方案"
+    if not sections:
+        sections = ["scope", "strategy", "environment", "schedule", "exit_criteria"]
+
+    normalized = {
+        "decision_tree": {"nodes": nodes},
+        "test_plan": {"markdown": markdown, "sections": sections},
+        "risk_points": _normalize_risk_points(
+            _pick_payload_value(normalized_payload, ["risk_points", "riskPoints", "risks", "risk_list"]),
+            node_ids,
+            root_node_id,
+        ),
+        "test_cases": _normalize_test_cases(
+            _pick_payload_value(normalized_payload, ["test_cases", "testCases", "cases", "generated_cases"]),
+            node_ids,
+            root_node_id,
+            title=title,
+        ),
+    }
+    return normalized
+
+
+def _unwrap_payload_envelope(payload: Dict[str, Any]) -> Dict[str, Any]:
+    current: Any = payload
+    for _ in range(3):
+        if not isinstance(current, dict):
+            break
+        if _has_artifact_signal(current):
+            return current
+
+        wrapped = _pick_payload_value(current, ["data", "result", "output", "analysis", "payload", "response"])
+        if isinstance(wrapped, dict):
+            current = wrapped
+            continue
+        break
+    return payload
+
+
+def _has_artifact_signal(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key in payload.keys():
+        normalized = _normalize_key_name(key)
+        if normalized in {
+            "decisiontree",
+            "tree",
+            "ruletree",
+            "testplan",
+            "plan",
+            "riskpoints",
+            "risks",
+            "testcases",
+            "cases",
+        }:
+            return True
+    return False
+
+
+def _pick_payload_value(payload: Any, candidate_keys: List[str]) -> Any:
+    if not isinstance(payload, dict):
+        return None
+
+    for key in candidate_keys:
+        if key in payload:
+            return payload.get(key)
+
+    normalized_candidates = {_normalize_key_name(key): key for key in candidate_keys}
+    for key, value in payload.items():
+        if _normalize_key_name(key) in normalized_candidates:
+            return value
+    return None
+
+
+def _normalize_key_name(value: Any) -> str:
+    text = _coerce_text(value)
+    if not text:
+        return ""
+    return re.sub(r"[\s_\-]+", "", text).lower()
+
+
+def _extract_items(raw_value: Any, list_keys: List[str]) -> List[Any]:
+    if isinstance(raw_value, list):
+        return raw_value
+    if isinstance(raw_value, dict):
+        nested = _pick_payload_value(raw_value, list_keys)
+        if isinstance(nested, list):
+            return nested
+        if nested is not None:
+            return [nested]
+    return []
+
+
+def _normalize_decision_tree_nodes(raw_nodes: Any) -> List[Dict]:
+    nodes: List[Dict] = []
+    used_ids: Set[str] = set()
+    items = raw_nodes if isinstance(raw_nodes, list) else []
+
+    for item in items:
+        node = item if isinstance(item, dict) else {"content": _coerce_text(item)}
+        node_id = _coerce_text(_pick_payload_value(node, ["id", "node_id", "nodeId", "key"]))
+        if not node_id or node_id in used_ids:
+            node_id = "dt_{0}".format(len(nodes) + 1)
+
+        node_type = _normalize_node_type(_pick_payload_value(node, ["type", "node_type", "nodeType"]), is_first=len(nodes) == 0)
+        content = (
+            _coerce_text(_pick_payload_value(node, ["content", "text", "name", "title", "label", "description"]))
+            or "节点{0}".format(len(nodes) + 1)
+        )
+        risk_level = _normalize_risk_level(_pick_payload_value(node, ["risk_level", "risk", "severity", "level"]))
+        parent_id = _coerce_text(_pick_payload_value(node, ["parent_id", "parentId", "parent"])) or None
+
+        nodes.append(
+            {
+                "id": node_id,
+                "type": node_type,
+                "content": content,
+                "parent_id": parent_id,
+                "risk_level": risk_level,
+            }
+        )
+        used_ids.add(node_id)
+
+    if not nodes:
+        return [
+            {
+                "id": "dt_1",
+                "type": "root",
+                "content": "待补充系统流程描述",
+                "parent_id": None,
+                "risk_level": "medium",
+            }
+        ]
+
+    node_ids = {node["id"] for node in nodes}
+    root_id = nodes[0]["id"]
+    for index, node in enumerate(nodes):
+        if index == 0:
+            node["type"] = "root"
+            node["parent_id"] = None
+            continue
+
+        if node.get("parent_id") not in node_ids or node.get("parent_id") == node["id"]:
+            node["parent_id"] = root_id
+
+    return nodes
+
+
+def _normalize_sections(raw_sections: Any) -> List[str]:
+    if isinstance(raw_sections, str):
+        raw_sections = [part for part in re.split(r"[,，\s]+", raw_sections) if part]
+    elif not isinstance(raw_sections, list):
+        return []
+
+    sections: List[str] = []
+    for item in raw_sections:
+        if isinstance(item, dict):
+            value = (
+                item.get("name")
+                or item.get("id")
+                or item.get("title")
+                or item.get("section")
+                or item.get("value")
+            )
+        else:
+            value = item
+
+        text = _coerce_text(value)
+        if text and text not in sections:
+            sections.append(text)
+    return sections
+
+
+def _normalize_risk_points(raw_risks: Any, node_ids: Set[str], default_node_id: Optional[str]) -> List[Dict]:
+    raw_risks = _extract_items(raw_risks, ["items", "risk_points", "risks", "list", "data"])
+    if not raw_risks:
+        return []
+
+    normalized: List[Dict] = []
+    for index, item in enumerate(raw_risks, start=1):
+        risk = item if isinstance(item, dict) else {"description": _coerce_text(item)}
+        risk_id = _coerce_text(_pick_payload_value(risk, ["id", "risk_id", "riskId"])) or "rp_{0}".format(index)
+        description = (
+            _coerce_text(_pick_payload_value(risk, ["description", "content", "text", "name", "title"]))
+            or "风险点{0}".format(index)
+        )
+        severity = _normalize_risk_level(_pick_payload_value(risk, ["severity", "risk_level", "risk", "level"]))
+        mitigation = _coerce_text(_pick_payload_value(risk, ["mitigation", "suggestion", "advice", "action"])) or "补充边界条件用例并加入告警/重试保护。"
+        related_node_ids = _normalize_related_node_ids(
+            _pick_payload_value(risk, ["related_node_ids", "node_ids", "nodeIds", "relatedNodes"]),
+            node_ids=node_ids,
+            default_node_id=default_node_id,
+        )
+
+        normalized.append(
+            {
+                "id": risk_id,
+                "description": description,
+                "severity": severity,
+                "mitigation": mitigation,
+                "related_node_ids": related_node_ids,
+            }
+        )
+    return normalized
+
+
+def _normalize_test_cases(raw_cases: Any, node_ids: Set[str], default_node_id: Optional[str], title: str) -> List[Dict]:
+    normalized: List[Dict] = []
+    raw_cases = _extract_items(raw_cases, ["items", "test_cases", "cases", "list", "data"])
+    if raw_cases:
+        for index, item in enumerate(raw_cases, start=1):
+            case = item if isinstance(item, dict) else {"title": _coerce_text(item)}
+            case_title = _coerce_text(_pick_payload_value(case, ["title", "name", "case_name"])) or "{0}-用例{1}".format((title or "架构分析").strip(), index)
+            steps = _coerce_multiline_text(_pick_payload_value(case, ["steps", "step", "actions", "procedure"])) or "待补充执行步骤"
+            expected_result = (
+                _coerce_text(_pick_payload_value(case, ["expected_result", "expected", "result", "assertion"]))
+                or "行为符合预期"
+            )
+            risk_level = _normalize_risk_level(_pick_payload_value(case, ["risk_level", "risk", "severity", "level"]))
+            related_node_ids = _normalize_related_node_ids(
+                _pick_payload_value(case, ["related_node_ids", "node_ids", "nodeIds", "relatedNodes"]),
+                node_ids=node_ids,
+                default_node_id=default_node_id,
+            )
+
+            normalized.append(
+                {
+                    "title": case_title,
+                    "steps": steps,
+                    "expected_result": expected_result,
+                    "risk_level": risk_level,
+                    "related_node_ids": related_node_ids,
+                }
+            )
+
+    if not normalized and default_node_id:
+        normalized.append(
+            {
+                "title": "{0}-默认用例".format((title or "架构分析").strip()),
+                "steps": "验证关键流程节点",
+                "expected_result": "流程行为符合预期",
+                "risk_level": "medium",
+                "related_node_ids": [default_node_id],
+            }
+        )
+    return normalized
+
+
+def _normalize_related_node_ids(raw_related_ids: Any, node_ids: Set[str], default_node_id: Optional[str]) -> List[str]:
+    values: List[Any] = []
+    if isinstance(raw_related_ids, list):
+        values = raw_related_ids
+    elif isinstance(raw_related_ids, tuple):
+        values = list(raw_related_ids)
+    elif isinstance(raw_related_ids, str):
+        values = [part for part in re.split(r"[,，\s]+", raw_related_ids) if part]
+    elif raw_related_ids is not None:
+        values = [raw_related_ids]
+
+    normalized: List[str] = []
+    for item in values:
+        node_id = _coerce_text(item)
+        if node_id and node_id in node_ids and node_id not in normalized:
+            normalized.append(node_id)
+
+    if not normalized and default_node_id and default_node_id in node_ids:
+        normalized.append(default_node_id)
+    return normalized
+
+
+def _normalize_node_type(value: Any, is_first: bool) -> str:
+    if isinstance(value, dict):
+        value = _pick_payload_value(value, ["type", "node_type", "nodeType", "value", "name"])
+    normalized = _coerce_text(value).lower()
+    mapping = {
+        "root": "root",
+        "condition": "condition",
+        "branch": "branch",
+        "action": "action",
+        "exception": "exception",
+        "根节点": "root",
+        "根": "root",
+        "条件": "condition",
+        "分支": "branch",
+        "动作": "action",
+        "行为": "action",
+        "异常": "exception",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    return "root" if is_first else "branch"
+
+
+def _normalize_risk_level(value: Any) -> str:
+    if isinstance(value, dict):
+        value = _pick_payload_value(value, ["risk_level", "risk", "severity", "level", "value"])
+    normalized = _coerce_text(value).lower()
+    if not normalized:
+        return "medium"
+
+    mapping = {
+        "critical": "critical",
+        "high": "high",
+        "medium": "medium",
+        "low": "low",
+        "严重": "critical",
+        "高": "high",
+        "中": "medium",
+        "中等": "medium",
+        "一般": "medium",
+        "低": "low",
+        "major": "high",
+        "minor": "low",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    if "critical" in normalized or "严重" in normalized:
+        return "critical"
+    if "high" in normalized or "高" in normalized:
+        return "high"
+    if "low" in normalized or "低" in normalized:
+        return "low"
+    return "medium"
+
+
+def _coerce_multiline_text(value: Any) -> str:
+    if isinstance(value, list):
+        lines = [_coerce_text(item) for item in value]
+        lines = [line for line in lines if line]
+        return "\n".join(lines)
+    return _coerce_text(value)
+
+
+def _coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value).strip()
+    if isinstance(value, dict):
+        for key in ["text", "content", "value", "name", "title", "label", "description"]:
+            text = _coerce_text(value.get(key))
+            if text:
+                return text
+        return str(value).strip()
+    if isinstance(value, list):
+        parts = [_coerce_text(item) for item in value]
+        parts = [part for part in parts if part]
+        return " ".join(parts)
+    return str(value).strip()
+
+
+def _summarize_payload_structure(payload: Any) -> str:
+    if isinstance(payload, dict):
+        items: List[str] = []
+        for key, value in list(payload.items())[:8]:
+            items.append("{0}:{1}".format(key, _payload_value_shape(value)))
+        if len(payload) > 8:
+            items.append("...+{0}".format(len(payload) - 8))
+        return "dict({0})".format(", ".join(items))
+    return "payload_type={0}".format(type(payload).__name__)
+
+
+def _payload_value_shape(value: Any) -> str:
+    if isinstance(value, dict):
+        return "dict[{0}]".format(len(value))
+    if isinstance(value, list):
+        return "list[{0}]".format(len(value))
+    if isinstance(value, str):
+        return "str[{0}]".format(len(value))
+    return type(value).__name__
 
 
 def _validate_related_node_ids(payload: Dict) -> None:

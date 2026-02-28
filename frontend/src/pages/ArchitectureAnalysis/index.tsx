@@ -151,7 +151,7 @@ export default function ArchitectureAnalysisPage() {
     const descriptionText = String(values.description_text || "").trim();
     const uploadFile = resolveUploadFile(fileList[0]);
     if (!descriptionText && !uploadFile) {
-      message.warning("请上传流程图或填写架构描述");
+      message.warning("请上传流程图或填写需求描述");
       return;
     }
 
@@ -171,7 +171,7 @@ export default function ArchitectureAnalysisPage() {
       if (!result.analysis_mode) {
         message.warning("后端未返回分析引擎标识，请重启后端后重试");
       }
-      message.success("架构拆解完成");
+      message.success("需求拆解完成");
     } catch {
       message.error("分析失败，请检查输入后重试");
     } finally {
@@ -204,7 +204,7 @@ export default function ArchitectureAnalysisPage() {
   return (
     <div>
       <Typography.Title level={4} style={{ marginTop: 0 }}>
-        AI 辅助架构拆解
+        需求拆解
       </Typography.Title>
 
       <Row gutter={16}>
@@ -232,16 +232,10 @@ export default function ArchitectureAnalysisPage() {
         </Col>
 
         <Col span={16}>
-          <Card title="架构描述">
-            <Form
-              layout="vertical"
-              form={form}
-              initialValues={{
-                title: "系统架构拆解",
-              }}
-            >
-              <Form.Item name="title" label="分析标题" rules={[{ required: true, message: "请输入标题" }]}>
-                <Input placeholder="例如：提现流程架构拆解" />
+          <Card title="需求描述">
+            <Form layout="vertical" form={form}>
+              <Form.Item name="title" label="需求标题" rules={[{ required: true, message: "请输入标题" }]}>
+                <Input placeholder="例如：提现流程需求拆解" />
               </Form.Item>
               <Form.Item
                 name="description_text"

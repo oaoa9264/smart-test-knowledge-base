@@ -102,6 +102,26 @@ def test_chat_with_json_can_extract_json_from_wrapped_text(monkeypatch):
     assert parsed["count"] == 2
 
 
+def test_chat_with_json_handles_double_encoded_json(monkeypatch):
+    monkeypatch.setenv("ZHIPU_API_KEY", "test-key")
+    module = _reload_llm_client_module()
+    client = module.LLMClient()
+
+    response = _FakeResponse(
+        lines=[
+            'data: {"choices":[{"delta":{"content":"\\"{\\\\\\"result\\\\\\":\\\\\\"ok\\\\\\",\\\\\\"count\\\\\\":2}\\""}}]}',
+            "data: [DONE]",
+        ]
+    )
+    fake_session = _FakeSession(response)
+    monkeypatch.setattr(client, "_make_client", lambda: fake_session)
+
+    parsed = client.chat_with_json(system_prompt="system", user_prompt="user")
+
+    assert parsed["result"] == "ok"
+    assert parsed["count"] == 2
+
+
 def test_chat_with_vision_returns_joined_stream_text(monkeypatch):
     monkeypatch.setenv("ZHIPU_API_KEY", "test-key")
     module = _reload_llm_client_module()

@@ -126,7 +126,7 @@ async def analyze_architecture(request: Request, db: Session = Depends(get_db)):
 
     requirement_id_raw = form.get("requirement_id")
     requirement_id = int(requirement_id_raw) if requirement_id_raw else None
-    title = str(form.get("title") or "AI 架构拆解")
+    title = str(form.get("title") or "需求拆解")
     description_text = str(form.get("description_text") or "").strip()
 
     uploaded_file = form.get("image")
@@ -186,7 +186,7 @@ def import_analysis(
     if not requirement:
         requirement = Requirement(
             project_id=analysis.project_id,
-            title="{0} - 架构拆解".format(analysis.title),
+            title="{0} - 需求拆解".format(analysis.title),
             raw_text=analysis.description_text or "",
             source_type=SourceType.flowchart,
         )
@@ -263,7 +263,7 @@ def import_analysis(
         for case_data in result.get("test_cases", []):
             case = TestCase(
                 project_id=analysis.project_id,
-                title=case_data.get("title", "架构拆解生成用例"),
+                title=case_data.get("title", "需求拆解生成用例"),
                 steps=case_data.get("steps", ""),
                 expected_result=case_data.get("expected_result", ""),
                 risk_level=_to_risk_level(case_data.get("risk_level", "medium")),

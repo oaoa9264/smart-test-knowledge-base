@@ -80,6 +80,7 @@ export interface AIParseNode {
 }
 
 export interface AIParseResult {
+  analysis_mode: "llm" | "mock" | "mock_fallback";
   nodes: AIParseNode[];
 }
 

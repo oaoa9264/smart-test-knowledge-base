@@ -72,13 +72,27 @@ class LLMClient:
                 if self.thinking_type:
                     payload["thinking"] = {"type": self.thinking_type}
                 payload.update(kwargs)
+                logger.info(
+                    "LLM request start (attempt=%d/%d, model=%s, url=%s)",
+                    attempt + 1,
+                    retries + 1,
+                    model,
+                    self.api_url,
+                )
                 return self._stream_chat_completion(payload)
             except Exception as exc:  # pragma: no cover - external network failure
                 last_error = exc
                 if attempt >= retries:
                     raise
                 wait_seconds = 0.4 * (attempt + 1)
-                logger.warning("LLM call failed, retrying in %.1fs: %s", wait_seconds, exc)
+                logger.warning(
+                    "LLM call failed (attempt=%d/%d), retrying in %.1fs: %s: %s",
+                    attempt + 1,
+                    retries + 1,
+                    wait_seconds,
+                    type(exc).__name__,
+                    exc,
+                )
                 time.sleep(wait_seconds)
         raise RuntimeError("LLM call failed unexpectedly") from last_error
 
@@ -108,6 +122,11 @@ class LLMClient:
                         error_body = response.json()
                     except Exception:
                         error_body = response.text
+                    logger.error(
+                        "LLM HTTP error status=%s body=%s",
+                        response.status_code,
+                        self._truncate_text(error_body, 800),
+                    )
                     raise RuntimeError("HTTP {0}: {1}".format(response.status_code, error_body))
 
                 for data in self._iter_sse_events(response):
@@ -137,14 +156,24 @@ class LLMClient:
         finally:
             client.close()
 
+        if not content_acc:
+            logger.warning(
+                "LLM stream completed with empty content (reasoning_len=%d, model=%s)",
+                len("".join(reasoning_acc)),
+                payload.get("model"),
+            )
+
         return "".join(reasoning_acc), "".join(content_acc)
 
     @staticmethod
     def _iter_sse_events(response: Any) -> Generator[str, None, None]:
-        for raw in response.iter_lines(decode_unicode=True):
+        for raw in response.iter_lines():
             if not raw:
                 continue
-            line = raw.strip()
+            if isinstance(raw, bytes):
+                line = raw.decode("utf-8", errors="ignore").strip()
+            else:
+                line = raw.strip()
             if line.startswith("data:"):
                 yield line[5:].strip()
 
@@ -177,10 +206,36 @@ class LLMClient:
         if not text:
             raise ValueError("JSON response is empty")
 
+        used_extraction = False
         try:
             parsed = json.loads(text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            logger.info(
+                "LLM JSON parse failed on raw text, trying object extraction (error=%s, content=%s)",
+                exc,
+                LLMClient._truncate_text(text, 300),
+            )
+            used_extraction = True
             parsed = json.loads(LLMClient._extract_json_object_text(text))
+
+        decode_depth = 0
+        while isinstance(parsed, str) and decode_depth < 2:
+            nested_text = parsed.strip()
+            if not nested_text:
+                break
+            decode_depth += 1
+            try:
+                parsed = json.loads(nested_text)
+                continue
+            except json.JSONDecodeError:
+                parsed = json.loads(LLMClient._extract_json_object_text(nested_text))
+
+        if decode_depth > 0 or used_extraction:
+            logger.info(
+                "LLM JSON parse recovered non-standard response (decode_depth=%d, used_extraction=%s)",
+                decode_depth,
+                used_extraction,
+            )
 
         if not isinstance(parsed, dict):
             raise ValueError("JSON response top-level must be object")
@@ -193,6 +248,19 @@ class LLMClient:
         if left == -1 or right == -1 or right <= left:
             raise ValueError("Cannot locate JSON object in model output")
         return text[left : right + 1]
+
+    @staticmethod
+    def _truncate_text(value: Any, max_len: int = 500) -> str:
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                text = str(value)
+        if len(text) <= max_len:
+            return text
+        return "{0}...<truncated>".format(text[:max_len])
 
     @staticmethod
     def image_to_base64_url(file_path: str) -> str:

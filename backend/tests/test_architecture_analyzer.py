@@ -75,7 +75,7 @@ def test_mock_analyzer_returns_four_artifacts():
 
     result = provider.analyze(
         image_path=None,
-        title="提现架构拆解",
+        title="提现需求拆解",
         description=(
             "用户提交提现申请。如果用户未实名认证，则拒绝提现。"
             "如果已实名认证，检查余额是否充足。余额充足则发起转账。"
@@ -90,7 +90,7 @@ def test_mock_analyzer_returns_four_artifacts():
 
     assert len(result["decision_tree"]["nodes"]) >= 3
     assert len(result["test_cases"]) >= 2
-    assert result["test_cases"][0]["title"].startswith("提现架构拆解-路径用例")
+    assert result["test_cases"][0]["title"].startswith("提现需求拆解-路径用例")
     assert any(point["severity"] in ["critical", "high"] for point in result["risk_points"])
     assert provider.get_analysis_mode() == "mock"
 
@@ -101,7 +101,7 @@ def test_llm_analyzer_text_only_skips_vision_stage():
 
     result = provider.analyze(
         image_path=None,
-        title="提现架构拆解",
+        title="提现需求拆解",
         description="用户提交提现申请并校验余额。",
     )
 
@@ -118,7 +118,7 @@ def test_llm_analyzer_with_image_runs_two_stages():
 
     provider.analyze(
         image_path="/tmp/withdraw_flow.png",
-        title="提现架构拆解",
+        title="提现需求拆解",
         description="用户提交提现申请。",
     )
 
@@ -134,11 +134,11 @@ def test_llm_analyzer_fallbacks_to_mock_on_llm_error():
 
     result = provider.analyze(
         image_path=None,
-        title="提现架构拆解",
+        title="提现需求拆解",
         description="用户提交提现申请。如果余额不足，则拒绝提现。",
     )
 
-    assert result["test_cases"][0]["title"].startswith("提现架构拆解-路径用例")
+    assert result["test_cases"][0]["title"].startswith("提现需求拆解-路径用例")
     assert provider.get_analysis_mode() == "mock_fallback"
 
 
@@ -154,6 +154,113 @@ def test_llm_analyzer_fallbacks_to_mock_on_invalid_llm_payload():
 
     assert result["test_cases"][0]["title"].startswith("退款流程拆解-路径用例")
     assert provider.get_analysis_mode() == "mock_fallback"
+
+
+def test_llm_analyzer_normalizes_common_payload_shape_drifts():
+    drift_payload = {
+        "decision_tree": {
+            "nodes": [
+                {
+                    "type": "root",
+                    "content": "用户提交提现申请",
+                    "risk_level": "HIGH",
+                }
+            ]
+        },
+        "test_plan": {
+            "markdown": "# AI 生成测试方案",
+            "sections": [{"name": "scope"}, {"name": "strategy"}],
+        },
+        "risk_points": [
+            {
+                "description": "转账链路有超时风险",
+                "severity": "高",
+                "mitigation": "增加重试与超时兜底",
+            }
+        ],
+        "test_cases": [
+            {
+                "title": "提现主链路验证",
+                "steps": ["验证用户申请", "验证余额扣减", "验证转账结果"],
+                "expected_result": "主链路执行成功",
+                "risk_level": "中",
+                "related_node_ids": "dt_1",
+            }
+        ],
+    }
+    fake_llm = _FakeLLMClient(json_result=drift_payload)
+    provider = LLMAnalyzerProvider(llm_client=fake_llm)
+
+    result = provider.analyze(
+        image_path=None,
+        title="提现需求拆解",
+        description="用户提交提现申请并校验余额。",
+    )
+
+    assert provider.get_analysis_mode() == "llm"
+    assert result["decision_tree"]["nodes"][0]["id"] == "dt_1"
+    assert result["test_plan"]["sections"] == ["scope", "strategy"]
+    assert result["risk_points"][0]["id"] == "rp_1"
+    assert result["risk_points"][0]["related_node_ids"] == ["dt_1"]
+    assert isinstance(result["test_cases"][0]["steps"], str)
+    assert result["test_cases"][0]["related_node_ids"] == ["dt_1"]
+
+
+def test_llm_analyzer_normalizes_enveloped_alias_payload():
+    drift_payload = {
+        "data": {
+            "decisionTree": [
+                {
+                    "nodeId": "root_1",
+                    "nodeType": "根节点",
+                    "text": "用户提交提现申请",
+                    "risk": "高",
+                }
+            ],
+            "testPlan": {
+                "content": "# 方案\n- 覆盖主链路",
+                "outline": ["scope", {"title": "strategy"}],
+            },
+            "riskPoints": {
+                "items": [
+                    {
+                        "content": "转账链路超时风险",
+                        "level": "严重",
+                        "node_ids": "root_1",
+                    }
+                ]
+            },
+            "testCases": {
+                "items": [
+                    {
+                        "name": "提现主链路验证",
+                        "actions": ["验证申请", "验证余额扣减", "验证转账结果"],
+                        "expected": "主链路执行成功",
+                        "risk": "中",
+                        "node_ids": ["root_1"],
+                    }
+                ]
+            },
+        }
+    }
+    fake_llm = _FakeLLMClient(json_result=drift_payload)
+    provider = LLMAnalyzerProvider(llm_client=fake_llm)
+
+    result = provider.analyze(
+        image_path=None,
+        title="提现需求拆解",
+        description="用户提交提现申请并校验余额。",
+    )
+
+    assert provider.get_analysis_mode() == "llm"
+    assert result["decision_tree"]["nodes"][0]["id"] == "root_1"
+    assert result["decision_tree"]["nodes"][0]["type"] == "root"
+    assert result["test_plan"]["sections"] == ["scope", "strategy"]
+    assert result["risk_points"][0]["severity"] == "critical"
+    assert result["risk_points"][0]["related_node_ids"] == ["root_1"]
+    assert result["test_cases"][0]["title"] == "提现主链路验证"
+    assert isinstance(result["test_cases"][0]["steps"], str)
+    assert result["test_cases"][0]["related_node_ids"] == ["root_1"]
 
 
 def test_mock_analyzer_combines_description_and_flowchart_context():
@@ -202,7 +309,7 @@ def test_architecture_api_analyze_get_import_flow(monkeypatch):
         "/api/ai/architecture/analyze",
         data={
             "project_id": str(project_id),
-            "title": "提现架构拆解",
+            "title": "提现需求拆解",
             "description_text": (
                 "用户提交提现申请。如果用户未实名认证，则拒绝提现。"
                 "如果已实名认证，检查余额是否充足。余额不足则提示余额不足。"
@@ -214,7 +321,7 @@ def test_architecture_api_analyze_get_import_flow(monkeypatch):
     analyze_data = analyze_resp.json()
     assert analyze_data["analysis_mode"] == "mock"
     analysis_id = analyze_data["id"]
-    assert analyze_data["test_cases"][0]["title"].startswith("提现架构拆解-路径用例")
+    assert analyze_data["test_cases"][0]["title"].startswith("提现需求拆解-路径用例")
 
     get_resp = client.get(f"/api/ai/architecture/{analysis_id}")
     assert get_resp.status_code == 200
@@ -242,4 +349,4 @@ def test_architecture_api_analyze_get_import_flow(monkeypatch):
     case_resp = client.get(f"/api/testcases/projects/{project_id}")
     assert case_resp.status_code == 200
     assert len(case_resp.json()) > 0
-    assert case_resp.json()[0]["title"].startswith("提现架构拆解-路径用例")
+    assert case_resp.json()[0]["title"].startswith("提现需求拆解-路径用例")

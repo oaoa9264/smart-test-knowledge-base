@@ -1,5 +1,5 @@
 ---
-name: 架构拆解接入LLM
+name: 需求拆解接入LLM
 overview: 在现有 Provider 模式基础上，实现 LLMAnalyzerProvider 接入智谱 GLM-4V 多模态大模型，采用两阶段调用策略生成四种产物（判断树、测试方案、风险点、用例矩阵）。
 todos:
   - id: llm-client
@@ -20,7 +20,7 @@ todos:
 isProject: false
 ---
 
-# 架构拆解模块接入智谱 GLM-4V 设计方案
+# 需求拆解模块接入智谱 GLM-4V 设计方案
 
 ## 现状分析
 
@@ -62,7 +62,7 @@ flowchart TB
 
     Image --> VisionCall
     Text --> VisionCall
-    VisionCall -->|"架构描述文本"| GenCall
+    VisionCall -->|"需求描述文本"| GenCall
     GenCall --> DT
     GenCall --> TP
     GenCall --> RP

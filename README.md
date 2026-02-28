@@ -1,10 +1,10 @@
-# 自动化测试知识库 MVP (P0 + P1)
+# 智能测试结构平台 (P0 + P1)
 
 基于两份方案文档落地的可运行版本，当前实现范围：
 
 - P0: 规则树可视化 CRUD、用例管理与规则绑定、覆盖矩阵
 - P1: AI 半自动解析草稿导入、规则变更影响分析（自动标记 `needs_review`）
-- P1+: AI 辅助架构拆解（上传流程图+描述，生成判断树/测试方案/风险点/用例矩阵并可一键导入）
+- P1+: 需求拆解（上传流程图+描述，生成判断树/测试方案/风险点/用例矩阵并可一键导入）
 
 ## 目录结构
 
@@ -55,7 +55,7 @@ docker compose up --build
 - `POST /api/testcases` 创建测试用例并绑定节点/路径
 - `GET /api/coverage/projects/{project_id}` 获取覆盖矩阵
 - `POST /api/ai/parse` AI 半自动解析需求文本草稿
-- `POST /api/ai/architecture/analyze` 架构拆解分析（multipart）
+- `POST /api/ai/architecture/analyze` 需求拆解分析（multipart）
 - `GET /api/ai/architecture/{analysis_id}` 获取拆解分析详情
 - `POST /api/ai/architecture/{analysis_id}/import` 导入判断树/风险/用例到正式库
 
