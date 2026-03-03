@@ -10,6 +10,7 @@ from app.api.coverage import router as coverage_router
 from app.api.projects import router as project_router
 from app.api.recommendation import router as recommendation_router
 from app.api.rules import router as rule_router
+from app.api.testcase_import import router as testcase_import_router
 from app.api.testcases import router as testcase_router
 from app.core.database import engine
 from app.models.entities import Base
@@ -38,6 +39,7 @@ app.mount("/uploads", StaticFiles(directory=os.path.join(BACKEND_DIR, "uploads")
 app.include_router(project_router)
 app.include_router(rule_router)
 app.include_router(testcase_router)
+app.include_router(testcase_import_router)
 app.include_router(coverage_router)
 app.include_router(recommendation_router)
 app.include_router(ai_router)

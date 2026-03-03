@@ -136,6 +136,48 @@ def test_get_and_delete_testcase():
     assert all(item["id"] != case_id for item in list_resp.json())
 
 
+def test_delete_testcase_cascades_reco_results():
+    project_id, requirement_id, node_id = _create_project_and_requirement("delete-with-reco")
+
+    create_resp = client.post(
+        "/api/testcases",
+        json={
+            "project_id": project_id,
+            "title": "case-with-reco",
+            "steps": "step 1",
+            "expected_result": "result 1",
+            "risk_level": "high",
+            "bound_rule_node_ids": [node_id],
+            "bound_path_ids": [],
+        },
+    )
+    assert create_resp.status_code == 201
+    case_id = create_resp.json()["id"]
+
+    reco_resp = client.post(
+        "/api/reco/regression",
+        json={
+            "requirement_id": requirement_id,
+            "mode": "FULL",
+            "k": 1,
+            "case_filter": {"case_ids": [case_id]},
+        },
+    )
+    assert reco_resp.status_code == 200
+    run_id = reco_resp.json()["run_id"]
+    assert any(item["case_id"] == case_id for item in reco_resp.json()["cases"])
+
+    delete_resp = client.delete(f"/api/testcases/{case_id}")
+    assert delete_resp.status_code == 204
+
+    get_resp = client.get(f"/api/testcases/{case_id}")
+    assert get_resp.status_code == 404
+
+    run_detail_resp = client.get(f"/api/reco/runs/{run_id}")
+    assert run_detail_resp.status_code == 200
+    assert run_detail_resp.json()["results"] == []
+
+
 def test_update_testcase():
     project_id, requirement_id, node_id = _create_project_and_requirement("update")
 

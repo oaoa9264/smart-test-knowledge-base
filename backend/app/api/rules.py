@@ -154,7 +154,9 @@ def update_node(node_id: str, payload: RuleNodeUpdate, db: Session = Depends(get
     if not node:
         raise HTTPException(status_code=404, detail="node not found")
 
-    if payload.parent_id is not None:
+    provided_fields = set(payload.__fields_set__)
+
+    if "parent_id" in provided_fields and payload.parent_id is not None:
         _assert_parent_chain_no_cycle(
             db=db,
             requirement_id=node.requirement_id,
@@ -163,10 +165,12 @@ def update_node(node_id: str, payload: RuleNodeUpdate, db: Session = Depends(get
         )
 
     changed_node_ids = [node.id]
-    for field in ["parent_id", "node_type", "content", "risk_level", "status"]:
-        value = getattr(payload, field)
-        if value is not None:
-            setattr(node, field, value)
+    if "parent_id" in provided_fields:
+        node.parent_id = payload.parent_id
+
+    for field in ["node_type", "content", "risk_level", "status"]:
+        if field in provided_fields:
+            setattr(node, field, getattr(payload, field))
     node.version += 1
 
     db.commit()

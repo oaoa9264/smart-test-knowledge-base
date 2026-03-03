@@ -4,6 +4,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Col,
   Descriptions,
   Form,
@@ -13,26 +14,42 @@ import {
   Row,
   Select,
   Space,
+  Steps,
   Table,
   Tag,
   Tooltip,
+  Typography,
+  Upload,
   message,
 } from "antd";
+import type { UploadFile } from "antd/es/upload/interface";
 import {
+  confirmImport,
   createTestCase,
   deleteTestCase,
   fetchTestCase,
   fetchTestCases,
+  parseImportFile,
   updateTestCase,
 } from "../../api/testcases";
 import { fetchRuleTree } from "../../api/rules";
 import { useAppStore } from "../../stores/appStore";
-import type { RiskLevel, RulePath, RuleNode, TestCase } from "../../types";
+import type {
+  ImportAnalysisMode,
+  ParsedCasePreview,
+  RiskLevel,
+  RuleNode,
+  RulePath,
+  TestCase,
+} from "../../types";
 import {
   getRiskLevelLabel,
   getTestCaseStatusLabel,
   riskLevelLabels,
 } from "../../utils/enumLabels";
+
+const { Dragger } = Upload;
+const { Text } = Typography;
 
 const riskTagColors: Record<RiskLevel, string> = {
   critical: "red",
@@ -41,21 +58,67 @@ const riskTagColors: Record<RiskLevel, string> = {
   low: "green",
 };
 
+const confidenceTagColors: Record<string, string> = {
+  high: "green",
+  medium: "gold",
+  low: "orange",
+  none: "red",
+};
+
 const riskOptions = [
   { label: <Tag color={riskTagColors.critical}>严重</Tag>, value: "critical" },
   { label: <Tag color={riskTagColors.high}>高</Tag>, value: "high" },
   { label: <Tag color={riskTagColors.medium}>中</Tag>, value: "medium" },
   { label: <Tag color={riskTagColors.low}>低</Tag>, value: "low" },
 ];
+
 const statusOptions = [
   { label: "有效", value: "active" },
   { label: "待复核", value: "needs_review" },
   { label: "已失效", value: "invalidated" },
 ];
 
+interface ImportPreviewRow extends ParsedCasePreview {
+  risk_level: RiskLevel;
+  bound_rule_node_ids: string[];
+  bound_path_ids: string[];
+  skip_import: boolean;
+}
+
+const importSteps = [
+  { title: "上传文件" },
+  { title: "预览匹配" },
+  { title: "确认导入" },
+];
+
+function formatImportAnalysisLabel(mode: ImportAnalysisMode, provider?: string | null): string {
+  if (mode !== "llm") {
+    return "关键词兜底";
+  }
+  if (!provider) {
+    return "LLM";
+  }
+  if (provider === "openai") {
+    return "LLM（OpenAI）";
+  }
+  if (provider === "zhipu") {
+    return "LLM（GLM/智谱）";
+  }
+  return `LLM（${provider}）`;
+}
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+  return fallback;
+}
+
 export default function TestCasesPage() {
   const location = useLocation();
-  const { selectedProjectId, selectedRequirementId } = useAppStore();
+  const { selectedProjectId, selectedRequirementId, requirements } = useAppStore();
+
   const [form] = Form.useForm();
   const selectedNodeIds = Form.useWatch<string[]>("bound_rule_node_ids", form) || [];
   const [editForm] = Form.useForm();
@@ -72,6 +135,21 @@ export default function TestCasesPage() {
   const [deletingCaseId, setDeletingCaseId] = useState<number | null>(null);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [createFormCollapsed, setCreateFormCollapsed] = useState(true);
+
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  const [importStep, setImportStep] = useState(0);
+  const [importRequirementId, setImportRequirementId] = useState<number | null>(null);
+  const [importFileList, setImportFileList] = useState<UploadFile[]>([]);
+  const [importParsing, setImportParsing] = useState(false);
+  const [importConfirming, setImportConfirming] = useState(false);
+  const [importRows, setImportRows] = useState<ImportPreviewRow[]>([]);
+  const [importAnalysisMode, setImportAnalysisMode] = useState<ImportAnalysisMode>("mock_fallback");
+  const [importLlmProvider, setImportLlmProvider] = useState<string | null>(null);
+  const [importSelectedRowKeys, setImportSelectedRowKeys] = useState<number[]>([]);
+  const [batchRiskLevel, setBatchRiskLevel] = useState<RiskLevel>("medium");
+  const [importNodes, setImportNodes] = useState<RuleNode[]>([]);
+  const [importPaths, setImportPaths] = useState<RulePath[]>([]);
+  const [importTreeLoading, setImportTreeLoading] = useState(false);
 
   useEffect(() => {
     const searchParams = new URLSearchParams(location.search);
@@ -96,6 +174,7 @@ export default function TestCasesPage() {
       setCasesLoaded(false);
       return;
     }
+
     setCasesLoaded(false);
     fetchTestCases(selectedProjectId, selectedRequirementId)
       .then((data) => {
@@ -109,7 +188,9 @@ export default function TestCasesPage() {
   }, [selectedProjectId, selectedRequirementId]);
 
   useEffect(() => {
-    if (!casesLoaded || highlightedCaseId === null) return;
+    if (!casesLoaded || highlightedCaseId === null) {
+      return;
+    }
 
     const targetExists = cases.some((item) => item.id === highlightedCaseId);
     if (!targetExists) {
@@ -128,7 +209,9 @@ export default function TestCasesPage() {
   }, [cases, casesLoaded, highlightedCaseId]);
 
   useEffect(() => {
-    if (highlightedCaseId === null) return;
+    if (highlightedCaseId === null) {
+      return;
+    }
     const timer = window.setTimeout(() => {
       setHighlightedCaseId(null);
     }, 8000);
@@ -141,6 +224,7 @@ export default function TestCasesPage() {
       setPaths([]);
       return;
     }
+
     fetchRuleTree(selectedRequirementId)
       .then((tree) => {
         setNodes(tree.nodes);
@@ -152,29 +236,63 @@ export default function TestCasesPage() {
   useEffect(() => {
     form.setFieldsValue({ bound_rule_node_ids: [], bound_path_ids: [] });
   }, [form, selectedRequirementId]);
+
   useEffect(() => {
     setEditingCase(null);
     editForm.resetFields();
   }, [editForm, selectedRequirementId]);
 
+  useEffect(() => {
+    if (!importModalOpen || !importRequirementId) {
+      setImportNodes([]);
+      setImportPaths([]);
+      return;
+    }
+
+    setImportTreeLoading(true);
+    fetchRuleTree(importRequirementId)
+      .then((tree) => {
+        setImportNodes(tree.nodes);
+        setImportPaths(tree.paths);
+      })
+      .catch(() => {
+        message.error("加载导入目标规则树失败");
+        setImportNodes([]);
+        setImportPaths([]);
+      })
+      .finally(() => setImportTreeLoading(false));
+  }, [importModalOpen, importRequirementId]);
+
   const nodeMap = useMemo(() => {
     const map = new Map<string, RuleNode>();
-    nodes.forEach((n) => map.set(n.id, n));
+    nodes.forEach((item) => map.set(item.id, item));
     return map;
   }, [nodes]);
+
   const pathMap = useMemo(() => {
     const map = new Map<string, RulePath>();
-    paths.forEach((p) => map.set(p.id, p));
+    paths.forEach((item) => map.set(item.id, item));
     return map;
   }, [paths]);
+
+  const importNodeMap = useMemo(() => {
+    const map = new Map<string, RuleNode>();
+    importNodes.forEach((item) => map.set(item.id, item));
+    return map;
+  }, [importNodes]);
 
   const getNodeDisplay = (nodeId: string) => nodeMap.get(nodeId)?.content || nodeId;
   const getPathDisplay = (pathId: string) => {
     const path = pathMap.get(pathId);
-    if (!path) return pathId;
+    if (!path) {
+      return pathId;
+    }
     return path.node_sequence.map((nodeId) => getNodeDisplay(nodeId)).join(" -> ");
   };
-  const getRiskTagColor = (risk?: string) => (risk ? riskTagColors[risk as RiskLevel] || "default" : "default");
+
+  const getRiskTagColor = (risk?: string) =>
+    risk ? riskTagColors[risk as RiskLevel] || "default" : "default";
+
   const renderEllipsisCell = (value?: string, maxWidth = 260) => {
     const text = value?.trim() || "-";
     return (
@@ -195,14 +313,15 @@ export default function TestCasesPage() {
 
   const getMatchedPathIdSet = (nodeIds: string[]) => {
     if (!nodeIds.length) {
-      return new Set(paths.map((p) => p.id));
+      return new Set(paths.map((item) => item.id));
     }
     return new Set(
       paths
-        .filter((p) => nodeIds.every((nodeId) => p.node_sequence.includes(nodeId)))
-        .map((p) => p.id),
+        .filter((item) => nodeIds.every((nodeId) => item.node_sequence.includes(nodeId)))
+        .map((item) => item.id),
     );
   };
+
   const matchedPathIdSet = useMemo(() => getMatchedPathIdSet(selectedNodeIds), [paths, selectedNodeIds]);
   const matchedEditPathIdSet = useMemo(
     () => getMatchedPathIdSet(selectedEditNodeIds),
@@ -218,8 +337,11 @@ export default function TestCasesPage() {
     }
     form.validateFields(["bound_path_ids"]).catch(() => undefined);
   }, [form, matchedPathIdSet]);
+
   useEffect(() => {
-    if (!editingCase) return;
+    if (!editingCase) {
+      return;
+    }
     const selectedPathIds = editForm.getFieldValue("bound_path_ids") || [];
     const filteredPathIds = selectedPathIds.filter((pathId: string) => matchedEditPathIdSet.has(pathId));
     if (filteredPathIds.length !== selectedPathIds.length) {
@@ -230,26 +352,75 @@ export default function TestCasesPage() {
   }, [editForm, matchedEditPathIdSet, editingCase]);
 
   const nodeOptions = useMemo(
-    () => nodes.map((n) => ({ label: `${n.content} (${riskLevelLabels[n.risk_level]})`, value: n.id })),
+    () =>
+      nodes.map((item) => ({
+        label: `${item.content} (${riskLevelLabels[item.risk_level]})`,
+        value: item.id,
+      })),
     [nodes],
   );
+
   const createPathOptions = useMemo(
     () =>
-      paths.map((p) => ({
-        label: p.node_sequence.map((nodeId) => nodeMap.get(nodeId)?.content || nodeId).join(" -> "),
-        value: p.id,
-      }))
-      .filter((item) => matchedPathIdSet.has(item.value)),
+      paths
+        .map((item) => ({
+          label: item.node_sequence.map((nodeId) => nodeMap.get(nodeId)?.content || nodeId).join(" -> "),
+          value: item.id,
+        }))
+        .filter((item) => matchedPathIdSet.has(item.value)),
     [paths, nodeMap, matchedPathIdSet],
   );
+
   const editPathOptions = useMemo(
     () =>
-      paths.map((p) => ({
-        label: p.node_sequence.map((nodeId) => nodeMap.get(nodeId)?.content || nodeId).join(" -> "),
-        value: p.id,
-      }))
-      .filter((item) => matchedEditPathIdSet.has(item.value)),
+      paths
+        .map((item) => ({
+          label: item.node_sequence.map((nodeId) => nodeMap.get(nodeId)?.content || nodeId).join(" -> "),
+          value: item.id,
+        }))
+        .filter((item) => matchedEditPathIdSet.has(item.value)),
     [paths, nodeMap, matchedEditPathIdSet],
+  );
+
+  const importNodeOptions = useMemo(
+    () =>
+      importNodes.map((item) => ({
+        label: `${item.content} (${riskLevelLabels[item.risk_level]})`,
+        value: item.id,
+      })),
+    [importNodes],
+  );
+
+  const getImportPathOptions = (nodeIds: string[]) =>
+    importPaths
+      .filter((path) => nodeIds.every((nodeId) => path.node_sequence.includes(nodeId)))
+      .map((path) => ({
+        label: path.node_sequence.map((nodeId) => importNodeMap.get(nodeId)?.content || nodeId).join(" -> "),
+        value: path.id,
+      }));
+
+  const importSummary = useMemo(() => {
+    const total = importRows.length;
+    const skipped = importRows.filter((item) => item.skip_import).length;
+    const importable = total - skipped;
+    const unbound = importRows.filter((item) => !item.skip_import && item.bound_rule_node_ids.length === 0).length;
+    const autoMatched = importRows.filter((item) => item.matched_node_ids.length > 0 && item.confidence !== "none").length;
+    return {
+      total,
+      skipped,
+      importable,
+      unbound,
+      autoMatched,
+      needReview: total - autoMatched,
+    };
+  }, [importRows]);
+
+  const requirementOptions = useMemo(
+    () =>
+      requirements
+        .filter((item) => !selectedProjectId || item.project_id === selectedProjectId)
+        .map((item) => ({ label: item.title, value: item.id })),
+    [requirements, selectedProjectId],
   );
 
   const submit = async () => {
@@ -257,6 +428,7 @@ export default function TestCasesPage() {
       message.warning("请先选择项目");
       return;
     }
+
     const values = await form.validateFields();
     const created = await createTestCase({ project_id: selectedProjectId, ...values });
     setCases((prev) => [created, ...prev]);
@@ -296,7 +468,10 @@ export default function TestCasesPage() {
   };
 
   const submitEdit = async () => {
-    if (!editingCase) return;
+    if (!editingCase) {
+      return;
+    }
+
     const values = await editForm.validateFields();
     setEditSubmitting(true);
     try {
@@ -329,6 +504,209 @@ export default function TestCasesPage() {
       setDeletingCaseId(null);
     }
   };
+
+  const openImportModal = () => {
+    if (!selectedProjectId) {
+      message.warning("请先选择项目");
+      return;
+    }
+    if (!selectedRequirementId) {
+      message.warning("请先选择需求");
+      return;
+    }
+
+    setImportModalOpen(true);
+    setImportStep(0);
+    setImportRequirementId(selectedRequirementId);
+    setImportFileList([]);
+    setImportRows([]);
+    setImportSelectedRowKeys([]);
+    setBatchRiskLevel("medium");
+    setImportAnalysisMode("mock_fallback");
+    setImportLlmProvider(null);
+  };
+
+  const closeImportModal = () => {
+    if (importParsing || importConfirming) {
+      return;
+    }
+    setImportModalOpen(false);
+    setImportStep(0);
+    setImportFileList([]);
+    setImportRows([]);
+    setImportSelectedRowKeys([]);
+    setImportRequirementId(selectedRequirementId);
+    setImportAnalysisMode("mock_fallback");
+    setImportLlmProvider(null);
+  };
+
+  const handleParseImport = async () => {
+    if (!importRequirementId) {
+      message.warning("请选择关联需求");
+      return;
+    }
+
+    const firstFile = importFileList[0];
+    const fileObj = firstFile?.originFileObj ?? (firstFile as unknown as File | undefined);
+    if (!(fileObj instanceof File)) {
+      message.warning("请先上传 Excel 或 XMind 文件");
+      return;
+    }
+
+    setImportParsing(true);
+    try {
+      const result = await parseImportFile(fileObj as File, importRequirementId);
+      const rows: ImportPreviewRow[] = result.parsed_cases.map((item) => ({
+        ...item,
+        risk_level: item.suggested_risk_level || "medium",
+        bound_rule_node_ids: item.matched_node_ids,
+        bound_path_ids: [],
+        skip_import: false,
+      }));
+      setImportRows(rows);
+      setImportAnalysisMode(result.analysis_mode);
+      setImportLlmProvider(result.llm_provider || null);
+      setImportSelectedRowKeys(rows.map((item) => item.index));
+      setImportStep(1);
+      message.success(`解析完成，共 ${result.total_cases} 条`);
+    } catch (error) {
+      message.error(getErrorMessage(error, "解析失败"));
+    } finally {
+      setImportParsing(false);
+    }
+  };
+
+  const updateImportRow = (rowIndex: number, updater: (row: ImportPreviewRow) => ImportPreviewRow) => {
+    setImportRows((prev) => prev.map((item) => (item.index === rowIndex ? updater(item) : item)));
+  };
+
+  const handleImportNodeChange = (row: ImportPreviewRow, nodeIds: string[]) => {
+    const matchedPathIdSet = new Set(
+      importPaths
+        .filter((path) => nodeIds.every((nodeId) => path.node_sequence.includes(nodeId)))
+        .map((path) => path.id),
+    );
+    updateImportRow(row.index, (current) => ({
+      ...current,
+      bound_rule_node_ids: nodeIds,
+      bound_path_ids: current.bound_path_ids.filter((pathId) => matchedPathIdSet.has(pathId)),
+    }));
+  };
+
+  const handleApplyBatchRisk = () => {
+    if (!importSelectedRowKeys.length) {
+      message.warning("请先选择至少一条用例");
+      return;
+    }
+
+    setImportRows((prev) =>
+      prev.map((item) =>
+        importSelectedRowKeys.includes(item.index)
+          ? {
+              ...item,
+              risk_level: batchRiskLevel,
+            }
+          : item,
+      ),
+    );
+    message.success("已批量更新风险等级");
+  };
+
+  const toStepConfirm = () => {
+    if (!importRows.length) {
+      message.warning("暂无可导入数据");
+      return;
+    }
+    setImportStep(2);
+  };
+
+  const refreshCaseList = async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    try {
+      const data = await fetchTestCases(selectedProjectId, selectedRequirementId || undefined);
+      setCases(data);
+    } catch {
+      message.error("刷新用例列表失败");
+    }
+  };
+
+  const handleConfirmImport = async () => {
+    if (!selectedProjectId || !importRequirementId) {
+      message.warning("请先选择项目和需求");
+      return;
+    }
+
+    if (importSummary.unbound > 0) {
+      message.error("存在未绑定规则节点的用例，请先绑定或标记为跳过");
+      return;
+    }
+
+    setImportConfirming(true);
+    try {
+      const resp = await confirmImport({
+        project_id: selectedProjectId,
+        requirement_id: importRequirementId,
+        cases: importRows.map((item) => ({
+          title: item.title,
+          steps: item.steps,
+          expected_result: item.expected_result,
+          risk_level: item.risk_level,
+          bound_rule_node_ids: item.bound_rule_node_ids,
+          bound_path_ids: item.bound_path_ids,
+          skip_import: item.skip_import,
+        })),
+      });
+      message.success(`导入完成：成功 ${resp.imported_count}，跳过 ${resp.skipped_count}`);
+      closeImportModal();
+      await refreshCaseList();
+    } catch (error) {
+      message.error(getErrorMessage(error, "导入失败"));
+    } finally {
+      setImportConfirming(false);
+    }
+  };
+
+  const importFooter =
+    importStep === 0
+      ? [
+          <Button key="cancel" onClick={closeImportModal} disabled={importParsing}>
+            取消
+          </Button>,
+          <Button key="parse" type="primary" loading={importParsing} onClick={handleParseImport}>
+            开始解析
+          </Button>,
+        ]
+      : importStep === 1
+        ? [
+            <Button key="cancel" onClick={closeImportModal} disabled={importParsing}>
+              取消
+            </Button>,
+            <Button key="back" onClick={() => setImportStep(0)}>
+              上一步
+            </Button>,
+            <Button key="next" type="primary" onClick={toStepConfirm}>
+              下一步
+            </Button>,
+          ]
+        : [
+            <Button key="cancel" onClick={closeImportModal} disabled={importConfirming}>
+              取消
+            </Button>,
+            <Button key="back" onClick={() => setImportStep(1)} disabled={importConfirming}>
+              上一步
+            </Button>,
+            <Button
+              key="confirm"
+              type="primary"
+              loading={importConfirming}
+              onClick={handleConfirmImport}
+              disabled={importSummary.unbound > 0}
+            >
+              确认导入
+            </Button>,
+          ];
 
   return (
     <div>
@@ -373,7 +751,9 @@ export default function TestCasesPage() {
                 rules={[
                   {
                     validator: async (_, value: string[] = []) => {
-                      if (!value.length) return;
+                      if (!value.length) {
+                        return;
+                      }
                       const hasInvalid = value.some((pathId) => !matchedPathIdSet.has(pathId));
                       if (hasInvalid) {
                         throw new Error("所选规则路径需包含已选择的全部规则节点");
@@ -395,9 +775,14 @@ export default function TestCasesPage() {
           <Card
             title="用例列表"
             extra={
-              <Button type="link" onClick={() => setCreateFormCollapsed((prev) => !prev)}>
-                {createFormCollapsed ? "展开新建用例" : "收起新建用例"}
-              </Button>
+              <Space>
+                <Button type="primary" onClick={openImportModal}>
+                  导入用例
+                </Button>
+                <Button type="link" onClick={() => setCreateFormCollapsed((prev) => !prev)}>
+                  {createFormCollapsed ? "展开新建用例" : "收起新建用例"}
+                </Button>
+              </Space>
             }
           >
             <Table<TestCase>
@@ -490,6 +875,278 @@ export default function TestCasesPage() {
       </Row>
 
       <Modal
+        open={importModalOpen}
+        title="测试用例智能导入"
+        width={1200}
+        onCancel={closeImportModal}
+        footer={importFooter}
+        destroyOnClose
+      >
+        <Steps current={importStep} items={importSteps} style={{ marginBottom: 20 }} />
+
+        {importStep === 0 ? (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Form layout="vertical">
+              <Form.Item label="关联需求" required>
+                <Select
+                  value={importRequirementId ?? undefined}
+                  onChange={(value) => setImportRequirementId(value)}
+                  options={requirementOptions}
+                  placeholder="请选择需求"
+                />
+              </Form.Item>
+            </Form>
+
+            <Dragger
+              accept=".xlsx,.xlsm,.xmind"
+              multiple={false}
+              maxCount={1}
+              fileList={importFileList}
+              beforeUpload={(file) => {
+                setImportFileList([
+                  {
+                    uid: file.uid,
+                    name: file.name,
+                    status: "done",
+                    originFileObj: file,
+                  },
+                ]);
+                return false;
+              }}
+              onRemove={() => {
+                setImportFileList([]);
+                return true;
+              }}
+            >
+              <p className="ant-upload-drag-icon">
+                <Text strong>拖拽文件到此处，或点击上传</Text>
+              </p>
+              <p className="ant-upload-text">支持 .xlsx / .xlsm / .xmind</p>
+            </Dragger>
+
+            <Alert
+              type="info"
+              showIcon
+              message="解析说明"
+              description="系统会先解析文件，再尝试将用例自动匹配到当前需求规则树节点。"
+            />
+          </Space>
+        ) : null}
+
+        {importStep === 1 ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Alert
+              type="info"
+              showIcon
+              message={`解析模式：${formatImportAnalysisLabel(importAnalysisMode, importLlmProvider)}`}
+              description={`共 ${importSummary.total} 条，自动匹配 ${importSummary.autoMatched} 条，待复核 ${importSummary.needReview} 条`}
+            />
+
+            <Space>
+              <Button onClick={() => setImportSelectedRowKeys(importRows.map((item) => item.index))}>全选</Button>
+              <Button
+                onClick={() => {
+                  const selectedSet = new Set(importSelectedRowKeys);
+                  const nextKeys = importRows
+                    .map((item) => item.index)
+                    .filter((index) => !selectedSet.has(index));
+                  setImportSelectedRowKeys(nextKeys);
+                }}
+              >
+                反选
+              </Button>
+              <Select<RiskLevel>
+                value={batchRiskLevel}
+                onChange={(value) => setBatchRiskLevel(value)}
+                style={{ width: 140 }}
+                options={[
+                  { label: "严重", value: "critical" },
+                  { label: "高", value: "high" },
+                  { label: "中", value: "medium" },
+                  { label: "低", value: "low" },
+                ]}
+              />
+              <Button onClick={handleApplyBatchRisk}>批量设置风险等级</Button>
+            </Space>
+
+            <Table<ImportPreviewRow>
+              rowKey="index"
+              loading={importTreeLoading}
+              size="small"
+              pagination={{ pageSize: 8 }}
+              scroll={{ x: 1800 }}
+              dataSource={importRows}
+              rowSelection={{
+                selectedRowKeys: importSelectedRowKeys,
+                onChange: (keys) => setImportSelectedRowKeys(keys as number[]),
+              }}
+              rowClassName={(row) =>
+                !row.skip_import && row.bound_rule_node_ids.length === 0 ? "import-unbound-row" : ""
+              }
+              columns={[
+                {
+                  title: "标题",
+                  dataIndex: "title",
+                  width: 180,
+                  render: (title: string) => renderEllipsisCell(title, 160),
+                },
+                {
+                  title: "步骤",
+                  dataIndex: "steps",
+                  width: 220,
+                  render: (steps: string) => renderEllipsisCell(steps, 200),
+                },
+                {
+                  title: "预期结果",
+                  dataIndex: "expected_result",
+                  width: 220,
+                  render: (expected: string) => renderEllipsisCell(expected, 200),
+                },
+                {
+                  title: "匹配节点",
+                  width: 320,
+                  render: (_, row) => (
+                    <Select
+                      mode="multiple"
+                      value={row.bound_rule_node_ids}
+                      options={importNodeOptions}
+                      onChange={(value) => handleImportNodeChange(row, value)}
+                      style={{ width: "100%" }}
+                      placeholder="请选择规则节点"
+                    />
+                  ),
+                },
+                {
+                  title: "绑定路径",
+                  width: 320,
+                  render: (_, row) => (
+                    <Select
+                      mode="multiple"
+                      value={row.bound_path_ids}
+                      options={getImportPathOptions(row.bound_rule_node_ids)}
+                      onChange={(value) =>
+                        updateImportRow(row.index, (current) => ({
+                          ...current,
+                          bound_path_ids: value,
+                        }))
+                      }
+                      style={{ width: "100%" }}
+                      placeholder="可选：绑定规则路径"
+                    />
+                  ),
+                },
+                {
+                  title: "置信度",
+                  width: 110,
+                  dataIndex: "confidence",
+                  render: (confidence: string) => (
+                    <Tag color={confidenceTagColors[confidence] || "default"}>{confidence}</Tag>
+                  ),
+                },
+                {
+                  title: "匹配理由",
+                  dataIndex: "match_reason",
+                  width: 220,
+                  render: (reason: string) => renderEllipsisCell(reason, 200),
+                },
+                {
+                  title: "风险等级",
+                  width: 130,
+                  render: (_, row) => (
+                    <Select<RiskLevel>
+                      value={row.risk_level}
+                      options={[
+                        { label: "严重", value: "critical" },
+                        { label: "高", value: "high" },
+                        { label: "中", value: "medium" },
+                        { label: "低", value: "low" },
+                      ]}
+                      onChange={(value) =>
+                        updateImportRow(row.index, (current) => ({
+                          ...current,
+                          risk_level: value,
+                        }))
+                      }
+                      style={{ width: "100%" }}
+                    />
+                  ),
+                },
+                {
+                  title: "跳过导入",
+                  width: 120,
+                  render: (_, row) => (
+                    <Checkbox
+                      checked={row.skip_import}
+                      onChange={(event) =>
+                        updateImportRow(row.index, (current) => ({
+                          ...current,
+                          skip_import: event.target.checked,
+                        }))
+                      }
+                    />
+                  ),
+                },
+              ]}
+            />
+          </Space>
+        ) : null}
+
+        {importStep === 2 ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Descriptions bordered column={2} size="small">
+              <Descriptions.Item label="解析模式">
+                {formatImportAnalysisLabel(importAnalysisMode, importLlmProvider)}
+              </Descriptions.Item>
+              <Descriptions.Item label="总数">{importSummary.total}</Descriptions.Item>
+              <Descriptions.Item label="自动匹配">{importSummary.autoMatched}</Descriptions.Item>
+              <Descriptions.Item label="待复核">{importSummary.needReview}</Descriptions.Item>
+              <Descriptions.Item label="将导入">{importSummary.importable}</Descriptions.Item>
+              <Descriptions.Item label="跳过">{importSummary.skipped}</Descriptions.Item>
+            </Descriptions>
+
+            {importSummary.unbound > 0 ? (
+              <Alert
+                type="error"
+                showIcon
+                message={`仍有 ${importSummary.unbound} 条未绑定规则节点`}
+                description="未绑定用例不能导入，请返回上一步手动绑定或勾选跳过导入。"
+              />
+            ) : (
+              <Alert
+                type="success"
+                showIcon
+                message="校验通过，可执行导入"
+                description="确认后将批量创建测试用例并建立规则节点/路径绑定关系。"
+              />
+            )}
+
+            <Table<ImportPreviewRow>
+              rowKey="index"
+              size="small"
+              pagination={{ pageSize: 6 }}
+              dataSource={importRows}
+              columns={[
+                { title: "标题", dataIndex: "title", render: (value: string) => renderEllipsisCell(value, 220) },
+                {
+                  title: "绑定节点数",
+                  render: (_, row) => row.bound_rule_node_ids.length,
+                },
+                {
+                  title: "风险等级",
+                  dataIndex: "risk_level",
+                  render: (value: RiskLevel) => <Tag color={getRiskTagColor(value)}>{getRiskLevelLabel(value)}</Tag>,
+                },
+                {
+                  title: "状态",
+                  render: (_, row) => (row.skip_import ? <Tag>跳过</Tag> : <Tag color="green">导入</Tag>),
+                },
+              ]}
+            />
+          </Space>
+        ) : null}
+      </Modal>
+
+      <Modal
         open={!!editingCase}
         title="修改用例"
         okText="保存"
@@ -528,7 +1185,9 @@ export default function TestCasesPage() {
             rules={[
               {
                 validator: async (_, value: string[] = []) => {
-                  if (!value.length) return;
+                  if (!value.length) {
+                    return;
+                  }
                   const hasInvalid = value.some((pathId) => !matchedEditPathIdSet.has(pathId));
                   if (hasInvalid) {
                     throw new Error("所选规则路径需包含已选择的全部规则节点");

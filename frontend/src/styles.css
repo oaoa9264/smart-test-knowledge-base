@@ -30,6 +30,14 @@ body,
   background: #ffe7ba !important;
 }
 
+.import-unbound-row > td {
+  background: #fff1f0 !important;
+}
+
+.import-unbound-row:hover > td {
+  background: #ffccc7 !important;
+}
+
 .test-case-detail-modal .ant-modal-body {
   max-height: 72vh;
   overflow-y: auto;
@@ -64,4 +72,9 @@ body,
   margin-right: 0;
   white-space: normal;
   word-break: break-all;
+}
+
+/* richText foreignObject 在 HiDPI / 缩放下可能亚像素裁切底部文字 */
+.smm-richtext-node-wrap {
+  padding-bottom: 2px !important;
 }

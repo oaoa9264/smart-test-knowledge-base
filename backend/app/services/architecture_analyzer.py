@@ -21,6 +21,7 @@ class ArchitectureAnalyzerProvider:
 
     def __init__(self):
         self._analysis_mode = "mock"
+        self._llm_provider: Optional[str] = None
 
     def analyze(self, image_path: Optional[str], description: str, title: Optional[str] = None) -> Dict:
         raise NotImplementedError
@@ -28,27 +29,21 @@ class ArchitectureAnalyzerProvider:
     def get_analysis_mode(self) -> str:
         return self._analysis_mode
 
+    def get_llm_provider(self) -> Optional[str]:
+        return self._llm_provider
+
 
 class MockAnalyzerProvider(ArchitectureAnalyzerProvider):
     """Rule/template based analyzer used before integrating real LLM providers."""
 
     def analyze(self, image_path: Optional[str], description: str, title: Optional[str] = None) -> Dict:
         self._analysis_mode = "mock"
+        self._llm_provider = None
         cleaned_description = _compose_analysis_description(description=description, image_path=image_path)
-        cleaned_title = (title or "").strip()
         sentences = _split_sentences(cleaned_description)
 
         decision_tree = _build_decision_tree(sentences)
-        test_plan = _build_test_plan(cleaned_description, decision_tree["nodes"])
-        risk_points = _build_risk_points(decision_tree["nodes"])
-        test_cases = _build_generated_cases(decision_tree["nodes"], analysis_title=cleaned_title)
-
-        return {
-            "decision_tree": decision_tree,
-            "test_plan": test_plan,
-            "risk_points": risk_points,
-            "test_cases": test_cases,
-        }
+        return _decision_tree_only_result({"decision_tree": decision_tree})
 
 
 class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
@@ -62,6 +57,7 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
         normalized_desc = (description or "").strip()
         normalized_title = (title or "").strip()
         stage = "init"
+        self._llm_provider = None
 
         try:
             architecture_understanding = normalized_desc
@@ -83,7 +79,7 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
                 title=normalized_title,
             )
             self._analysis_mode = "mock_fallback" if used_mock_fallback else "llm"
-            return validated
+            return _decision_tree_only_result(validated)
         except Exception:
             logger.exception(
                 "LLM analyze failed at stage=%s, fallback to mock (title=%s, has_image=%s, desc_len=%d)",
@@ -113,7 +109,8 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
             {"type": "image_url", "image_url": {"url": image_url}},
         ]
         understanding = llm.chat_with_vision(system_prompt=VISION_SYSTEM_PROMPT, user_content=user_content)
-        return (understanding or description or "")[:2000]
+        self._llm_provider = self._resolve_provider_from_llm(llm, "chat_with_vision") or self._llm_provider
+        return (understanding or description or "")[:4000]
 
     def _generate_artifacts(self, architecture_understanding: str, description: str, title: str) -> Dict:
         llm = self._get_llm()
@@ -122,7 +119,20 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
             description=description or "无补充文字描述",
             architecture_understanding=architecture_understanding or "无架构理解",
         )
-        return llm.chat_with_json(system_prompt=GENERATE_SYSTEM_PROMPT, user_prompt=user_prompt)
+        try:
+            return llm.chat_with_json(system_prompt=GENERATE_SYSTEM_PROMPT, user_prompt=user_prompt)
+        finally:
+            self._llm_provider = self._resolve_provider_from_llm(llm, "chat_with_json") or self._llm_provider
+
+    @staticmethod
+    def _resolve_provider_from_llm(llm: Any, method_name: str) -> Optional[str]:
+        getter = getattr(llm, "get_last_provider", None)
+        if not callable(getter):
+            return None
+        provider = getter(method_name=method_name)
+        if provider:
+            return str(provider).strip().lower()
+        return None
 
     def _validate_and_fallback(
         self,
@@ -135,10 +145,10 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
         try:
             validated = ArchitectureAnalysisResult.parse_obj(payload).dict()
             _validate_related_node_ids(validated)
-            return validated, False
+            return _post_process_decision_tree(validated, title=title), False
         except Exception as exc:
             try:
-                normalized_payload = _normalize_llm_payload(payload, title=title)
+                normalized_payload = _normalize_llm_payload(payload)
                 normalized = ArchitectureAnalysisResult.parse_obj(normalized_payload).dict()
                 _validate_related_node_ids(normalized)
                 logger.info(
@@ -146,7 +156,7 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
                     (title or "").strip() or "<empty>",
                     payload_summary,
                 )
-                return normalized, False
+                return _post_process_decision_tree(normalized, title=title), False
             except Exception as normalize_exc:
                 logger.warning(
                     "LLM payload invalid, fallback to mock (%s, raw_error=%s, normalize_error=%s)",
@@ -400,7 +410,7 @@ def _path_risk_level(risk_levels: List[str]) -> str:
     return sorted(risk_levels, key=lambda level: weight.get(level, 0), reverse=True)[0]
 
 
-def _normalize_llm_payload(payload: Any, title: str) -> Dict:
+def _normalize_llm_payload(payload: Any) -> Dict:
     if not isinstance(payload, dict):
         raise ValueError("LLM payload must be object to normalize")
 
@@ -410,43 +420,9 @@ def _normalize_llm_payload(payload: Any, title: str) -> Dict:
 
     decision_tree = _pick_payload_value(normalized_payload, ["decision_tree", "decisionTree", "tree", "rule_tree"])
     nodes = _normalize_decision_tree_nodes(_extract_items(decision_tree, ["nodes", "items", "list", "children"]))
-    node_ids = {node["id"] for node in nodes}
-    root_node_id = nodes[0]["id"] if nodes else None
-
-    test_plan_payload = _pick_payload_value(normalized_payload, ["test_plan", "testPlan", "plan", "test_strategy"])
-    if isinstance(test_plan_payload, dict):
-        markdown = _coerce_text(
-            _pick_payload_value(test_plan_payload, ["markdown", "content", "plan", "text", "body"])
-        )
-        sections = _normalize_sections(_pick_payload_value(test_plan_payload, ["sections", "outline", "items", "list"]))
-    elif isinstance(test_plan_payload, str):
-        markdown = _coerce_text(test_plan_payload)
-        sections = []
-    else:
-        markdown = ""
-        sections = []
-
-    if not markdown:
-        markdown = "# AI 生成测试方案"
-    if not sections:
-        sections = ["scope", "strategy", "environment", "schedule", "exit_criteria"]
-
-    normalized = {
+    return _decision_tree_only_result({
         "decision_tree": {"nodes": nodes},
-        "test_plan": {"markdown": markdown, "sections": sections},
-        "risk_points": _normalize_risk_points(
-            _pick_payload_value(normalized_payload, ["risk_points", "riskPoints", "risks", "risk_list"]),
-            node_ids,
-            root_node_id,
-        ),
-        "test_cases": _normalize_test_cases(
-            _pick_payload_value(normalized_payload, ["test_cases", "testCases", "cases", "generated_cases"]),
-            node_ids,
-            root_node_id,
-            title=title,
-        ),
-    }
-    return normalized
+    })
 
 
 def _unwrap_payload_envelope(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -474,15 +450,113 @@ def _has_artifact_signal(payload: Any) -> bool:
             "decisiontree",
             "tree",
             "ruletree",
-            "testplan",
-            "plan",
-            "riskpoints",
-            "risks",
-            "testcases",
-            "cases",
         }:
             return True
     return False
+
+
+def _decision_tree_only_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    tree = payload.get("decision_tree", {}) if isinstance(payload, dict) else {}
+    nodes = tree.get("nodes", []) if isinstance(tree, dict) else []
+    return {
+        "decision_tree": {"nodes": nodes},
+        "test_plan": None,
+        "risk_points": [],
+        "test_cases": [],
+    }
+
+
+def _post_process_decision_tree(payload: Dict[str, Any], title: str) -> Dict[str, Any]:
+    result = _decision_tree_only_result(payload)
+    raw_nodes = result.get("decision_tree", {}).get("nodes", [])
+    dedup_nodes, removed_count = _deduplicate_sibling_nodes(raw_nodes)
+    result["decision_tree"]["nodes"] = dedup_nodes
+
+    if removed_count > 0:
+        logger.info(
+            "Decision tree deduplicated (%d -> %d, removed=%d, title=%s)",
+            len(raw_nodes),
+            len(dedup_nodes),
+            removed_count,
+            (title or "").strip() or "<empty>",
+        )
+    _log_node_count_warning(len(dedup_nodes), title=title)
+    return result
+
+
+def _deduplicate_sibling_nodes(nodes: Any) -> Tuple[List[Dict], int]:
+    if not isinstance(nodes, list):
+        return [], 0
+
+    deduped: List[Dict] = []
+    replaced_ids: Dict[str, str] = {}
+    seen_key_to_id: Dict[Tuple[Optional[str], str, str], str] = {}
+
+    for raw in nodes:
+        if not isinstance(raw, dict):
+            continue
+
+        node = dict(raw)
+        node_id = _coerce_text(node.get("id"))
+        if not node_id:
+            continue
+
+        parent_id = _coerce_text(node.get("parent_id")) or None
+        if parent_id in replaced_ids:
+            parent_id = replaced_ids[parent_id]
+        node["parent_id"] = parent_id
+
+        dedup_key = (
+            parent_id,
+            _coerce_text(node.get("type")).lower(),
+            _normalize_node_content_for_dedup(node.get("content")),
+        )
+        kept_id = seen_key_to_id.get(dedup_key)
+        if kept_id and kept_id != node_id:
+            replaced_ids[node_id] = kept_id
+            continue
+
+        seen_key_to_id[dedup_key] = node_id
+        deduped.append(node)
+
+    if not deduped:
+        return [], 0
+
+    deduped_ids = {node.get("id") for node in deduped}
+    root_id = _coerce_text(deduped[0].get("id"))
+    for index, node in enumerate(deduped):
+        node_id = _coerce_text(node.get("id"))
+        parent_id = _coerce_text(node.get("parent_id")) or None
+        if parent_id in replaced_ids:
+            parent_id = replaced_ids[parent_id]
+
+        if index == 0:
+            node["type"] = "root"
+            node["parent_id"] = None
+            continue
+
+        if not parent_id or parent_id not in deduped_ids or parent_id == node_id:
+            node["parent_id"] = root_id
+        else:
+            node["parent_id"] = parent_id
+
+    return deduped, max(len(nodes) - len(deduped), 0)
+
+
+def _normalize_node_content_for_dedup(value: Any) -> str:
+    text = _coerce_text(value).lower()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[，。,.；;:：!?！？]", "", text)
+    return text
+
+
+def _log_node_count_warning(node_count: int, title: str) -> None:
+    title_text = (title or "").strip() or "<empty>"
+    if node_count < 15:
+        logger.warning("节点数过少，可能粒度太粗 (count=%d, title=%s)", node_count, title_text)
+        return
+    if node_count > 40:
+        logger.warning("节点数过多，可能存在冗余 (count=%d, title=%s)", node_count, title_text)
 
 
 def _pick_payload_value(payload: Any, candidate_keys: List[str]) -> Any:

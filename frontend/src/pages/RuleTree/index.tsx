@@ -1,30 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Background,
-  Controls,
-  Edge,
-  MiniMap,
-  Node,
-  PanOnScrollMode,
-  ReactFlow,
-  ReactFlowInstance,
-  addEdge,
-  useEdgesState,
-  useNodesState,
-} from "reactflow";
-import "reactflow/dist/style.css";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
   Drawer,
   Form,
   Input,
+  InputNumber,
   Modal,
   Select,
   Space,
-  Tree,
   Table,
   Tag,
+  Tree,
   Typography,
   message,
 } from "antd";
@@ -32,6 +19,10 @@ import { aiParse, createRuleNode, deleteRuleNode, fetchRuleTree, updateRuleNode 
 import { useAppStore } from "../../stores/appStore";
 import type { AIParseNode, AIParseResult, RiskLevel, RuleNode } from "../../types";
 import { getNodeTypeLabel, riskLevelLabels } from "../../utils/enumLabels";
+import type { MindMapTreeNode } from "./dataAdapter";
+import { mindMapDataToRuleNodes, normalizeRuleNodeContent, ruleNodesToMindMapData } from "./dataAdapter";
+import MindMapWrapper, { type MindMapExportType, type MindMapWrapperRef } from "./MindMapWrapper";
+import { RULE_TREE_THEME } from "./mindMapTheme";
 
 const riskOptions: { label: string; value: RiskLevel }[] = [
   { label: "严重", value: "critical" },
@@ -75,102 +66,16 @@ type RuleTreeNavNode = {
   children?: RuleTreeNavNode[];
 };
 
-function toFlowNodes(nodes: RuleNode[], focusedNodeId: string | null): Node[] {
-  const levelMap = new Map<string, number>();
-  const siblings: Record<string, number> = {};
-
-  const getDepth = (node: RuleNode, allMap: Map<string, RuleNode>): number => {
-    if (!node.parent_id) return 0;
-    if (levelMap.has(node.id)) return levelMap.get(node.id) || 0;
-    const parent = allMap.get(node.parent_id);
-    if (!parent) return 0;
-    const depth = getDepth(parent, allMap) + 1;
-    levelMap.set(node.id, depth);
-    return depth;
-  };
-
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-
-  return nodes.map((node) => {
-    const depth = getDepth(node, byId);
-    const siblingKey = node.parent_id || "root";
-    siblings[siblingKey] = (siblings[siblingKey] || 0) + 1;
-    const order = siblings[siblingKey] - 1;
-    const isFocused = focusedNodeId === node.id;
-
-    return {
-      id: node.id,
-      position: { x: 220 * depth + 40, y: 110 * order + 40 },
-      data: {
-        label: `${node.content}`,
-        ...node,
-      },
-      style: {
-        borderRadius: 10,
-        border: isFocused ? "2px solid #1677ff" : "1px solid #84a9d5",
-        padding: 8,
-        width: 180,
-        background: isFocused ? "#eef6ff" : "#f8fcff",
-        boxShadow: isFocused ? "0 0 0 2px rgba(22, 119, 255, 0.15)" : undefined,
-      },
-    };
-  });
-}
-
-function toFlowEdges(nodes: RuleNode[]): Edge[] {
-  return nodes
-    .filter((n) => n.parent_id)
-    .map((n) => ({
-      id: `${n.parent_id}-${n.id}`,
-      source: n.parent_id as string,
-      target: n.id,
-      animated: false,
-    }));
-}
-
-function collectFocusSubgraphIds(
-  focusedNodeId: string,
-  nodeMap: Map<string, RuleNode>,
-  childrenMap: Map<string, string[]>,
-  maxChildDepth: number,
-): Set<string> {
-  if (!nodeMap.has(focusedNodeId)) return new Set();
-
-  const result = new Set<string>();
-
-  let currentId: string | null = focusedNodeId;
-  while (currentId) {
-    result.add(currentId);
-    const currentNode = nodeMap.get(currentId);
-    currentId = currentNode?.parent_id || null;
-  }
-
-  const queue: Array<{ id: string; depth: number }> = [{ id: focusedNodeId, depth: 0 }];
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current) break;
-    if (current.depth >= maxChildDepth) continue;
-    const childIds = childrenMap.get(current.id) || [];
-    childIds.forEach((childId) => {
-      result.add(childId);
-      queue.push({ id: childId, depth: current.depth + 1 });
-    });
-  }
-
-  return result;
-}
-
 export default function RuleTreePage() {
   const { selectedRequirementId } = useAppStore();
   const [domainNodes, setDomainNodes] = useState<RuleNode[]>([]);
-  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
-  const [showFullGraph, setShowFullGraph] = useState(false);
-  const [childDepth, setChildDepth] = useState(2);
   const [treeSearch, setTreeSearch] = useState("");
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+
+  const layout = "organizationStructure";
+  const theme = RULE_TREE_THEME;
+  const [textAutoWrapWidth, setTextAutoWrapWidth] = useState<number>(150);
 
   const [editingNode, setEditingNode] = useState<RuleNode | null>(null);
   const [form] = Form.useForm();
@@ -185,41 +90,52 @@ export default function RuleTreePage() {
 
   const [lastImpact, setLastImpact] = useState<number[]>([]);
 
+  const mindMapRef = useRef<MindMapWrapperRef | null>(null);
+  const canvasSyncTimerRef = useRef<number | null>(null);
+  const isCanvasSyncingRef = useRef(false);
+  const pendingCanvasTreeRef = useRef<MindMapTreeNode | null>(null);
+  const domainNodesRef = useRef<RuleNode[]>([]);
+
   const reload = async () => {
     if (!selectedRequirementId) {
+      domainNodesRef.current = [];
       setDomainNodes([]);
-      setNodes([]);
-      setEdges([]);
       setFocusedNodeId(null);
       setExpandedKeys([]);
       return;
     }
+
     const tree = await fetchRuleTree(selectedRequirementId);
-    setDomainNodes(tree.nodes);
+    const normalizedNodes = tree.nodes.map((node) => ({
+      ...node,
+      content: normalizeRuleNodeContent(node.content),
+    }));
+    domainNodesRef.current = normalizedNodes;
+    setDomainNodes(normalizedNodes);
   };
 
   useEffect(() => {
+    domainNodesRef.current = domainNodes;
+  }, [domainNodes]);
+
+  useEffect(() => {
+    setExpandedKeys([]);
+    setFocusedNodeId(null);
     reload().catch(() => message.error("加载规则树失败"));
   }, [selectedRequirementId]);
 
   useEffect(() => {
-    if (!flowInstance || nodes.length === 0) return;
-    const frame = requestAnimationFrame(() => {
-      flowInstance.fitView({ padding: 0.2, minZoom: 0.05, duration: 200 });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [flowInstance, nodes, edges]);
-
-  const onConnect = useCallback(
-    (params: Edge | any) => {
-      setEdges((eds) => addEdge(params, eds));
-    },
-    [setEdges],
-  );
+    return () => {
+      if (canvasSyncTimerRef.current) {
+        window.clearTimeout(canvasSyncTimerRef.current);
+      }
+      pendingCanvasTreeRef.current = null;
+    };
+  }, []);
 
   const nodeMap = useMemo(() => {
     const map = new Map<string, RuleNode>();
-    domainNodes.forEach((n) => map.set(n.id, n));
+    domainNodes.forEach((node) => map.set(node.id, node));
     return map;
   }, [domainNodes]);
 
@@ -265,9 +181,11 @@ export default function RuleTreePage() {
 
   useEffect(() => {
     if (domainNodes.length === 0) return;
+
     if (!focusedNodeId || !nodeMap.has(focusedNodeId)) {
       setFocusedNodeId(rootIds[0] || domainNodes[0].id);
     }
+
     if (expandedKeys.length === 0) {
       setExpandedKeys(defaultExpandedKeys);
     }
@@ -292,12 +210,22 @@ export default function RuleTreePage() {
   }, [domainNodes, nodeMap, treeSearch]);
 
   useEffect(() => {
-    if (!treeSearch.trim()) return;
+    if (!treeSearch.trim()) {
+      mindMapRef.current?.clearHighlight();
+      return;
+    }
+
     setExpandedKeys((prev) => Array.from(new Set([...prev, ...matchedKeySet])));
-  }, [matchedKeySet, treeSearch]);
+
+    const firstMatch = domainNodes.find((node) => matchedKeySet.has(node.id));
+    if (firstMatch) {
+      mindMapRef.current?.highlightNode(firstMatch.id);
+    }
+  }, [domainNodes, matchedKeySet, treeSearch]);
 
   const treeData = useMemo<RuleTreeNavNode[]>(() => {
     const built = new Set<string>();
+
     const buildNode = (nodeId: string, path: Set<string>): RuleTreeNavNode => {
       const node = nodeMap.get(nodeId);
       if (!node) {
@@ -306,6 +234,7 @@ export default function RuleTreePage() {
 
       built.add(nodeId);
       const shortText = node.content.length > 26 ? `${node.content.slice(0, 26)}...` : node.content;
+
       if (path.has(nodeId)) {
         return { key: nodeId, title: `${shortText} (循环)` };
       }
@@ -323,11 +252,13 @@ export default function RuleTreePage() {
 
     const roots = rootIds.length > 0 ? rootIds : allNodeIds;
     const data = roots.map((nodeId) => buildNode(nodeId, new Set<string>()));
+
     allNodeIds.forEach((nodeId) => {
       if (!built.has(nodeId)) {
         data.push(buildNode(nodeId, new Set<string>()));
       }
     });
+
     return data;
   }, [allNodeIds, childrenMap, nodeMap, rootIds]);
 
@@ -349,30 +280,176 @@ export default function RuleTreePage() {
       .filter((node): node is RuleTreeNavNode => node !== null);
   }, [matchedKeySet, treeData, treeSearch]);
 
-  const visibleDomainNodes = useMemo(() => {
-    if (showFullGraph || !focusedNodeId) return domainNodes;
+  const mindMapData = useMemo(() => ruleNodesToMindMapData(domainNodes), [domainNodes]);
 
-    const visibleIds = collectFocusSubgraphIds(focusedNodeId, nodeMap, childrenMap, childDepth);
-    if (visibleIds.size === 0) return domainNodes;
-    return domainNodes.filter((node) => visibleIds.has(node.id));
-  }, [childDepth, childrenMap, domainNodes, focusedNodeId, nodeMap, showFullGraph]);
+  const onMindMapNodeClick = useCallback(
+    (nodeId: string) => {
+      const domainNode = nodeMap.get(nodeId);
+      if (!domainNode) return;
 
-  useEffect(() => {
-    setNodes(toFlowNodes(visibleDomainNodes, focusedNodeId));
-    setEdges(toFlowEdges(visibleDomainNodes));
-  }, [focusedNodeId, setEdges, setNodes, visibleDomainNodes]);
+      setFocusedNodeId(nodeId);
+      setEditingNode(domainNode);
+      form.setFieldsValue(domainNode);
+    },
+    [form, nodeMap],
+  );
 
-  const onNodeClick = (_event: React.MouseEvent, node: Node) => {
-    const domainNode = nodeMap.get(node.id);
-    if (!domainNode) return;
-    setFocusedNodeId(node.id);
-    setShowFullGraph(false);
-    setEditingNode(domainNode);
-    form.setFieldsValue(domainNode);
-  };
+  const syncCanvasChanges = useCallback(
+    (nextTree: MindMapTreeNode) => {
+      if (!selectedRequirementId) return;
+      pendingCanvasTreeRef.current = nextTree;
+
+      if (canvasSyncTimerRef.current) {
+        window.clearTimeout(canvasSyncTimerRef.current);
+      }
+
+      canvasSyncTimerRef.current = window.setTimeout(async () => {
+        if (isCanvasSyncingRef.current) return;
+        const treeToSync = pendingCanvasTreeRef.current;
+        if (!treeToSync) return;
+        pendingCanvasTreeRef.current = null;
+
+        const currentDomainNodes = domainNodesRef.current;
+        const nextNodes = mindMapDataToRuleNodes(treeToSync);
+        const prevNodeMap = new Map(currentDomainNodes.map((node) => [node.id, node]));
+        const nextNodeMap = new Map(nextNodes.map((node) => [node.id, node]));
+
+        const added = nextNodes.filter((node) => !prevNodeMap.has(node.id));
+        const removed = currentDomainNodes.filter((node) => !nextNodeMap.has(node.id));
+        const addedPending = new Map(added.map((node) => [node.id, node]));
+        const tempIdToRealId = new Map<string, string>();
+        const resolveParentId = (parentId: string | null): string | null => {
+          if (!parentId) return null;
+          return tempIdToRealId.get(parentId) || parentId;
+        };
+
+        const updates = nextNodes
+          .map((node) => {
+            const prev = prevNodeMap.get(node.id);
+            if (!prev) return null;
+
+            const payload: {
+              parent_id?: string | null;
+              node_type?: string;
+              content?: string;
+              risk_level?: string;
+            } = {};
+
+            if (prev.parent_id !== node.parent_id) payload.parent_id = node.parent_id;
+            if (prev.node_type !== node.node_type) payload.node_type = node.node_type;
+            if (prev.content !== node.content) payload.content = node.content;
+            if (prev.risk_level !== node.risk_level) payload.risk_level = node.risk_level;
+
+            if (Object.keys(payload).length === 0) return null;
+            return { nodeId: node.id, payload };
+          })
+          .filter(
+            (
+              item,
+            ): item is {
+              nodeId: string;
+              payload: {
+                parent_id?: string | null;
+                node_type?: string;
+                content?: string;
+                risk_level?: string;
+              };
+            } => item !== null,
+          );
+
+        const hasAnyChange = added.length > 0 || removed.length > 0 || updates.length > 0;
+        if (!hasAnyChange) return;
+
+        isCanvasSyncingRef.current = true;
+        try {
+          const impactSet = new Set<number>();
+
+          // 1) 先创建新增节点（处理新增节点之间的父子依赖）
+          while (addedPending.size > 0) {
+            let progressed = false;
+
+            for (const [tempId, node] of Array.from(addedPending.entries())) {
+              const rawParentId = node.parent_id;
+              const parentIsExisting = !!rawParentId && prevNodeMap.has(rawParentId);
+              const parentIsCreated = !!rawParentId && tempIdToRealId.has(rawParentId);
+              const parentInPending = !!rawParentId && addedPending.has(rawParentId);
+              const isRoot = !rawParentId;
+
+              if (!isRoot && !parentIsExisting && !parentIsCreated && !parentInPending) {
+                continue;
+              }
+              if (parentInPending && !parentIsCreated) {
+                continue;
+              }
+
+              const created = await createRuleNode({
+                requirement_id: selectedRequirementId,
+                parent_id: resolveParentId(rawParentId),
+                node_type: node.node_type,
+                content: node.content,
+                risk_level: node.risk_level,
+              });
+              tempIdToRealId.set(tempId, created.id);
+              addedPending.delete(tempId);
+              progressed = true;
+            }
+
+            if (!progressed) {
+              throw new Error("新增节点存在无法解析的父子关系");
+            }
+          }
+
+          // 2) 同步已有节点修改
+          for (const update of updates) {
+            const prev = prevNodeMap.get(update.nodeId);
+            if (!prev) continue;
+
+            const normalizedPayload = { ...update.payload };
+            if (Object.prototype.hasOwnProperty.call(normalizedPayload, "parent_id")) {
+              normalizedPayload.parent_id = resolveParentId(normalizedPayload.parent_id ?? null);
+            }
+
+            if (
+              (normalizedPayload.parent_id ?? prev.parent_id) === prev.parent_id &&
+              (normalizedPayload.node_type ?? prev.node_type) === prev.node_type &&
+              (normalizedPayload.content ?? prev.content) === prev.content &&
+              (normalizedPayload.risk_level ?? prev.risk_level) === prev.risk_level
+            ) {
+              continue;
+            }
+
+            const resp = await updateRuleNode(update.nodeId, normalizedPayload);
+            resp.impact.needs_review_case_ids.forEach((id) => impactSet.add(id));
+          }
+
+          // 3) 删除在画布中被移除的节点
+          for (const removedNode of removed) {
+            const resp = await deleteRuleNode(removedNode.id);
+            resp.impact.needs_review_case_ids.forEach((id) => impactSet.add(id));
+          }
+
+          setLastImpact(Array.from(impactSet));
+          message.success(
+            `画布变更已同步（新增 ${added.length} / 更新 ${updates.length} / 删除 ${removed.length}）`,
+          );
+          await reload();
+        } catch {
+          message.error("画布变更同步失败，已刷新回服务端最新数据");
+          await reload();
+        } finally {
+          isCanvasSyncingRef.current = false;
+          if (pendingCanvasTreeRef.current) {
+            syncCanvasChanges(pendingCanvasTreeRef.current);
+          }
+        }
+      }, 420);
+    },
+    [selectedRequirementId],
+  );
 
   const handleSaveNode = async () => {
     if (!editingNode) return;
+
     const values = await form.validateFields();
     const resp = await updateRuleNode(editingNode.id, values);
     setLastImpact(resp.impact.needs_review_case_ids);
@@ -383,6 +460,7 @@ export default function RuleTreePage() {
 
   const handleDeleteNode = async () => {
     if (!editingNode) return;
+
     const resp = await deleteRuleNode(editingNode.id);
     setLastImpact(resp.impact.needs_review_case_ids);
     message.success("节点已删除");
@@ -395,6 +473,7 @@ export default function RuleTreePage() {
       message.warning("请先选择需求");
       return;
     }
+
     const values = await createForm.validateFields();
     await createRuleNode({
       requirement_id: selectedRequirementId,
@@ -403,6 +482,7 @@ export default function RuleTreePage() {
       content: values.content,
       risk_level: values.risk_level,
     });
+
     setCreateOpen(false);
     createForm.resetFields();
     message.success("节点已创建");
@@ -420,6 +500,7 @@ export default function RuleTreePage() {
       message.warning("请先选择需求");
       return;
     }
+
     const idMap = new Map<string, string>();
 
     for (const draft of aiDraft) {
@@ -442,13 +523,38 @@ export default function RuleTreePage() {
     await reload();
   };
 
+  const handleExport = async (type: MindMapExportType) => {
+    try {
+      await mindMapRef.current?.exportAs(type, "规则树");
+      message.success(`导出 ${type.toUpperCase()} 成功`);
+    } catch {
+      message.error("导出失败，请重试");
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 150px)" }}>
-      <Space style={{ marginBottom: 12 }}>
+      <Space style={{ marginBottom: 12 }} wrap>
         <Button type="primary" onClick={() => setCreateOpen(true)}>
           新增节点
         </Button>
         <Button onClick={() => setAiOpen(true)}>AI 半自动解析 (P1)</Button>
+        <Space size={6}>
+          <Typography.Text type="secondary">文本宽度</Typography.Text>
+          <InputNumber
+            min={80}
+            max={800}
+            step={10}
+            value={textAutoWrapWidth}
+            onChange={(value) => setTextAutoWrapWidth(typeof value === "number" ? value : 150)}
+            style={{ width: 100 }}
+          />
+        </Space>
+
+        <Button onClick={() => mindMapRef.current?.fitView()}>适应画布</Button>
+        <Button onClick={() => handleExport("png")}>导出 PNG</Button>
+        <Button onClick={() => handleExport("svg")}>导出 SVG</Button>
+        <Button onClick={() => handleExport("xmind")}>导出 XMind</Button>
       </Space>
 
       {lastImpact.length > 0 && (
@@ -491,7 +597,7 @@ export default function RuleTreePage() {
               </Button>
             </Space>
             <Typography.Text type="secondary" style={{ marginBottom: 8 }}>
-              总节点 {domainNodes.length}，当前展示 {visibleDomainNodes.length}
+              总节点 {domainNodes.length}
             </Typography.Text>
             <div
               style={{
@@ -513,12 +619,14 @@ export default function RuleTreePage() {
                   const selectedId = keys[0] as string | undefined;
                   if (!selectedId) return;
                   setFocusedNodeId(selectedId);
-                  setShowFullGraph(false);
+                  mindMapRef.current?.focusNode(selectedId);
+                  mindMapRef.current?.highlightNode(selectedId);
                 }}
                 treeData={filteredTreeData}
               />
             </div>
           </div>
+
           <div
             style={{
               flex: 1,
@@ -530,54 +638,22 @@ export default function RuleTreePage() {
             }}
           >
             <div style={{ padding: 10, borderBottom: "1px solid #eef2f7" }}>
-              <Space wrap>
-                <Typography.Text>
-                  {showFullGraph
-                    ? "当前：全图视图"
-                    : `焦点节点：${focusedNodeId ? nodeMap.get(focusedNodeId)?.content || focusedNodeId : "-"}`}
-                </Typography.Text>
-                <Select
-                  size="small"
-                  value={childDepth}
-                  disabled={showFullGraph || !focusedNodeId}
-                  onChange={(value) => setChildDepth(value)}
-                  options={[
-                    { label: "子节点 0 层", value: 0 },
-                    { label: "子节点 1 层", value: 1 },
-                    { label: "子节点 2 层", value: 2 },
-                    { label: "子节点 3 层", value: 3 },
-                    { label: "子节点 4 层", value: 4 },
-                  ]}
-                />
-                <Button
-                  size="small"
-                  onClick={() => setShowFullGraph((prev) => !prev)}
-                  disabled={!focusedNodeId && !showFullGraph}
-                >
-                  {showFullGraph ? "切回焦点视图" : "查看全图"}
-                </Button>
-              </Space>
+              <Typography.Text>
+                当前选中：{focusedNodeId ? nodeMap.get(focusedNodeId)?.content || focusedNodeId : "-"}
+              </Typography.Text>
             </div>
             <div style={{ flex: 1 }}>
-              <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                onNodesChange={onNodesChange}
-                onEdgesChange={onEdgesChange}
-                onConnect={onConnect}
-                onNodeClick={onNodeClick}
-                onInit={setFlowInstance}
-                panOnDrag
-                panOnScroll
-                panOnScrollMode={PanOnScrollMode.Free}
-                fitView
-                fitViewOptions={{ padding: 0.2, minZoom: 0.05 }}
-                minZoom={0.05}
-              >
-                <Background gap={14} size={1} />
-                <Controls />
-                <MiniMap />
-              </ReactFlow>
+              <MindMapWrapper
+                ref={mindMapRef}
+                data={mindMapData}
+                selectedNodeId={focusedNodeId}
+                layout={layout}
+                theme={theme}
+                editable
+                textAutoWrapWidth={textAutoWrapWidth}
+                onNodeClick={onMindMapNodeClick}
+                onDataChange={syncCanvasChanges}
+              />
             </div>
           </div>
         </div>
@@ -617,7 +693,7 @@ export default function RuleTreePage() {
             <Select options={riskOptions} />
           </Form.Item>
           <Form.Item name="parent_id" label="父节点 (可选)">
-            <Select allowClear options={domainNodes.map((n) => ({ value: n.id, label: n.content }))} />
+            <Select allowClear options={domainNodes.map((node) => ({ value: node.id, label: node.content }))} />
           </Form.Item>
         </Form>
       </Modal>
@@ -639,7 +715,7 @@ export default function RuleTreePage() {
         <Input.TextArea
           rows={5}
           value={aiText}
-          onChange={(e) => setAiText(e.target.value)}
+          onChange={(event) => setAiText(event.target.value)}
           placeholder="例如：如果用户未实名认证，则禁止提现；如果实名认证且余额充足，则允许提现"
         />
         <div style={{ marginTop: 10, marginBottom: 10 }}>
@@ -663,14 +739,12 @@ export default function RuleTreePage() {
           pagination={false}
           columns={[
             { title: "临时ID", dataIndex: "id", width: 120 },
-            { title: "类型", dataIndex: "type", render: (v) => <Tag>{getNodeTypeLabel(v)}</Tag>, width: 120 },
+            { title: "类型", dataIndex: "type", render: (value) => <Tag>{getNodeTypeLabel(value)}</Tag>, width: 120 },
             { title: "内容", dataIndex: "content" },
             { title: "父节点", dataIndex: "parent_id", width: 120 },
             {
               title: "默认风险",
-              render: (_, row) => (
-                <Tag>{riskLevelLabels[row.type === "root" ? "high" : "medium"]}</Tag>
-              ),
+              render: (_, row) => <Tag>{riskLevelLabels[row.type === "root" ? "high" : "medium"]}</Tag>,
               width: 120,
             },
           ]}

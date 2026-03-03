@@ -155,7 +155,11 @@ class TestCase(Base):
     project = relationship("Project", back_populates="testcases")
     bound_rule_nodes = relationship("RuleNode", secondary=case_rule_node_assoc, back_populates="bound_cases")
     bound_paths = relationship("RulePath", secondary=case_rule_path_assoc, back_populates="bound_cases")
-    reco_results = relationship("RecoResult", back_populates="test_case")
+    reco_results = relationship(
+        "RecoResult",
+        back_populates="test_case",
+        cascade="all, delete-orphan",
+    )
 
 
 class ArchitectureAnalysis(Base):
@@ -198,7 +202,7 @@ class RecoResult(Base):
     id = Column(Integer, primary_key=True, index=True)
     run_id = Column(Integer, ForeignKey("reco_run.id"), nullable=False, index=True)
     rank = Column(Integer, nullable=False)
-    case_id = Column(Integer, ForeignKey("test_cases.id"), nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("test_cases.id", ondelete="CASCADE"), nullable=False, index=True)
     gain_risk = Column(Float, default=0.0, nullable=False)
     gain_node_ids = Column(Text, nullable=False)
     top_contributors = Column(Text, nullable=False)

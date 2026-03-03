@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DecisionTreeNode(BaseModel):
@@ -39,10 +39,11 @@ class GeneratedTestCase(BaseModel):
 
 class ArchitectureAnalysisResult(BaseModel):
     decision_tree: DecisionTreeResult
-    test_plan: TestPlanResult
-    risk_points: List[RiskPoint]
-    test_cases: List[GeneratedTestCase]
+    test_plan: Optional[TestPlanResult] = None
+    risk_points: List[RiskPoint] = Field(default_factory=list)
+    test_cases: List[GeneratedTestCase] = Field(default_factory=list)
     analysis_mode: Optional[str] = None
+    llm_provider: Optional[str] = None
 
 
 class ArchitectureAnalysisRead(BaseModel):
@@ -63,13 +64,9 @@ class ArchitectureAnalyzeResponse(ArchitectureAnalysisResult):
 
 class ArchitectureImportOptions(BaseModel):
     import_decision_tree: bool = True
-    import_test_cases: bool = True
-    import_risk_points: bool = True
 
 
 class ArchitectureImportResult(BaseModel):
     analysis_id: int
     requirement_id: Optional[int] = None
     imported_rule_nodes: int
-    imported_test_cases: int
-    updated_risk_nodes: int

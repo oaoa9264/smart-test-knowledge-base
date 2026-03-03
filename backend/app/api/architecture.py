@@ -18,7 +18,6 @@ from app.models.entities import (
     RuleNode,
     RulePath,
     SourceType,
-    TestCase,
 )
 from app.schemas.architecture import (
     ArchitectureAnalysisRead,
@@ -53,6 +52,23 @@ def _save_upload_file(upload_file) -> Optional[str]:
         fp.write(upload_file.file.read())
 
     return "/uploads/architecture/{0}".format(filename)
+
+
+def _resolve_local_image_path(image_path: Optional[str]) -> Optional[str]:
+    if not image_path:
+        return None
+
+    normalized = image_path.strip()
+    if not normalized:
+        return None
+
+    if os.path.isabs(normalized) and os.path.exists(normalized):
+        return normalized
+
+    if normalized.startswith("/uploads/"):
+        return os.path.join(BACKEND_DIR, normalized.lstrip("/"))
+
+    return normalized
 
 
 def _serialize_analysis(row: ArchitectureAnalysis) -> Dict:
@@ -137,9 +153,14 @@ async def analyze_architecture(request: Request, db: Session = Depends(get_db)):
     image_path = _save_upload_file(uploaded_file)
 
     provider = get_analyzer_provider()
-    result = provider.analyze(image_path=image_path, description=description_text, title=title)
+    result = provider.analyze(
+        image_path=_resolve_local_image_path(image_path),
+        description=description_text,
+        title=title,
+    )
     analysis_mode = provider.get_analysis_mode()
-    persisted_result = {**result, "analysis_mode": analysis_mode}
+    llm_provider = provider.get_llm_provider()
+    persisted_result = {**result, "analysis_mode": analysis_mode, "llm_provider": llm_provider}
 
     analysis = ArchitectureAnalysis(
         project_id=project_id,
@@ -197,9 +218,6 @@ def import_analysis(
         db.commit()
 
     imported_rule_nodes = 0
-    imported_test_cases = 0
-    updated_risk_nodes = 0
-
     generated_nodes = result.get("decision_tree", {}).get("nodes", [])
     id_map = {}
 
@@ -236,47 +254,6 @@ def import_analysis(
         db.commit()
         _regenerate_paths(db, requirement.id)
 
-    if payload.import_risk_points:
-        if not id_map:
-            existing_nodes = (
-                db.query(RuleNode).filter(RuleNode.requirement_id == requirement.id, RuleNode.status == NodeStatus.active).all()
-            )
-            by_content = {n.content: n.id for n in existing_nodes}
-            for item in generated_nodes:
-                if item.get("content") in by_content:
-                    id_map[item["id"]] = by_content[item["content"]]
-
-        for risk_point in result.get("risk_points", []):
-            severity = risk_point.get("severity", "medium")
-            for source_id in risk_point.get("related_node_ids", []):
-                real_id = id_map.get(source_id)
-                if not real_id:
-                    continue
-                node = db.query(RuleNode).filter(RuleNode.id == real_id).first()
-                if not node:
-                    continue
-                node.risk_level = _to_risk_level(severity)
-                updated_risk_nodes += 1
-        db.commit()
-
-    if payload.import_test_cases:
-        for case_data in result.get("test_cases", []):
-            case = TestCase(
-                project_id=analysis.project_id,
-                title=case_data.get("title", "需求拆解生成用例"),
-                steps=case_data.get("steps", ""),
-                expected_result=case_data.get("expected_result", ""),
-                risk_level=_to_risk_level(case_data.get("risk_level", "medium")),
-            )
-
-            related_ids = [id_map[node_id] for node_id in case_data.get("related_node_ids", []) if node_id in id_map]
-            if related_ids:
-                case.bound_rule_nodes = db.query(RuleNode).filter(RuleNode.id.in_(related_ids)).all()
-
-            db.add(case)
-            imported_test_cases += 1
-        db.commit()
-
     analysis.status = AnalysisStatus.imported
     db.commit()
 
@@ -284,6 +261,4 @@ def import_analysis(
         "analysis_id": analysis.id,
         "requirement_id": requirement.id if requirement else None,
         "imported_rule_nodes": imported_rule_nodes,
-        "imported_test_cases": imported_test_cases,
-        "updated_risk_nodes": updated_risk_nodes,
     }

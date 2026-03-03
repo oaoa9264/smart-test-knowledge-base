@@ -1,4 +1,5 @@
 import io
+import os
 
 from fastapi.testclient import TestClient
 
@@ -22,55 +23,45 @@ def _build_llm_result():
                 }
             ]
         },
-        "test_plan": {
-            "markdown": "# AI 生成测试方案\n- 覆盖主流程与异常流程",
-            "sections": ["scope", "strategy"],
-        },
-        "risk_points": [
-            {
-                "id": "rp_1",
-                "description": "转账链路有超时风险",
-                "severity": "high",
-                "mitigation": "增加重试与超时兜底",
-                "related_node_ids": ["dt_1"],
-            }
-        ],
-        "test_cases": [
-            {
-                "title": "提现主链路验证",
-                "steps": "验证用户申请到转账完成",
-                "expected_result": "主链路执行成功",
-                "risk_level": "medium",
-                "related_node_ids": ["dt_1"],
-            }
-        ],
     }
 
 
 class _FakeLLMClient:
-    def __init__(self, *, vision_text="阶段1架构理解", json_result=None, raise_in_json=False):
+    def __init__(self, *, vision_text="阶段1架构理解", json_result=None, raise_in_json=False, provider_name="openai"):
         self.vision_text = vision_text
         self.json_result = json_result if json_result is not None else _build_llm_result()
         self.raise_in_json = raise_in_json
+        self.provider_name = provider_name
         self.vision_calls = []
         self.json_calls = []
+        self._last_provider = None
+        self._last_provider_by_method = {}
 
     def chat_with_vision(self, system_prompt, user_content):
         self.vision_calls.append((system_prompt, user_content))
+        self._last_provider = self.provider_name
+        self._last_provider_by_method["chat_with_vision"] = self.provider_name
         return self.vision_text
 
     def chat_with_json(self, system_prompt, user_prompt):
         self.json_calls.append((system_prompt, user_prompt))
+        self._last_provider = self.provider_name
+        self._last_provider_by_method["chat_with_json"] = self.provider_name
         if self.raise_in_json:
             raise RuntimeError("llm unavailable")
         return self.json_result
+
+    def get_last_provider(self, method_name=None):
+        if method_name:
+            return self._last_provider_by_method.get(method_name)
+        return self._last_provider
 
     @staticmethod
     def image_to_base64_url(file_path):
         return "data:image/png;base64,fake"
 
 
-def test_mock_analyzer_returns_four_artifacts():
+def test_mock_analyzer_returns_decision_tree_only():
     provider = MockAnalyzerProvider()
 
     result = provider.analyze(
@@ -84,14 +75,10 @@ def test_mock_analyzer_returns_four_artifacts():
     )
 
     assert "decision_tree" in result
-    assert "test_plan" in result
-    assert "risk_points" in result
-    assert "test_cases" in result
-
     assert len(result["decision_tree"]["nodes"]) >= 3
-    assert len(result["test_cases"]) >= 2
-    assert result["test_cases"][0]["title"].startswith("提现需求拆解-路径用例")
-    assert any(point["severity"] in ["critical", "high"] for point in result["risk_points"])
+    assert result["test_plan"] is None
+    assert result["risk_points"] == []
+    assert result["test_cases"] == []
     assert provider.get_analysis_mode() == "mock"
 
 
@@ -108,8 +95,11 @@ def test_llm_analyzer_text_only_skips_vision_stage():
     assert len(fake_llm.vision_calls) == 0
     assert len(fake_llm.json_calls) == 1
     assert "decision_tree" in result
-    assert result["test_cases"][0]["title"] == "提现主链路验证"
+    assert result["test_plan"] is None
+    assert result["risk_points"] == []
+    assert result["test_cases"] == []
     assert provider.get_analysis_mode() == "llm"
+    assert provider.get_llm_provider() == "openai"
 
 
 def test_llm_analyzer_with_image_runs_two_stages():
@@ -128,6 +118,22 @@ def test_llm_analyzer_with_image_runs_two_stages():
     assert "流程图展示了提现主链路和异常链路" in user_prompt
 
 
+def test_llm_analyzer_vision_output_truncates_to_4000_chars():
+    long_text = "A" * 5000
+    fake_llm = _FakeLLMClient(vision_text=long_text)
+    provider = LLMAnalyzerProvider(llm_client=fake_llm)
+
+    provider.analyze(
+        image_path="/tmp/withdraw_flow.png",
+        title="提现需求拆解",
+        description="用户提交提现申请。",
+    )
+
+    _, user_prompt = fake_llm.json_calls[0]
+    assert ("A" * 4000) in user_prompt
+    assert ("A" * 4001) not in user_prompt
+
+
 def test_llm_analyzer_fallbacks_to_mock_on_llm_error():
     fake_llm = _FakeLLMClient(raise_in_json=True)
     provider = LLMAnalyzerProvider(llm_client=fake_llm)
@@ -138,8 +144,11 @@ def test_llm_analyzer_fallbacks_to_mock_on_llm_error():
         description="用户提交提现申请。如果余额不足，则拒绝提现。",
     )
 
-    assert result["test_cases"][0]["title"].startswith("提现需求拆解-路径用例")
+    assert "decision_tree" in result
+    assert len(result["decision_tree"]["nodes"]) >= 1
+    assert result["test_cases"] == []
     assert provider.get_analysis_mode() == "mock_fallback"
+    assert provider.get_llm_provider() == "openai"
 
 
 def test_llm_analyzer_fallbacks_to_mock_on_invalid_llm_payload():
@@ -152,7 +161,9 @@ def test_llm_analyzer_fallbacks_to_mock_on_invalid_llm_payload():
         description="用户提交退款申请。如果订单已发货，则人工审核。",
     )
 
-    assert result["test_cases"][0]["title"].startswith("退款流程拆解-路径用例")
+    assert "decision_tree" in result
+    assert len(result["decision_tree"]["nodes"]) >= 1
+    assert result["test_cases"] == []
     assert provider.get_analysis_mode() == "mock_fallback"
 
 
@@ -199,11 +210,9 @@ def test_llm_analyzer_normalizes_common_payload_shape_drifts():
 
     assert provider.get_analysis_mode() == "llm"
     assert result["decision_tree"]["nodes"][0]["id"] == "dt_1"
-    assert result["test_plan"]["sections"] == ["scope", "strategy"]
-    assert result["risk_points"][0]["id"] == "rp_1"
-    assert result["risk_points"][0]["related_node_ids"] == ["dt_1"]
-    assert isinstance(result["test_cases"][0]["steps"], str)
-    assert result["test_cases"][0]["related_node_ids"] == ["dt_1"]
+    assert result["test_plan"] is None
+    assert result["risk_points"] == []
+    assert result["test_cases"] == []
 
 
 def test_llm_analyzer_normalizes_enveloped_alias_payload():
@@ -255,12 +264,65 @@ def test_llm_analyzer_normalizes_enveloped_alias_payload():
     assert provider.get_analysis_mode() == "llm"
     assert result["decision_tree"]["nodes"][0]["id"] == "root_1"
     assert result["decision_tree"]["nodes"][0]["type"] == "root"
-    assert result["test_plan"]["sections"] == ["scope", "strategy"]
-    assert result["risk_points"][0]["severity"] == "critical"
-    assert result["risk_points"][0]["related_node_ids"] == ["root_1"]
-    assert result["test_cases"][0]["title"] == "提现主链路验证"
-    assert isinstance(result["test_cases"][0]["steps"], str)
-    assert result["test_cases"][0]["related_node_ids"] == ["root_1"]
+    assert result["test_plan"] is None
+    assert result["risk_points"] == []
+    assert result["test_cases"] == []
+
+
+def test_llm_analyzer_deduplicates_exact_sibling_nodes_and_relinks_children():
+    fake_llm = _FakeLLMClient(
+        json_result={
+            "decision_tree": {
+                "nodes": [
+                    {"id": "dt_1", "type": "root", "content": "用户提交订单", "parent_id": None, "risk_level": "medium"},
+                    {"id": "dt_2", "type": "branch", "content": "进入支付页", "parent_id": "dt_1", "risk_level": "low"},
+                    {"id": "dt_3", "type": "branch", "content": "进入支付页", "parent_id": "dt_1", "risk_level": "low"},
+                    {"id": "dt_4", "type": "action", "content": "展示支付方式", "parent_id": "dt_3", "risk_level": "low"},
+                ]
+            }
+        }
+    )
+    provider = LLMAnalyzerProvider(llm_client=fake_llm)
+
+    result = provider.analyze(
+        image_path=None,
+        title="下单流程拆解",
+        description="用户提交订单并进入支付页面。",
+    )
+
+    nodes = result["decision_tree"]["nodes"]
+    node_ids = {node["id"] for node in nodes}
+    assert "dt_3" not in node_ids
+    child = next(node for node in nodes if node["id"] == "dt_4")
+    assert child["parent_id"] == "dt_2"
+
+
+def test_llm_analyzer_warns_when_node_count_too_high(caplog):
+    nodes = [
+        {"id": "dt_1", "type": "root", "content": "根节点", "parent_id": None, "risk_level": "medium"},
+    ]
+    for i in range(2, 43):
+        nodes.append(
+            {
+                "id": f"dt_{i}",
+                "type": "branch",
+                "content": f"分支{i}",
+                "parent_id": "dt_1",
+                "risk_level": "low",
+            }
+        )
+
+    fake_llm = _FakeLLMClient(json_result={"decision_tree": {"nodes": nodes}})
+    provider = LLMAnalyzerProvider(llm_client=fake_llm)
+
+    with caplog.at_level("WARNING"):
+        provider.analyze(
+            image_path=None,
+            title="超大流程",
+            description="用于触发节点过多日志。",
+        )
+
+    assert "节点数过多，可能存在冗余" in caplog.text
 
 
 def test_mock_analyzer_combines_description_and_flowchart_context():
@@ -296,7 +358,63 @@ def test_architecture_api_analyze_supports_image_only(monkeypatch):
     assert analyze_resp.status_code == 201
     analyze_data = analyze_resp.json()
     assert analyze_data["analysis_mode"] == "mock"
+    assert analyze_data["llm_provider"] is None
     assert "流程图" in analyze_data["decision_tree"]["nodes"][0]["content"]
+
+
+def test_architecture_api_passes_absolute_image_path_to_provider(monkeypatch):
+    class _CapturePathProvider:
+        def __init__(self):
+            self.received_image_path = None
+
+        def analyze(self, image_path, description, title=None):
+            self.received_image_path = image_path
+            return {
+                "decision_tree": {
+                    "nodes": [
+                        {
+                            "id": "dt_1",
+                            "type": "root",
+                            "content": "test",
+                            "parent_id": None,
+                            "risk_level": "medium",
+                        }
+                    ]
+                },
+                "test_plan": None,
+                "risk_points": [],
+                "test_cases": [],
+            }
+
+        @staticmethod
+        def get_analysis_mode():
+            return "llm"
+
+        @staticmethod
+        def get_llm_provider():
+            return "openai"
+
+    provider = _CapturePathProvider()
+    monkeypatch.setattr("app.api.architecture.get_analyzer_provider", lambda: provider)
+
+    project_resp = client.post("/api/projects", json={"name": "arch-p1-abs-path", "description": "architecture"})
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    analyze_resp = client.post(
+        "/api/ai/architecture/analyze",
+        data={
+            "project_id": str(project_id),
+            "title": "图片路径传参",
+            "description_text": "文本补充",
+        },
+        files={"image": ("payment_flow.png", io.BytesIO(b"fake-image-content"), "image/png")},
+    )
+
+    assert analyze_resp.status_code == 201
+    assert provider.received_image_path is not None
+    assert os.path.isabs(provider.received_image_path)
+    assert os.path.exists(provider.received_image_path)
 
 
 def test_architecture_api_analyze_get_import_flow(monkeypatch):
@@ -321,7 +439,8 @@ def test_architecture_api_analyze_get_import_flow(monkeypatch):
     analyze_data = analyze_resp.json()
     assert analyze_data["analysis_mode"] == "mock"
     analysis_id = analyze_data["id"]
-    assert analyze_data["test_cases"][0]["title"].startswith("提现需求拆解-路径用例")
+    assert len(analyze_data["decision_tree"]["nodes"]) > 0
+    assert analyze_data["test_cases"] == []
 
     get_resp = client.get(f"/api/ai/architecture/{analysis_id}")
     assert get_resp.status_code == 200
@@ -332,21 +451,13 @@ def test_architecture_api_analyze_get_import_flow(monkeypatch):
         f"/api/ai/architecture/{analysis_id}/import",
         json={
             "import_decision_tree": True,
-            "import_test_cases": True,
-            "import_risk_points": True,
         },
     )
     assert import_resp.status_code == 200
     import_data = import_resp.json()
     assert import_data["imported_rule_nodes"] > 0
-    assert import_data["imported_test_cases"] > 0
     assert import_data["requirement_id"] is not None
 
     tree_resp = client.get(f"/api/rules/requirements/{import_data['requirement_id']}/tree")
     assert tree_resp.status_code == 200
     assert len(tree_resp.json()["nodes"]) > 0
-
-    case_resp = client.get(f"/api/testcases/projects/{project_id}")
-    assert case_resp.status_code == 200
-    assert len(case_resp.json()) > 0
-    assert case_resp.json()[0]["title"].startswith("提现需求拆解-路径用例")

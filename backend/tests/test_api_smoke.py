@@ -286,3 +286,57 @@ def test_update_node_rejects_cycle_parent_assignment():
         json={"parent_id": child_id},
     )
     assert cycle_resp.status_code == 400
+
+
+def test_update_node_allows_parent_id_to_become_null():
+    project_resp = client.post(
+        "/api/projects",
+        json={"name": "P6-{0}".format(uuid4().hex[:8]), "description": "set parent null"},
+    )
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    requirement_resp = client.post(
+        f"/api/projects/{project_id}/requirements",
+        json={"title": "提级到根节点", "raw_text": "支持 parent_id 置空", "source_type": "prd"},
+    )
+    assert requirement_resp.status_code == 201
+    requirement_id = requirement_resp.json()["id"]
+
+    root_resp = client.post(
+        "/api/rules/nodes",
+        json={
+            "requirement_id": requirement_id,
+            "parent_id": None,
+            "node_type": "root",
+            "content": "root",
+            "risk_level": "high",
+        },
+    )
+    assert root_resp.status_code == 201
+    root_id = root_resp.json()["id"]
+
+    child_resp = client.post(
+        "/api/rules/nodes",
+        json={
+            "requirement_id": requirement_id,
+            "parent_id": root_id,
+            "node_type": "condition",
+            "content": "child",
+            "risk_level": "medium",
+        },
+    )
+    assert child_resp.status_code == 201
+    child_id = child_resp.json()["id"]
+
+    update_resp = client.put(
+        f"/api/rules/nodes/{child_id}",
+        json={"parent_id": None},
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["node"]["parent_id"] is None
+
+    tree_resp = client.get(f"/api/rules/requirements/{requirement_id}/tree")
+    assert tree_resp.status_code == 200
+    nodes = {node["id"]: node for node in tree_resp.json()["nodes"]}
+    assert nodes[child_id]["parent_id"] is None

@@ -51,6 +51,52 @@ export interface TestCase {
   bound_path_ids: string[];
 }
 
+export type ImportConfidence = "high" | "medium" | "low" | "none";
+export type ImportAnalysisMode = "llm" | "mock_fallback";
+
+export interface ParsedCasePreview {
+  index: number;
+  title: string;
+  steps: string;
+  expected_result: string;
+  matched_node_ids: string[];
+  matched_node_contents: string[];
+  suggested_risk_level?: RiskLevel;
+  confidence: ImportConfidence;
+  match_reason: string;
+}
+
+export interface ImportParseResponse {
+  parsed_cases: ParsedCasePreview[];
+  total_cases: number;
+  auto_matched: number;
+  need_review: number;
+  analysis_mode: ImportAnalysisMode;
+  llm_provider?: "openai" | "zhipu" | string | null;
+}
+
+export interface ImportConfirmCasePayload {
+  title: string;
+  steps: string;
+  expected_result: string;
+  risk_level: RiskLevel;
+  bound_rule_node_ids: string[];
+  bound_path_ids: string[];
+  skip_import?: boolean;
+}
+
+export interface ImportConfirmPayload {
+  requirement_id: number;
+  project_id: number;
+  cases: ImportConfirmCasePayload[];
+}
+
+export interface ImportConfirmResponse {
+  imported_count: number;
+  bound_count: number;
+  skipped_count: number;
+}
+
 export interface CoverageRow {
   node_id: string;
   content: string;
@@ -98,29 +144,11 @@ export interface DecisionTreeNode {
   risk_level: RiskLevel;
 }
 
-export interface RiskPoint {
-  id: string;
-  description: string;
-  severity: RiskLevel;
-  mitigation: string;
-  related_node_ids: string[];
-}
-
-export interface GeneratedTestCase {
-  title: string;
-  steps: string;
-  expected_result: string;
-  risk_level: RiskLevel;
-  related_node_ids: string[];
-}
-
 export interface ArchitectureAnalysisResult {
   id: number;
   analysis_mode: "llm" | "mock" | "mock_fallback";
+  llm_provider?: "openai" | "zhipu" | string | null;
   decision_tree: { nodes: DecisionTreeNode[] };
-  test_plan: { markdown: string; sections: string[] };
-  risk_points: RiskPoint[];
-  test_cases: GeneratedTestCase[];
 }
 
 export interface ArchitectureAnalysisDetail {
@@ -137,16 +165,12 @@ export interface ArchitectureAnalysisDetail {
 
 export interface ArchitectureImportOptions {
   import_decision_tree: boolean;
-  import_test_cases: boolean;
-  import_risk_points: boolean;
 }
 
 export interface ArchitectureImportResult {
   analysis_id: number;
   requirement_id: number | null;
   imported_rule_nodes: number;
-  imported_test_cases: number;
-  updated_risk_nodes: number;
 }
 
 export type RecoMode = "FULL" | "CHANGE";

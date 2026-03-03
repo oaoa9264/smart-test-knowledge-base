@@ -1,5 +1,5 @@
 import { http } from "./client";
-import type { TestCase } from "../types";
+import type { ImportConfirmPayload, ImportConfirmResponse, ImportParseResponse, TestCase } from "../types";
 
 export async function fetchTestCases(projectId: number, requirementId?: number): Promise<TestCase[]> {
   const { data } = await http.get<TestCase[]>(`/api/testcases/projects/${projectId}`, {
@@ -45,4 +45,20 @@ export async function fetchTestCase(caseId: number): Promise<TestCase> {
 
 export async function deleteTestCase(caseId: number): Promise<void> {
   await http.delete(`/api/testcases/${caseId}`);
+}
+
+export async function parseImportFile(file: File, requirementId: number): Promise<ImportParseResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("requirement_id", String(requirementId));
+  const { data } = await http.post<ImportParseResponse>("/api/testcases/import/parse", formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 120000,
+  });
+  return data;
+}
+
+export async function confirmImport(payload: ImportConfirmPayload): Promise<ImportConfirmResponse> {
+  const { data } = await http.post<ImportConfirmResponse>("/api/testcases/import/confirm", payload);
+  return data;
 }
