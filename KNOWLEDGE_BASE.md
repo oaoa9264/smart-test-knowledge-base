@@ -31,6 +31,10 @@
 | **P1** | 规则变更影响分析 | 规则节点修改/删除后自动标记关联用例为 `needs_review` |
 | **P1** | 回归推荐算法层 | 基于带权集合覆盖的贪心算法，输出最小回归用例集（FULL/CHANGE）及可解释收益 |
 | **P1+** | 需求拆解 | 支持仅流程图、仅文字或图文联合分析，生成判断树并可一键导入 |
+| **P1+** | 需求版本化 | 需求支持创建新版本、版本列表查看，规则树按版本隔离 |
+| **P1+** | 规则树版本 Diff | LLM 语义级对比两个版本的规则树差异，含算法兜底 |
+| **P1+** | 规则树会话式 AI 生成 | 基于会话的规则树生成、审查、确认导入、增量更新 |
+| **P1+** | 风险识别分析 | AI 风险识别分析、风险决策、风险转节点 |
 
 ### 1.4 核心业务流
 
@@ -45,10 +49,25 @@
 
                     ┌────────────────────────────────────────┐
                     │      需求拆解 (P1+ 新增)          │
-                    │                                        │
                     │ 上传流程图和/或描述 → AI 分析 → 生成判断树 │
-                    │   └─ 判断树 (决策节点树)                 │
                     │ → 人工确认 → 一键导入正式库               │
+                    └────────────────────────────────────────┘
+
+                    ┌────────────────────────────────────────┐
+                    │      需求版本化 + 规则树 Diff (P1+ 新增)  │
+                    │ 创建新版本 → 独立编辑规则树 → 版本对比      │
+                    │ (LLM 语义 Diff + 算法兜底)               │
+                    └────────────────────────────────────────┘
+
+                    ┌────────────────────────────────────────┐
+                    │      规则树会话式 AI 生成 (P1+ 新增)      │
+                    │ 创建会话 → AI 生成 → AI 审查 → 确认导入    │
+                    │ → 需求更新后增量更新规则树                 │
+                    └────────────────────────────────────────┘
+
+                    ┌────────────────────────────────────────┐
+                    │      风险识别分析 (P1+ 新增)              │
+                    │ AI 识别规则树风险 → 逐条决策 → 转为节点     │
                     └────────────────────────────────────────┘
 ```
 
@@ -122,11 +141,15 @@
 │   │   │   ├── coverage.py         # 覆盖矩阵接口
 │   │   │   ├── projects.py         # 项目 & 需求接口
 │   │   │   ├── recommendation.py   # 回归推荐接口 (P1 新增)
+│   │   │   ├── risks.py            # 风险识别分析接口 (P1+ 新增)
+│   │   │   ├── rule_tree_session.py # 规则树会话式 AI 生成接口 (P1+ 新增)
 │   │   │   ├── rules.py            # 规则树 CRUD & 影响分析接口
 │   │   │   ├── testcase_import.py  # 测试用例智能导入接口 (P1 新增)
-│   │   │   └── testcases.py        # 测试用例接口
+│   │   │   ├── testcases.py        # 测试用例接口
+│   │   │   └── tree_diff.py        # 规则树版本 Diff 接口 (P1+ 新增)
 │   │   ├── core/
-│   │   │   └── database.py         # 数据库连接 & Session 管理
+│   │   │   ├── database.py         # 数据库连接 & Session 管理
+│   │   │   └── schema_migrations.py # 数据库迁移辅助 (需求版本化字段)
 │   │   ├── models/
 │   │   │   ├── __init__.py
 │   │   │   └── entities.py         # SQLAlchemy 实体模型
@@ -135,9 +158,12 @@
 │   │   │   ├── architecture.py     # 需求拆解 Pydantic DTO (P1+ 新增)
 │   │   │   ├── project.py          # 项目/需求 Pydantic DTO (含 Create/Update/Read)
 │   │   │   ├── recommendation.py   # 回归推荐 DTO (P1 新增)
+│   │   │   ├── risk.py             # 风险分析 DTO (P1+ 新增)
 │   │   │   ├── rule.py             # 规则节点/路径 Pydantic DTO
+│   │   │   ├── rule_tree_session.py # 规则树会话 DTO (P1+ 新增)
 │   │   │   ├── testcase.py         # 测试用例 Pydantic DTO (含 Create/Update/Read/UpdateStatus)
-│   │   │   └── testcase_import.py  # 测试用例导入 DTO (解析预览/确认导入)
+│   │   │   ├── testcase_import.py  # 测试用例导入 DTO (解析预览/确认导入)
+│   │   │   └── tree_diff.py        # 规则树版本 Diff DTO (P1+ 新增)
 │   │   ├── services/
 │   │   │   ├── ai_parser.py        # AI 需求解析逻辑
 │   │   │   ├── architecture_analyzer.py  # 需求拆解分析引擎 (P1+ 新增)
@@ -149,9 +175,12 @@
 │   │   │   ├── impact_domain.py    # 变更影响域计算 (P1 新增)
 │   │   │   ├── llm_client.py       # 向后兼容包装器（自动构建多模型回退链）
 │   │   │   ├── openai_client.py    # OpenAI 客户端实现（json_object）
-│   │   │   ├── prompts/            # Prompt 模板（需求拆解 + 测试用例匹配）
+│   │   │   ├── prompts/            # Prompt 模板（需求拆解 + 测试用例匹配 + 规则树会话）
 │   │   │   ├── recommender.py      # 贪心推荐算法 (P1 新增)
 │   │   │   ├── risk_scorer.py      # 节点风险权重计算 (P1 新增)
+│   │   │   ├── risk_service.py     # 风险分析服务 (P1+ 新增)
+│   │   │   ├── rule_tree_session.py # 规则树会话服务 (P1+ 新增)
+│   │   │   ├── tree_diff.py        # 规则树版本 Diff 服务 (P1+ 新增)
 │   │   │   ├── testcase_importer.py # Excel/XMind 用例解析服务
 │   │   │   ├── testcase_matcher.py  # 用例-规则节点匹配服务（LLM + 关键词兜底）
 │   │   │   ├── rule_engine.py      # 规则路径推导 (DFS)
@@ -180,21 +209,25 @@
 │   ├── src/
 │   │   ├── api/                    # API 调用封装
 │   │   │   ├── architecture.ts     # 需求拆解 API (P1+ 新增)
-│   │   │   ├── client.ts           # Axios 实例 (baseURL 配置)
+│   │   │   ├── client.ts           # Axios 实例 (baseURL 配置 + getErrorMessage)
 │   │   │   ├── coverage.ts         # 覆盖矩阵 API
-│   │   │   ├── projects.ts         # 项目 & 需求 API
+│   │   │   ├── projects.ts         # 项目 & 需求 & 版本化 API
 │   │   │   ├── recommendation.ts   # 回归推荐 API (P1 新增)
+│   │   │   ├── risks.ts            # 风险分析 API (P1+ 新增)
 │   │   │   ├── rules.ts            # 规则树 & AI 解析 API
-│   │   │   └── testcases.ts        # 测试用例 API
+│   │   │   ├── ruleTreeSession.ts  # 规则树会话 API (P1+ 新增)
+│   │   │   ├── testcases.ts        # 测试用例 API
+│   │   │   └── treeDiff.ts         # 规则树版本 Diff API (P1+ 新增)
 │   │   ├── pages/
 │   │   │   ├── ArchitectureAnalysis/  # 需求拆解页 (P1+ 新增)
 │   │   │   ├── ProjectList/        # 项目 & 需求管理页
 │   │   │   ├── Recommendation/     # 回归推荐页 (P1 新增)
 │   │   │   ├── RuleTree/           # 规则树可视化编辑页（simple-mind-map）
 │   │   │   │   ├── MindMapWrapper.tsx  # simple-mind-map React 封装
-│   │   │   │   ├── dataAdapter.ts      # RuleNode[] <-> MindMapTree 双向转换
+│   │   │   │   ├── dataAdapter.ts      # RuleNode[] <-> MindMapTree 双向转换 + 风险高亮
 │   │   │   │   ├── mindMapTheme.ts     # 规则树主题注册
-│   │   │   │   └── index.tsx           # 规则树页面（目录树 + 思维导图）
+│   │   │   │   ├── RiskPanel.tsx       # 风险识别面板 (P1+ 新增)
+│   │   │   │   └── index.tsx           # 规则树页面（目录树 + 思维导图 + 版本管理 + 会话 AI + 风险面板）
 │   │   │   ├── TestCases/          # 测试用例管理页
 │   │   │   └── Coverage/           # 覆盖矩阵页
 │   │   ├── stores/
@@ -258,6 +291,8 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 | title | String(255) | NOT NULL | 需求标题 |
 | raw_text | Text | NOT NULL | 需求原文 |
 | source_type | Enum(prd/flowchart/api_doc) | NOT NULL, 默认 prd | 来源类型 |
+| version | Integer | NOT NULL, 默认 1 | 版本号 |
+| requirement_group_id | Integer | 可选, 索引 | 版本组 ID (首次创建版本时设为 v1 的 id) |
 | created_at | DateTime | NOT NULL | 创建时间 |
 
 #### RuleNode (规则节点)
@@ -368,6 +403,36 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 | gain_node_ids | Text | NOT NULL | 本轮新增覆盖节点 ID 列表 (JSON 序列化) |
 | top_contributors | Text | NOT NULL | 关键贡献节点及风险值 (JSON 序列化) |
 | why_selected | String(255) | NOT NULL | 可解释推荐原因 |
+
+#### RuleTreeSession (规则树会话，P1+ 新增)
+
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| id | Integer | PK, 自增 | 会话 ID |
+| requirement_id | Integer | FK → requirements.id, NOT NULL, 索引 | 所属需求 |
+| title | String(255) | NOT NULL | 会话标题 |
+| status | Enum | NOT NULL, 默认 active | 会话状态 |
+| confirmed_tree_snapshot | Text | 可选 | 确认后的规则树 JSON 快照 |
+| requirement_text_snapshot | Text | 可选 | 需求文本快照 |
+| created_at | DateTime | NOT NULL | 创建时间 |
+| updated_at | DateTime | NOT NULL | 更新时间 |
+
+**会话状态 (RuleTreeSessionStatus):**
+- `active` — 进行中
+- `confirmed` — 已确认并导入
+- `archived` — 已归档
+
+#### RuleTreeMessage (规则树会话消息，P1+ 新增)
+
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| id | Integer | PK, 自增 | 消息 ID |
+| session_id | Integer | FK → rule_tree_sessions.id, NOT NULL, 索引 | 所属会话 |
+| role | String(20) | NOT NULL | 角色 (user/assistant/system) |
+| content | Text | NOT NULL | 消息内容 |
+| message_type | String(50) | NOT NULL | 消息类型 (user_input/generation/review/update/confirm 等) |
+| tree_snapshot | Text | 可选 | 该消息关联的规则树 JSON 快照 |
+| created_at | DateTime | NOT NULL | 创建时间 |
 
 #### 关联表
 
@@ -579,6 +644,79 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 - 推荐算法由 `recommender` 执行带权集合覆盖贪心：每轮选择 `gain / cost` 最大用例
 - 每次运行都会写入 `reco_run` 和 `reco_result`，并返回可解释字段：`gain_nodes`、`top_contributors`、`why_selected`
 
+### 4.9 需求版本化 (P1+ 新增)
+
+| 方法 | 路径 | 说明 | 请求体 | 响应 |
+|------|------|------|--------|------|
+| POST | `/api/projects/{project_id}/requirements/{requirement_id}/new-version` | 创建需求新版本 | — | RequirementRead (201) |
+| GET | `/api/projects/{project_id}/requirements/{requirement_id}/versions` | 获取需求版本列表 | — | RequirementVersionRead[] |
+
+**关键机制：**
+- 首次创建新版本时，若 v1 的 `requirement_group_id` 为空，则将其设为 v1 的 `id`，作为版本组标识
+- 新版本复制原需求的 `title`、`raw_text`、`source_type`，`version` 递增
+- 版本列表按 `version desc` 排序，每个版本返回 `rule_node_count`（活跃规则节点数量）
+- 规则树按版本隔离：不同版本的需求拥有独立的 `rule_nodes`，互不影响
+
+### 4.10 规则树版本 Diff (`/api/rules/diff`，P1+ 新增)
+
+| 方法 | 路径 | 说明 | 请求体 | 响应 |
+|------|------|------|--------|------|
+| GET | `/api/rules/diff?old_requirement_id=N&new_requirement_id=M` | 语义级规则树版本对比 | — | SemanticDiffResult |
+
+**SemanticDiffResult 响应结构：**
+```json
+{
+  "summary": "总体变更摘要",
+  "flow_changes": [
+    {
+      "change_type": "added|removed|modified",
+      "old_path": "旧流程路径描述",
+      "new_path": "新流程路径描述",
+      "description": "变更说明"
+    }
+  ],
+  "added": [{"id": "...", "content": "...", "parent_id": "..."}],
+  "removed": [{"id": "...", "content": "...", "parent_id": "..."}],
+  "modified": [{"id": "...", "old_content": "...", "new_content": "...", "parent_id": "..."}],
+  "unchanged": [{"id": "...", "content": "...", "parent_id": "..."}]
+}
+```
+
+**关键机制：**
+- 优先使用 LLM 进行语义级 Diff，生成 `summary` 和 `flow_changes`（流程变更）
+- LLM Diff 失败时自动回退到算法 Diff（基于节点内容模糊匹配 + SequenceMatcher）
+- 算法 Diff 分为三类：`added`（新增节点）、`removed`（删除节点）、`modified`（内容变更节点）
+- 序列化使用缩进文本格式传递给 LLM，提高语义理解准确度
+
+### 4.11 规则树会话式 AI 生成 (`/api/rules/sessions`，P1+ 新增)
+
+| 方法 | 路径 | 说明 | 请求体 | 响应 |
+|------|------|------|--------|------|
+| POST | `/api/rules/sessions` | 创建会话 | `{requirement_id, title?}` | RuleTreeSessionRead (201) |
+| GET | `/api/rules/sessions?requirement_id=N` | 获取会话列表 | — | RuleTreeSessionRead[] |
+| GET | `/api/rules/sessions/{session_id}` | 获取会话详情（含消息历史） | — | RuleTreeSessionDetailRead |
+| POST | `/api/rules/sessions/{session_id}/generate` | 生成规则树 | `{user_input?}` | RuleTreeGenerateResponse |
+| POST | `/api/rules/sessions/{session_id}/update` | 增量更新规则树 | `{user_input}` | RuleTreeUpdateResponse |
+| POST | `/api/rules/sessions/{session_id}/confirm` | 确认并导入规则树 | `{tree_data}` | RuleTreeConfirmResponse |
+
+**关键机制：**
+- 生成流程：用户输入 → LLM 生成规则树 → LLM 自动审查 → 返回结果 + 审查意见
+- 增量更新：基于已有规则树和用户反馈/新需求，LLM 生成更新后的规则树
+- 确认导入：将最终规则树写入正式 `rule_nodes` 表，清理旧节点后插入新节点并重算路径
+- 消息持久化：每轮交互都会记录 `user_input`、`generation`、`review`、`update` 等消息到 `rule_tree_messages`
+- 支持需求文本快照：创建会话时保存需求原文，确保后续交互基于创建时的需求版本
+
+### 4.12 风险识别分析 (`/api/risks`，P1+ 新增)
+
+| 方法 | 路径 | 说明 | 请求体 | 响应 |
+|------|------|------|--------|------|
+| POST | `/api/risks/analyze` | AI 风险识别分析 | `{requirement_id}` | RiskAnalysisResult |
+
+**关键机制：**
+- 基于需求文本和规则树结构，通过 LLM 识别潜在风险点
+- 用户可对每条风险项进行决策（接受/忽略/转节点）
+- "转节点"将风险项直接转化为规则树节点，增强规则覆盖范围
+
 ---
 
 ## 5. 核心业务逻辑
@@ -667,6 +805,7 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 - 基于多 provider 调用：OpenAI 侧使用 `openai` SDK（支持 `base_url` 网关），智谱侧使用 SSE（`httpx + text/event-stream`）
 - 默认回退顺序：OpenAI 优先，智谱兜底（上层仍保持 `LLMClient()` 零侵入调用）
 - 支持多模态调用与 JSON 结构化调用（`response_format=json_object`）
+- 支持通用消息列表调用 `chat_with_messages(messages, response_format?)`，用于会话式 AI 交互（P1+ 新增）
 - 支持重试与超时控制（`LLM_MAX_RETRIES` / `LLM_CONNECT_TIMEOUT` / `LLM_REQUEST_TIMEOUT`）
 - 支持 `max_tokens/temperature/seed` 参数透传；`thinking` 仅对智谱 provider 生效
 - 支持流式响应增量拼接与稳健 JSON 提取（可从包裹文本中抽取对象，支持双重 JSON 编码解码）
@@ -675,7 +814,9 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 - 支持本地图片转 `data:` URL（base64）并做图片大小上限保护
 
 **Prompt 管理：**
-- `backend/app/services/prompts/architecture.py` 统一维护阶段1/阶段2 Prompt 模板，便于持续调优。
+- `backend/app/services/prompts/architecture.py` 统一维护需求拆解阶段1/阶段2 Prompt 模板
+- `backend/app/services/prompts/rule_tree_session.py` 维护规则树会话式 AI 生成相关 Prompt（生成模板 / 审查提示 / 增量更新模板）（P1+ 新增）
+- `backend/app/services/prompts/risk_analysis.py` 维护风险识别分析 Prompt（P1+ 新增）
 
 **MockAnalyzerProvider 分析流程（兜底引擎）：**
 
@@ -755,6 +896,48 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 - CHANGE 模式下 `universe = impact_domain`
 - 影响域节点风险值额外乘以 `change_boost` (默认 1.5)
 
+### 5.10 规则树版本 Diff (`tree_diff.py`，P1+ 新增)
+
+**目标：** 语义级对比两个版本的规则树差异，输出可读的变更报告。
+
+**双模式策略：**
+1. **LLM 语义 Diff（优先）**：将两棵规则树序列化为缩进文本 → 交给 LLM 进行语义级对比 → 返回 `summary`（变更摘要）和 `flow_changes`（流程级变更列表）
+2. **算法 Diff（兜底）**：当 LLM 调用失败时，使用基于 `SequenceMatcher` 的模糊匹配算法，按内容相似度对比节点，输出 `added`、`removed`、`modified`、`unchanged` 四类节点列表
+
+**树序列化方式：**
+- 递归遍历规则树，按缩进层级生成可读文本
+- 格式：`[类型] 内容 (风险等级: xxx)`，子节点缩进两个空格
+
+### 5.11 规则树会话式 AI 生成 (`rule_tree_session.py`，P1+ 新增)
+
+**目标：** 通过多轮对话式交互，由 AI 生成、审查和迭代优化规则树，最终确认导入正式库。
+
+**核心流程：**
+1. **创建会话** — 关联需求、保存需求文本快照、初始化消息历史
+2. **生成规则树** — 用户提供需求描述 → LLM 生成规则树（JSON 格式） → LLM 自动审查质量 → 返回生成结果和审查意见
+3. **增量更新** — 用户提供修改意见 → LLM 基于已有树和反馈生成更新后的规则树 → 计算新旧树 diff
+4. **确认导入** — 将最终树写入正式 `rule_nodes` 表，删除旧节点 → 插入新节点 → 重算规则路径
+
+**消息持久化机制：**
+- 每轮交互产生的输入、生成结果、审查意见、更新请求均记录为 `RuleTreeMessage`
+- `message_type` 区分消息类型：`user_input`、`generation`、`review`、`update`、`confirm`
+- `tree_snapshot` 存储每步的规则树 JSON 快照，支持回溯查看历史状态
+
+**树规范化：**
+- 确保每棵生成的树有唯一 root 节点
+- 所有节点 ID 使用 `dt_` 前缀统一规范
+- 校验 `parent_id` 引用完整性
+
+### 5.12 风险识别分析 (`risk_service.py`，P1+ 新增)
+
+**目标：** 基于需求文本和规则树结构，利用 AI 自动识别潜在风险点。
+
+**核心流程：**
+1. 收集需求文本和规则树全量节点信息
+2. 通过 LLM 分析输出风险项列表（含风险描述、严重程度、建议处理方式）
+3. 用户逐条决策：接受（标注为已识别风险）、忽略（跳过该风险）、转节点（将风险转化为新的规则节点加入树中）
+4. "转节点"操作会创建新的 `RuleNode` 并自动重算路径
+
 ---
 
 ## 6. 前端页面说明
@@ -791,7 +974,7 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 | 页面 | 路由 | 核心功能 |
 |------|------|----------|
 | **项目与需求** | `/` | 项目 CRUD (列表/新建/查看/编辑/删除)、需求 CRUD (列表/新建/查看/编辑/删除) |
-| **规则树** | `/rule-tree` | simple-mind-map 思维导图规则树、节点 CRUD、画布改动自动同步、AI 解析导入、变更影响提示 |
+| **规则树** | `/rule-tree` | simple-mind-map 思维导图规则树、节点 CRUD、画布改动自动同步、AI 解析导入、变更影响提示、版本管理与对比、会话式 AI 生成、风险识别面板 |
 | **用例管理** | `/test-cases` | 用例 CRUD (新建/查看/编辑/删除)、绑定规则节点/路径、按需求筛选、路径校验、状态标签 |
 | **覆盖矩阵** | `/coverage` | 按当前选中需求展示覆盖率仪表盘、高风险告警、节点覆盖详情表 |
 | **回归推荐** | `/recommendation` | 执行 FULL/CHANGE 推荐、查看推荐解释、查看历史 run、跳转用例并高亮 |
@@ -827,6 +1010,23 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 8. 点击「AI 半自动解析」→ 输入需求文本 → 生成草稿表格预览 → 确认导入
    - 草稿区会显示“解析引擎”提示（`LLM` / `Mock（LLM降级）` / `Mock`），用于现场判断质量来源
 9. 新增节点 → Modal 表单，可选择父节点
+
+**版本管理 (P1+ 新增)：**
+10. 工具栏新增版本选择器下拉框，展示当前需求所有版本 (`v1`, `v2`, ...)
+11. 点击「创建新版本」→ 基于当前版本创建新版本，自动跳转到新版本
+12. 选择旧版本 → 页面进入只读模式，禁用编辑/新增/删除/AI解析等操作
+13. 点击「版本对比」→ 弹窗展示两个版本的语义 Diff（LLM 生成的变更摘要 + 流程级变更列表 + 节点级增删改）
+
+**会话式 AI 生成 (P1+ 新增)：**
+14. 点击「AI 生成规则树」→ 打开右侧抽屉 (Drawer)，可创建新会话或选择历史会话
+15. 输入需求描述 → AI 生成规则树 + 自动审查 → 展示生成结果和审查意见
+16. 对生成结果可进行增量更新：输入修改意见 → AI 基于原树和反馈重新生成
+17. 确认满意后点击「确认导入」→ 规则树写入正式库，清理旧节点并重算路径
+
+**风险识别面板 (P1+ 新增)：**
+18. 工具栏新增「风险识别」按钮，点击后底部展开 RiskPanel
+19. AI 分析当前规则树识别潜在风险点，每条风险可操作：接受 / 忽略 / 转为规则节点
+20. 风险高亮：存在风险的节点在思维导图中以特殊标记显示（通过 `dataAdapter` 中的 `nodeRiskMap` 实现）
 
 ### 6.5 用例管理页面交互流程
 
@@ -919,7 +1119,7 @@ postgresql+psycopg://postgres:postgres@postgres:5432/test_knowledge_base
 
 ### 7.2 数据库初始化
 
-应用启动时通过 `Base.metadata.create_all(bind=engine)` 自动创建所有表，无需手动迁移。同时自动创建 `uploads/` 目录用于文件存储，并通过 `StaticFiles` 挂载 `/uploads` 路径提供静态文件访问。
+应用启动时通过 `Base.metadata.create_all(bind=engine)` 自动创建所有表，无需手动迁移。随后执行 `ensure_requirements_versioning_columns(engine)` 补充需求版本化字段（`version`、`requirement_group_id` 及索引），确保已有数据库兼容新版本。同时自动创建 `uploads/` 目录用于文件存储，并通过 `StaticFiles` 挂载 `/uploads` 路径提供静态文件访问。
 
 ### 7.3 Session 管理
 
@@ -1110,6 +1310,10 @@ Utils (utils/)
 | 需求拆解引擎 | Provider 模式 | 抽象基类 + 具体实现，便于后续接入 LLM/多模型切换 |
 | 文件上传 | 本地磁盘 + 静态挂载 | MVP 阶段简单可靠，后续可迁移到对象存储 |
 | Markdown 渲染 | react-markdown | 测试方案以 Markdown 生成，前端直接渲染，灵活度高 |
+| 需求版本化 | requirement_group_id + version 字段 | 同一需求的多个版本共享 group_id，规则树按版本隔离，互不干扰 |
+| 规则树 Diff | LLM 语义 + 算法兜底 | LLM 提供可读性更强的语义摘要；算法确保 100% 可用 |
+| 会话式 AI 生成 | 多轮消息持久化 + 快照 | 保留完整交互历史和每步树快照，支持回溯与审计 |
+| Schema 迁移 | 启动时 ALTER TABLE 补列 | 避免引入 Alembic 的额外复杂度，适合当前阶段 |
 
 ---
 
@@ -1117,10 +1321,14 @@ Utils (utils/)
 
 | 方向 | 说明 |
 |------|------|
+| **P1+ (已实现)** | ~~需求版本化~~ — 已支持创建新版本、版本列表查看、规则树按版本隔离 |
+| **P1+ (已实现)** | ~~规则树版本 Diff~~ — LLM 语义级对比 + 算法兜底 |
+| **P1+ (已实现)** | ~~规则树会话式 AI 生成~~ — 多轮对话生成/审查/增量更新/确认导入 |
+| **P1+ (已实现)** | ~~风险识别分析~~ — AI 识别规则树风险、逐条决策、转为节点 |
 | **P2: LLM 能力增强** | 在已接入 LLM 的基础上优化 Prompt、引入缓存/观测与质量评估，提升结构化输出稳定性 |
 | **P2: 用例自动生成** | 基于规则路径自动生成测试用例建议 |
 | **P2: 架构分析历史管理** | 分析记录列表、对比、重新分析 |
-| **P2: 版本历史与回滚** | 规则节点的完整变更历史记录和版本回溯 |
+| **P2: 版本回滚** | 支持将需求回退到历史版本（当前仅支持创建新版本和版本对比） |
 | **P2: 批量操作** | 支持批量导入/导出规则和用例 |
 | **P2: 权限与协作** | 多用户角色、权限控制、操作审计日志 |
 | **P2: 数据库迁移** | 引入 Alembic 进行 schema 版本管理 |
@@ -1164,6 +1372,76 @@ Utils (utils/)
 ```
 
 ### 12.2 更新日志
+
+#### 2026-03-06 — 需求版本化 + 规则树版本 Diff + 会话式 AI 生成 + 风险识别分析
+
+**范围：**
+- 后端 / 前端 / 文档
+
+**改动摘要：**
+- **需求版本化**：`Requirement` 模型新增 `version`、`requirement_group_id` 字段；新增创建新版本 (`POST .../new-version`) 和版本列表 (`GET .../versions`) 接口；前端规则树页增加版本选择器和创建新版本按钮，旧版本自动进入只读模式
+- **规则树版本 Diff**：新增 `GET /api/rules/diff` 接口，优先使用 LLM 语义级对比（输出变更摘要 + 流程级变更列表），失败自动回退算法 Diff（基于 SequenceMatcher 模糊匹配）；前端弹窗展示 Diff 结果
+- **规则树会话式 AI 生成**：新增 `/api/rules/sessions` 系列接口（创建/列表/详情/生成/更新/确认），支持多轮对话式规则树生成 → AI 自动审查 → 增量更新 → 确认导入正式库；消息和树快照完整持久化
+- **风险识别分析**：新增 `POST /api/risks/analyze` 接口，基于需求文本和规则树通过 LLM 识别潜在风险；前端 RiskPanel 组件支持逐条决策（接受/忽略/转节点）
+- **LLM Client 增强**：`LLMClient` 新增 `chat_with_messages` 方法，支持通用消息列表调用，兼容多 provider 回退机制
+- **Schema 迁移**：新增 `schema_migrations.py`，启动时自动补充 `version`、`requirement_group_id` 列和索引，确保已有数据库兼容
+- **前端错误处理增强**：`client.ts` 新增 `getErrorMessage` 工具函数，统一 Axios 错误消息提取
+- **Python 3.12 兼容**：`main.py` 增加 `_patch_forwardref_evaluate_for_python_312` 补丁
+
+**涉及文件：**
+- `backend/app/models/entities.py`
+- `backend/app/main.py`
+- `backend/app/core/schema_migrations.py` (新增)
+- `backend/app/api/projects.py`
+- `backend/app/api/tree_diff.py` (新增)
+- `backend/app/api/rule_tree_session.py` (新增)
+- `backend/app/api/risks.py` (新增)
+- `backend/app/schemas/project.py`
+- `backend/app/schemas/tree_diff.py` (新增)
+- `backend/app/schemas/rule_tree_session.py` (新增)
+- `backend/app/schemas/risk.py` (新增)
+- `backend/app/services/tree_diff.py` (新增)
+- `backend/app/services/rule_tree_session.py` (新增)
+- `backend/app/services/risk_service.py` (新增)
+- `backend/app/services/prompts/rule_tree_session.py` (新增)
+- `backend/app/services/prompts/risk_analysis.py` (新增)
+- `backend/app/services/llm_client.py`
+- `backend/app/services/base_llm_client.py`
+- `backend/app/services/fallback_llm_client.py`
+- `frontend/src/types/index.ts`
+- `frontend/src/api/client.ts`
+- `frontend/src/api/projects.ts`
+- `frontend/src/api/treeDiff.ts` (新增)
+- `frontend/src/api/ruleTreeSession.ts` (新增)
+- `frontend/src/api/risks.ts` (新增)
+- `frontend/src/pages/RuleTree/index.tsx`
+- `frontend/src/pages/RuleTree/RiskPanel.tsx` (新增)
+- `frontend/src/pages/RuleTree/dataAdapter.ts`
+- `KNOWLEDGE_BASE.md`
+
+**接口/模型变更：**
+- API: `POST /api/projects/{pid}/requirements/{rid}/new-version` (新增)
+- API: `GET /api/projects/{pid}/requirements/{rid}/versions` (新增)
+- API: `GET /api/rules/diff?old_requirement_id=N&new_requirement_id=M` (新增)
+- API: `POST /api/rules/sessions` (新增)
+- API: `GET /api/rules/sessions?requirement_id=N` (新增)
+- API: `GET /api/rules/sessions/{sid}` (新增)
+- API: `POST /api/rules/sessions/{sid}/generate` (新增)
+- API: `POST /api/rules/sessions/{sid}/update` (新增)
+- API: `POST /api/rules/sessions/{sid}/confirm` (新增)
+- API: `POST /api/risks/analyze` (新增)
+- Model: `Requirement` 新增 `version` (Integer, default=1)、`requirement_group_id` (Integer, nullable) 字段
+- Model: `RuleTreeSession` (新增表 `rule_tree_sessions`)
+- Model: `RuleTreeMessage` (新增表 `rule_tree_messages`)
+- Schema: `RequirementRead` 新增 `version`、`requirement_group_id` 字段
+- Schema: `RequirementVersionRead` (新增)
+
+**兼容性说明：**
+- `Requirement` 新字段 `version` 默认值为 1、`requirement_group_id` 可为空，已有数据无需手动迁移（启动时自动 ALTER TABLE）
+- 新增 API 均为增量接口，不影响已有接口行为
+- 前端规则树页面整合了版本管理、会话 AI 和风险面板，原有功能（节点 CRUD、AI 解析、画布同步）保持不变
+
+---
 
 #### 2026-02-27 — 规则树 AI 解析切换为 LLM 优先并增加来源标识
 
@@ -1807,3 +2085,23 @@ A: 推荐算法在每轮选择后会记录 `gain_node_ids`、`top_contributors` 
 
 **Q: 推荐页点击“查看用例”后发生了什么？**
 A: 前端会跳转到 `/test-cases?focusCaseId={case_id}`；用例页读取参数后自动滚动到目标行并高亮，帮助快速定位推荐用例。
+
+**Q: 需求版本化后，旧版本的规则树还能编辑吗？**
+A: 不能。选择旧版本后页面自动进入只读模式，所有编辑操作（新增/修改/删除节点、AI 解析、会话生成等）均被禁用。如需修改，请基于当前最新版本操作，或创建新版本后编辑。
+
+**Q: 版本对比（Diff）显示"算法对比"而不是"语义对比"，是正常的吗？**
+A: 是正常的。系统优先使用 LLM 进行语义级对比（生成变更摘要和流程级变更），但当 LLM 调用失败或超时时，会自动回退到基于 SequenceMatcher 的算法对比。算法对比结果是节点级的增删改列表，准确但缺少语义摘要。
+
+**Q: 规则树会话式 AI 生成和原来的"AI 半自动解析"有什么区别？**
+A: 两者定位不同：
+- **AI 半自动解析**：一次性将需求文本解析为规则节点草稿，适合快速生成初始树
+- **会话式 AI 生成**：支持多轮对话，AI 生成后自动审查质量，用户可反复提供修改意见进行增量更新，最终确认导入。适合对生成质量有更高要求、需要迭代优化的场景
+
+**Q: 会话式生成的规则树"确认导入"后，原有规则树会被覆盖吗？**
+A: 是的。确认导入时会清除当前需求下的所有旧规则节点，然后写入新生成的节点并重新计算规则路径。建议在确认前先创建新版本，避免丢失原有数据。
+
+**Q: 风险识别的"转节点"操作具体做了什么？**
+A: "转节点"会将该风险项转化为一个新的规则树节点（通常作为 condition 类型挂在规则树合适位置），创建后自动重新计算规则路径。这样原本被识别为风险点的内容就纳入了正式的规则覆盖范围。
+
+**Q: 数据库升级需要手动操作吗？**
+A: 不需要。应用启动时会自动执行 `ensure_requirements_versioning_columns`，检测并补充缺失的 `version` 和 `requirement_group_id` 列及索引。已有数据的 `version` 默认为 1，`requirement_group_id` 默认为空。

@@ -11,11 +11,21 @@ __pycache__/
 node_modules/
 dist/
 
+# Build artifacts
+*.tsbuildinfo
+
 # OS
 .DS_Store
 
 # Env
 .env
+
+# IDE
+.idea/
+.vscode/
+
+# Worktrees
+.worktrees/
 
 # Runtime artifacts
 backend/backend.log
