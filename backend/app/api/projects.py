@@ -3,8 +3,10 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
+from sqlalchemy import func
+
 from app.core.database import get_db
-from app.models.entities import Project, Requirement
+from app.models.entities import NodeStatus, Project, Requirement, RuleNode
 from app.schemas.project import (
     ProjectCreate,
     ProjectRead,
@@ -12,6 +14,7 @@ from app.schemas.project import (
     RequirementCreate,
     RequirementRead,
     RequirementUpdate,
+    RequirementVersionRead,
 )
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -139,3 +142,87 @@ def delete_requirement(project_id: int, requirement_id: int, db: Session = Depen
     db.delete(requirement)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{project_id}/requirements/{requirement_id}/new-version",
+    response_model=RequirementRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_new_version(project_id: int, requirement_id: int, db: Session = Depends(get_db)):
+    requirement = (
+        db.query(Requirement)
+        .filter(Requirement.id == requirement_id, Requirement.project_id == project_id)
+        .first()
+    )
+    if not requirement:
+        raise HTTPException(status_code=404, detail="requirement not found")
+
+    group_id = requirement.requirement_group_id or requirement.id
+    if not requirement.requirement_group_id:
+        requirement.requirement_group_id = requirement.id
+        db.flush()
+
+    max_version = (
+        db.query(func.max(Requirement.version))
+        .filter(Requirement.requirement_group_id == group_id)
+        .scalar()
+    ) or 1
+
+    new_requirement = Requirement(
+        project_id=project_id,
+        title=requirement.title,
+        raw_text=requirement.raw_text,
+        source_type=requirement.source_type,
+        version=max_version + 1,
+        requirement_group_id=group_id,
+    )
+    db.add(new_requirement)
+    db.commit()
+    db.refresh(new_requirement)
+    return new_requirement
+
+
+@router.get(
+    "/{project_id}/requirements/{requirement_id}/versions",
+    response_model=List[RequirementVersionRead],
+)
+def list_requirement_versions(project_id: int, requirement_id: int, db: Session = Depends(get_db)):
+    requirement = (
+        db.query(Requirement)
+        .filter(Requirement.id == requirement_id, Requirement.project_id == project_id)
+        .first()
+    )
+    if not requirement:
+        raise HTTPException(status_code=404, detail="requirement not found")
+
+    group_id = requirement.requirement_group_id or requirement.id
+    versions = (
+        db.query(Requirement)
+        .filter(Requirement.requirement_group_id == group_id)
+        .order_by(Requirement.version.asc())
+        .all()
+    )
+    if not versions:
+        versions = [requirement]
+
+    result = []
+    for req in versions:
+        node_count = (
+            db.query(func.count(RuleNode.id))
+            .filter(RuleNode.requirement_id == req.id, RuleNode.status != NodeStatus.deleted)
+            .scalar()
+        ) or 0
+        result.append(
+            RequirementVersionRead(
+                id=req.id,
+                project_id=req.project_id,
+                title=req.title,
+                raw_text=req.raw_text,
+                source_type=req.source_type.value if hasattr(req.source_type, "value") else str(req.source_type),
+                version=int(req.version or 1),
+                requirement_group_id=req.requirement_group_id,
+                rule_node_count=node_count,
+            )
+        )
+    return result

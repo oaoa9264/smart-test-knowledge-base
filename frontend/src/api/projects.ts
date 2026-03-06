@@ -1,5 +1,5 @@
 import { http } from "./client";
-import type { Project, Requirement } from "../types";
+import type { Project, Requirement, RequirementVersion } from "../types";
 
 export async function fetchProjects(): Promise<Project[]> {
   const { data } = await http.get<Project[]>("/api/projects");
@@ -44,4 +44,21 @@ export async function updateRequirement(
 
 export async function deleteRequirement(projectId: number, requirementId: number): Promise<void> {
   await http.delete(`/api/projects/${projectId}/requirements/${requirementId}`);
+}
+
+export async function createNewVersion(projectId: number, requirementId: number): Promise<Requirement> {
+  const { data } = await http.post<Requirement>(
+    `/api/projects/${projectId}/requirements/${requirementId}/new-version`,
+  );
+  return data;
+}
+
+export async function fetchRequirementVersions(
+  projectId: number,
+  requirementId: number,
+): Promise<RequirementVersion[]> {
+  const { data } = await http.get<RequirementVersion[]>(
+    `/api/projects/${projectId}/requirements/${requirementId}/versions`,
+  );
+  return data;
 }

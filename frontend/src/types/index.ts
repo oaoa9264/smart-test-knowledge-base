@@ -15,6 +15,12 @@ export interface Requirement {
   title: string;
   raw_text: string;
   source_type: "prd" | "flowchart" | "api_doc";
+  version: number;
+  requirement_group_id: number | null;
+}
+
+export interface RequirementVersion extends Requirement {
+  rule_node_count: number;
 }
 
 export interface RuleNode {
@@ -37,6 +43,100 @@ export interface RulePath {
 export interface RuleTree {
   nodes: RuleNode[];
   paths: RulePath[];
+}
+
+export interface DiffNodeItem {
+  node_id: string;
+  node_type: NodeType;
+  content: string;
+  risk_level: RiskLevel;
+  parent_id: string | null;
+}
+
+export interface DiffNodeChange {
+  status: "added" | "removed" | "modified" | "unchanged";
+  current: DiffNodeItem | null;
+  previous: DiffNodeItem | null;
+  changed_fields: string[] | null;
+}
+
+export interface TreeDiffResult {
+  base_version: number;
+  compare_version: number;
+  summary: {
+    added: number;
+    removed: number;
+    modified: number;
+    unchanged: number;
+  };
+  node_changes: DiffNodeChange[];
+}
+
+export interface TreeDiffSummaryResult {
+  base_version: number;
+  compare_version: number;
+  summary: string;
+}
+
+export interface FlowChange {
+  change_type: "added" | "removed" | "modified";
+  description: string;
+  detail?: string | null;
+  impact: "low" | "medium" | "high";
+}
+
+export interface SemanticDiffResult {
+  base_version: number;
+  compare_version: number;
+  flow_changes: FlowChange[];
+  summary: string;
+  risk_notes?: string | null;
+}
+
+export interface RuleTreeSession {
+  id: number;
+  requirement_id: number;
+  title: string;
+  status: "active" | "confirmed" | "archived" | string;
+  confirmed_tree_snapshot: string | null;
+  requirement_text_snapshot: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RuleTreeMessage {
+  id: number;
+  session_id: number;
+  role: "system" | "user" | "assistant" | string;
+  content: string;
+  message_type: string;
+  tree_snapshot: string | null;
+  created_at: string;
+}
+
+export interface RuleTreeSessionDetail {
+  session: RuleTreeSession;
+  messages: RuleTreeMessage[];
+}
+
+export interface RuleTreeSessionGenerateResult {
+  session: RuleTreeSession;
+  generated_tree: { decision_tree: { nodes: DecisionTreeNode[] } };
+  reviewed_tree: { decision_tree: { nodes: DecisionTreeNode[] } };
+  diff: {
+    summary: { added: number; deleted: number; modified: number; unchanged: number };
+    node_changes: Array<Record<string, unknown>>;
+  };
+}
+
+export interface RuleTreeSessionUpdateResult {
+  session: RuleTreeSession;
+  updated_tree: { decision_tree: { nodes: DecisionTreeNode[] } };
+  requirement_diff: string;
+  node_diff: {
+    summary: { added: number; deleted: number; modified: number; unchanged: number };
+    node_changes: Array<Record<string, unknown>>;
+  };
 }
 
 export interface TestCase {
@@ -171,6 +271,42 @@ export interface ArchitectureImportResult {
   analysis_id: number;
   requirement_id: number | null;
   imported_rule_nodes: number;
+}
+
+export type RiskCategory =
+  | "input_validation"
+  | "flow_gap"
+  | "data_integrity"
+  | "boundary"
+  | "security";
+
+export type RiskDecisionType = "pending" | "accepted" | "ignored";
+
+export interface RiskItem {
+  id: string;
+  requirement_id: number;
+  related_node_id: string | null;
+  category: RiskCategory;
+  risk_level: RiskLevel;
+  description: string;
+  suggestion: string;
+  decision: RiskDecisionType;
+  decision_reason: string | null;
+  decided_at: string | null;
+  created_at: string | null;
+}
+
+export interface RiskListResponse {
+  risks: RiskItem[];
+  total: number;
+  pending: number;
+  accepted: number;
+  ignored: number;
+}
+
+export interface RiskAnalyzeResponse {
+  risks: RiskItem[];
+  total: number;
 }
 
 export type RecoMode = "FULL" | "CHANGE";

@@ -1,4 +1,4 @@
-import type { NodeType, RiskLevel, RuleNode } from "../../types";
+import type { NodeType, RiskItem, RiskLevel, RuleNode } from "../../types";
 
 export const VIRTUAL_ROOT_UID = "__virtual_root__";
 
@@ -12,6 +12,7 @@ export type MindMapNodeData = {
   _nodeType?: MindMapNodeType;
   _riskLevel?: RiskLevel;
   _isVirtualRoot?: boolean;
+  _riskWarning?: RiskLevel;
   shape?: string;
   fillColor?: string;
   color?: string;
@@ -189,20 +190,53 @@ function nodeVisual(nodeType: MindMapNodeType, riskLevel: RiskLevel): Partial<Mi
   };
 }
 
-function createMindMapNodeData(node: RuleNode): MindMapNodeData {
+const riskWarningColors: Record<RiskLevel, string> = {
+  critical: "#ff4d4f",
+  high: "#fa8c16",
+  medium: "#fadb14",
+  low: "#52c41a",
+};
+
+const RISK_LEVEL_WEIGHT: Record<RiskLevel, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+export function buildNodeRiskMap(risks: RiskItem[]): Map<string, RiskLevel> {
+  const map = new Map<string, RiskLevel>();
+  for (const risk of risks) {
+    if (!risk.related_node_id || risk.decision !== "pending") continue;
+    const existing = map.get(risk.related_node_id);
+    if (!existing || RISK_LEVEL_WEIGHT[risk.risk_level] > RISK_LEVEL_WEIGHT[existing]) {
+      map.set(risk.related_node_id, risk.risk_level);
+    }
+  }
+  return map;
+}
+
+function createMindMapNodeData(node: RuleNode, riskWarning?: RiskLevel): MindMapNodeData {
   const safeText = toSafeText(node.content);
+  const warningPrefix = riskWarning
+    ? `<span style="color:${riskWarningColors[riskWarning]};font-size:14px">⚠ </span>`
+    : "";
   return {
-    text: toRichTextHtml(safeText),
+    text: `<p>${warningPrefix}${escapeHtml(safeText).replace(/\n/g, "<br/>")}</p>`,
     richText: true,
     uid: node.id,
     expand: true,
     _nodeType: node.node_type,
     _riskLevel: node.risk_level,
+    _riskWarning: riskWarning,
     ...nodeVisual(node.node_type, node.risk_level),
   };
 }
 
-export function ruleNodesToMindMapData(nodes: RuleNode[]): MindMapTreeNode {
+export function ruleNodesToMindMapData(
+  nodes: RuleNode[],
+  nodeRiskMap?: Map<string, RiskLevel>,
+): MindMapTreeNode {
   if (nodes.length === 0) {
     return {
       data: {
@@ -268,7 +302,7 @@ export function ruleNodesToMindMapData(nodes: RuleNode[]): MindMapTreeNode {
 
     const children = (childrenMap.get(nodeId) || []).map((childId) => buildTree(childId, nextPath));
     return {
-      data: createMindMapNodeData(current),
+      data: createMindMapNodeData(current, nodeRiskMap?.get(nodeId)),
       children,
     };
   };

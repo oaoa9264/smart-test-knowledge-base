@@ -35,6 +35,12 @@ class RequirementUpdate(BaseModel):
 class RequirementRead(RequirementCreate):
     id: int
     project_id: int
+    version: int = 1
+    requirement_group_id: Optional[int] = None
 
     class Config:
         orm_mode = True
+
+
+class RequirementVersionRead(RequirementRead):
+    rule_node_count: int = 0

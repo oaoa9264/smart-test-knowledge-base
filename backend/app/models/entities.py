@@ -57,9 +57,29 @@ class AnalysisStatus(str, enum.Enum):
     imported = "imported"
 
 
+class RiskCategory(str, enum.Enum):
+    input_validation = "input_validation"
+    flow_gap = "flow_gap"
+    data_integrity = "data_integrity"
+    boundary = "boundary"
+    security = "security"
+
+
+class RiskDecision(str, enum.Enum):
+    pending = "pending"
+    accepted = "accepted"
+    ignored = "ignored"
+
+
 class RecoMode(str, enum.Enum):
     full = "FULL"
     change = "CHANGE"
+
+
+class RuleTreeSessionStatus(str, enum.Enum):
+    active = "active"
+    confirmed = "confirmed"
+    archived = "archived"
 
 
 case_rule_node_assoc = Table(
@@ -102,6 +122,8 @@ class Requirement(Base):
     title = Column(String(255), nullable=False)
     raw_text = Column(Text, nullable=False)
     source_type = Column(Enum(SourceType), default=SourceType.prd, nullable=False)
+    version = Column(Integer, default=1, nullable=False)
+    requirement_group_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     project = relationship("Project", back_populates="requirements")
@@ -109,6 +131,8 @@ class Requirement(Base):
     rule_paths = relationship("RulePath", back_populates="requirement", cascade="all, delete-orphan")
     architecture_analyses = relationship("ArchitectureAnalysis", back_populates="requirement")
     reco_runs = relationship("RecoRun", back_populates="requirement", cascade="all, delete-orphan")
+    risk_items = relationship("RiskItem", back_populates="requirement", cascade="all, delete-orphan")
+    rule_tree_sessions = relationship("RuleTreeSession", back_populates="requirement", cascade="all, delete-orphan")
 
 
 class RuleNode(Base):
@@ -210,3 +234,52 @@ class RecoResult(Base):
 
     run = relationship("RecoRun", back_populates="results")
     test_case = relationship("TestCase", back_populates="reco_results")
+
+
+class RiskItem(Base):
+    __tablename__ = "risk_items"
+
+    id = Column(String(64), primary_key=True, index=True)
+    requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False, index=True)
+    related_node_id = Column(String(64), ForeignKey("rule_nodes.id"), nullable=True, index=True)
+    category = Column(Enum(RiskCategory), nullable=False)
+    risk_level = Column(Enum(RiskLevel), nullable=False)
+    description = Column(Text, nullable=False)
+    suggestion = Column(Text, nullable=False)
+    decision = Column(Enum(RiskDecision), default=RiskDecision.pending, nullable=False)
+    decision_reason = Column(Text, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    requirement = relationship("Requirement", back_populates="risk_items")
+    related_node = relationship("RuleNode", foreign_keys=[related_node_id])
+
+
+class RuleTreeSession(Base):
+    __tablename__ = "rule_tree_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    status = Column(Enum(RuleTreeSessionStatus), default=RuleTreeSessionStatus.active, nullable=False)
+    confirmed_tree_snapshot = Column(Text, nullable=True)
+    requirement_text_snapshot = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    requirement = relationship("Requirement", back_populates="rule_tree_sessions")
+    messages = relationship("RuleTreeMessage", back_populates="session", cascade="all, delete-orphan")
+
+
+class RuleTreeMessage(Base):
+    __tablename__ = "rule_tree_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("rule_tree_sessions.id"), nullable=False, index=True)
+    role = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False)
+    message_type = Column(String(50), nullable=False)
+    tree_snapshot = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    session = relationship("RuleTreeSession", back_populates="messages")
