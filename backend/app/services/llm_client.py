@@ -34,6 +34,9 @@ class LLMClient:
     def chat_with_vision(self, system_prompt: str, user_content: List[Dict[str, Any]]) -> str:
         return self._fallback.chat_with_vision(system_prompt=system_prompt, user_content=user_content)
 
+    def chat_with_messages(self, messages: List[Dict[str, Any]], response_format: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._fallback.chat_with_messages(messages=messages, response_format=response_format)
+
     def image_to_base64_url(self, file_path: str) -> str:
         return self._fallback.image_to_base64_url(file_path)
 

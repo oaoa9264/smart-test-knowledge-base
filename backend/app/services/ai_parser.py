@@ -8,22 +8,34 @@ from app.services.llm_client import LLMClient
 logger = logging.getLogger(__name__)
 
 AI_PARSE_SYSTEM_PROMPT = """
-你是测试规则树助手。请把需求文本拆解为规则树草稿节点。
+你是测试规则树助手。请把需求文本拆解为规则树草稿节点，并识别潜在风险。
 
 只返回 JSON 对象，不要输出任何解释。格式如下：
 {
   "nodes": [
     {"id":"temp_1","type":"root","content":"...","parent_id":null},
     {"id":"temp_2","type":"condition","content":"...","parent_id":"temp_1"}
+  ],
+  "risks": [
+    {"id":"risk_1","related_node_id":"temp_2","category":"flow_gap","risk_level":"high","description":"...","suggestion":"..."}
   ]
 }
 
-约束：
+nodes 约束：
 1) type 只能是 root/condition/branch/action/exception。
 2) 必须有且仅有 1 个 root，root 的 parent_id 为 null。
 3) content 要简洁、可执行，避免空内容。
 4) 节点总数建议 3-12 个，优先保留关键判断和关键动作。
 5) parent_id 必须引用同一结果中的 id。
+
+risks 约束：
+1) id 使用 "risk_N" 格式；
+2) related_node_id 引用 nodes 中已有 id，全局风险设为 null；
+3) category 只能是 input_validation/flow_gap/data_integrity/boundary/security；
+4) risk_level 只能是 critical/high/medium/low；
+5) description 描述需求中遗漏或模糊的异常场景；
+6) suggestion 给出建议处理方式；
+7) 风险项建议 2-6 个。
 """.strip()
 
 AI_PARSE_USER_TEMPLATE = """
@@ -50,7 +62,7 @@ _NODE_TYPE_ALIASES = {
 def parse_requirement_text(raw_text: str, llm_client: Optional[Any] = None) -> Dict[str, Any]:
     text = (raw_text or "").strip()
     if not text:
-        return {"analysis_mode": "mock", "nodes": []}
+        return {"analysis_mode": "mock", "nodes": [], "risks": []}
 
     if _should_use_llm():
         try:
@@ -87,7 +99,7 @@ def _should_use_llm() -> bool:
     return provider in {"llm", "auto", ""}
 
 
-def _parse_by_clause(text: str) -> Dict[str, List[Dict]]:
+def _parse_by_clause(text: str) -> Dict[str, Any]:
     clauses = [c.strip() for c in text.replace("。", "，").split("，") if c.strip()]
 
     nodes: List[Dict[str, Any]] = []
@@ -108,13 +120,13 @@ def _parse_by_clause(text: str) -> Dict[str, List[Dict]]:
     if len(nodes) == 1:
         nodes[0]["type"] = "root"
 
-    return {"nodes": nodes}
+    return {"nodes": nodes, "risks": []}
 
 
-def _normalize_llm_payload(payload: Any) -> Dict[str, List[Dict]]:
+def _normalize_llm_payload(payload: Any) -> Dict[str, Any]:
     raw_nodes = _extract_nodes(payload)
     if not raw_nodes:
-        return {"nodes": []}
+        return {"nodes": [], "risks": []}
 
     nodes: List[Dict[str, Any]] = []
     used_ids = set()
@@ -145,7 +157,8 @@ def _normalize_llm_payload(payload: Any) -> Dict[str, List[Dict]]:
         )
 
     _repair_tree(nodes)
-    return {"nodes": nodes}
+    risks = _extract_risks(payload)
+    return {"nodes": nodes, "risks": risks}
 
 
 def _extract_nodes(payload: Any) -> List[Any]:
@@ -211,3 +224,46 @@ def _repair_tree(nodes: List[Dict[str, Any]]) -> None:
         if not parent_id or parent_id not in seen_ids:
             node["parent_id"] = root_id
         seen_ids.add(node["id"])
+
+
+_VALID_RISK_CATEGORIES = {"input_validation", "flow_gap", "data_integrity", "boundary", "security"}
+_VALID_RISK_LEVELS = {"critical", "high", "medium", "low"}
+
+
+def _extract_risks(payload: Any) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+
+    raw_risks = payload.get("risks")
+    if not isinstance(raw_risks, list):
+        return []
+
+    risks: List[Dict[str, Any]] = []
+    for index, item in enumerate(raw_risks, start=1):
+        if not isinstance(item, dict):
+            continue
+
+        risk_id = _pick_string(item, ["id"]) or "risk_{0}".format(index)
+        related_node_id = _pick_string(item, ["related_node_id", "relatedNodeId"]) or None
+        category = _pick_string(item, ["category", "type"]) or "flow_gap"
+        if category not in _VALID_RISK_CATEGORIES:
+            category = "flow_gap"
+        risk_level = _pick_string(item, ["risk_level", "riskLevel", "severity"]) or "medium"
+        if risk_level not in _VALID_RISK_LEVELS:
+            risk_level = "medium"
+        description = _pick_string(item, ["description", "desc", "content"]) or ""
+        suggestion = _pick_string(item, ["suggestion", "advice", "mitigation"]) or ""
+
+        if not description:
+            continue
+
+        risks.append({
+            "id": risk_id,
+            "related_node_id": related_node_id,
+            "category": category,
+            "risk_level": risk_level,
+            "description": description,
+            "suggestion": suggestion,
+        })
+
+    return risks

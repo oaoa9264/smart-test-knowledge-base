@@ -25,16 +25,29 @@ GENERATE_SYSTEM_PROMPT = """
 
 JSON 顶层结构必须为：
 {
-  "decision_tree": {"nodes": [...]}
+  "decision_tree": {"nodes": [...]},
+  "risks": [...]
 }
 
-约束：
+decision_tree 约束：
 1) decision_tree.nodes[*].id 必须使用 "dt_N"（N 为正整数，且不重复）；
 2) decision_tree.nodes[*].type 只能是 root/condition/branch/action/exception；
 3) decision_tree.nodes[*] 必须包含 content、risk_level，risk_level 只能是 critical/high/medium/low；
 4) 非根节点建议补全 parent_id；根节点 parent_id 为 null；
 5) 如果信息不足，允许保守输出，但字段必须齐全且类型正确；
-6) 返回内容必须是合法 JSON，顶层必须是 object。
+6) 返回内容必须是合法 JSON，顶层必须是 object；
+7) 每个 condition/branch 节点的 content 必须可追溯到原始需求中的明确描述，禁止引入需求文本中未提及的概念、实体、配置项或条件；
+8) 禁止将多条具体规则抽象/泛化为一个笼统概念。例如，需求写"A 客户不展示 X、B 客户展示 X"，应拆为两个具体分支，而非合并为"根据客户类型与配置决定是否展示 X"；
+9) 如果需求描述不完整或有歧义，在相关节点 content 中用括号标注"（需求未明确）"，而非自行补充假设。
+
+risks 约束：
+1) risks[*].id 使用 "risk_N" 格式；
+2) risks[*].related_node_id 引用 decision_tree 中已有节点 id，全局风险设为 null；
+3) risks[*].category 只能是 input_validation/flow_gap/data_integrity/boundary/security；
+4) risks[*].risk_level 只能是 critical/high/medium/low；
+5) risks[*].description 描述需求中未覆盖的异常场景；
+6) risks[*].suggestion 给出建议处理方式；
+7) 识别需求中遗漏或模糊的异常场景，建议 3-8 个风险项。
 """.strip()
 
 

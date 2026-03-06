@@ -74,6 +74,17 @@ class BaseLLMClient(ABC):
         )
         return self._parse_json_payload(content)
 
+    def chat_with_messages(self, messages: List[Dict[str, Any]], response_format: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {}
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        _, content = self._create_completion(
+            model=self.text_model,
+            messages=messages,
+            **kwargs,
+        )
+        return self._parse_json_payload(content)
+
     def _provider_payload(self) -> Dict[str, Any]:
         return {}
 
