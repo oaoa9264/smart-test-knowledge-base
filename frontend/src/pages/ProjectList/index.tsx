@@ -13,6 +13,7 @@ import {
   Select,
   Space,
   Table,
+  Tag,
   Typography,
   message,
 } from "antd";
@@ -179,6 +180,12 @@ export default function ProjectListPage() {
   const requirementColumns = [
     { title: "ID", dataIndex: "id", width: 80 },
     { title: "标题", dataIndex: "title" },
+    {
+      title: "版本",
+      dataIndex: "version",
+      width: 80,
+      render: (v: number) => <Tag color="blue">v{v}</Tag>,
+    },
     { title: "来源", dataIndex: "source_type", width: 120, render: (v: string) => getSourceTypeLabel(v) },
     {
       title: "操作",

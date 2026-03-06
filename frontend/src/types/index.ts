@@ -93,6 +93,17 @@ export interface SemanticDiffResult {
   risk_notes?: string | null;
 }
 
+export interface DiffRecordRead {
+  id: number;
+  base_requirement_id: number;
+  compare_requirement_id: number;
+  base_version: number;
+  compare_version: number;
+  diff_type: string;
+  created_at: string;
+  result: SemanticDiffResult;
+}
+
 export interface RuleTreeSession {
   id: number;
   requirement_id: number;

@@ -283,3 +283,21 @@ class RuleTreeMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     session = relationship("RuleTreeSession", back_populates="messages")
+
+
+class DiffRecord(Base):
+    __tablename__ = "diff_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    base_requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False)
+    compare_requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False)
+    base_version = Column(Integer, nullable=False)
+    compare_version = Column(Integer, nullable=False)
+    result_json = Column(Text, nullable=False)
+    diff_type = Column(String(20), default="semantic", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    project = relationship("Project")
+    base_requirement = relationship("Requirement", foreign_keys=[base_requirement_id])
+    compare_requirement = relationship("Requirement", foreign_keys=[compare_requirement_id])

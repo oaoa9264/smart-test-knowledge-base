@@ -43,6 +43,7 @@ type MindMapWrapperProps = {
   textAutoWrapWidth?: number;
   autoFit?: boolean;
   onNodeClick?: (nodeId: string) => void;
+  onNodeContextMenu?: (nodeId: string, position: { x: number; y: number }) => void;
   onDataChange?: (data: MindMapTreeNode) => void;
 };
 
@@ -56,6 +57,7 @@ const MindMapWrapper = forwardRef<MindMapWrapperRef, MindMapWrapperProps>(functi
     textAutoWrapWidth = 150,
     autoFit = false,
     onNodeClick,
+    onNodeContextMenu,
     onDataChange,
   } = props;
   const scaleRatio = 0.1;
@@ -67,15 +69,21 @@ const MindMapWrapper = forwardRef<MindMapWrapperRef, MindMapWrapperProps>(functi
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mindMapRef = useRef<any>(null);
   const applyingDataRef = useRef(false);
+  const pendingDataRef = useRef<MindMapTreeNode | null>(null);
   const latestDataRef = useRef<MindMapTreeNode>(data);
   const selectedNodeIdRef = useRef<string | null>(selectedNodeId);
   const pendingViewportSyncRef = useRef(false);
   const onNodeClickRef = useRef(onNodeClick);
+  const onNodeContextMenuRef = useRef(onNodeContextMenu);
   const onDataChangeRef = useRef(onDataChange);
 
   useEffect(() => {
     onNodeClickRef.current = onNodeClick;
   }, [onNodeClick]);
+
+  useEffect(() => {
+    onNodeContextMenuRef.current = onNodeContextMenu;
+  }, [onNodeContextMenu]);
 
   useEffect(() => {
     onDataChangeRef.current = onDataChange;
@@ -204,6 +212,13 @@ const MindMapWrapper = forwardRef<MindMapWrapperRef, MindMapWrapperProps>(functi
       onNodeClickRef.current?.(uid);
     };
 
+    const handleNodeContextMenu = (e: MouseEvent, node: MindMapNodeInstance) => {
+      e.preventDefault();
+      const uid = String(node?.getData?.("uid") || "");
+      if (!uid || uid === VIRTUAL_ROOT_UID) return;
+      onNodeContextMenuRef.current?.(uid, { x: e.clientX, y: e.clientY });
+    };
+
     const handleDataChange = (nextTree: MindMapTreeNode) => {
       if (applyingDataRef.current) return;
       onDataChangeRef.current?.(nextTree);
@@ -218,15 +233,25 @@ const MindMapWrapper = forwardRef<MindMapWrapperRef, MindMapWrapperProps>(functi
       }
       ensureReadableScale(selectedNodeIdRef.current);
       applyingDataRef.current = false;
+
+      const queued = pendingDataRef.current;
+      if (queued) {
+        pendingDataRef.current = null;
+        applyingDataRef.current = true;
+        pendingViewportSyncRef.current = true;
+        instance.setData(queued);
+      }
     };
 
     instance.on("node_click", handleNodeClick);
+    instance.on("node_contextmenu", handleNodeContextMenu);
     instance.on("data_change", handleDataChange);
     instance.on("node_tree_render_end", handleNodeTreeRenderEnd);
     mindMapRef.current = instance;
 
     return () => {
       instance.off("node_click", handleNodeClick);
+      instance.off("node_contextmenu", handleNodeContextMenu);
       instance.off("data_change", handleDataChange);
       instance.off("node_tree_render_end", handleNodeTreeRenderEnd);
       instance.destroy();
@@ -272,6 +297,11 @@ const MindMapWrapper = forwardRef<MindMapWrapperRef, MindMapWrapperProps>(functi
   useEffect(() => {
     const instance = mindMapRef.current;
     if (!instance) return;
+
+    if (applyingDataRef.current) {
+      pendingDataRef.current = data;
+      return;
+    }
 
     applyingDataRef.current = true;
     pendingViewportSyncRef.current = true;

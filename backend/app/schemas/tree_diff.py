@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel
@@ -44,3 +45,17 @@ class SemanticDiffResult(BaseModel):
     flow_changes: List[FlowChange]
     summary: str
     risk_notes: Optional[str] = None
+
+
+class DiffRecordRead(BaseModel):
+    id: int
+    base_requirement_id: int
+    compare_requirement_id: int
+    base_version: int
+    compare_version: int
+    diff_type: str
+    created_at: datetime
+    result: SemanticDiffResult
+
+    class Config:
+        from_attributes = True

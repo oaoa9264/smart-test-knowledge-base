@@ -65,9 +65,10 @@ type RiskPanelProps = {
   requirementId: number | null;
   onNodeLocate?: (nodeId: string) => void;
   onRiskConverted?: () => void;
+  onRisksChange?: (risks: RiskItem[]) => void;
 };
 
-export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted }: RiskPanelProps) {
+export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted, onRisksChange }: RiskPanelProps) {
   const [risks, setRisks] = useState<RiskItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -81,14 +82,16 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
   const loadRisks = useCallback(async () => {
     if (!requirementId) {
       setRisks([]);
-      return;
+      return [];
     }
     setLoading(true);
     try {
       const resp = await fetchRisks(requirementId);
       setRisks(resp.risks);
+      return resp.risks;
     } catch {
       message.error("加载风险项失败");
+      return [];
     } finally {
       setLoading(false);
     }
@@ -115,13 +118,20 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     return groups;
   }, [risks]);
 
+  const [activeKeys, setActiveKeys] = useState<string[]>([]);
+
+  useEffect(() => {
+    setActiveKeys(Object.keys(groupedRisks));
+  }, [groupedRisks]);
+
   const handleAnalyze = async () => {
     if (!requirementId) return;
     setAnalyzing(true);
     try {
       await analyzeRisks(requirementId);
       message.success("风险分析完成");
-      await loadRisks();
+      const newRisks = await loadRisks();
+      onRisksChange?.(newRisks);
     } catch {
       message.error("风险分析失败");
     } finally {
@@ -146,7 +156,8 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       );
       message.success(decisionModal.type === "accepted" ? "已接受" : "已忽略");
       setDecisionModal(null);
-      await loadRisks();
+      const newRisks = await loadRisks();
+      onRisksChange?.(newRisks);
       if (decisionModal.type === "accepted" && values.auto_create_node) {
         onRiskConverted?.();
       }
@@ -241,23 +252,28 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       style={{
         display: "flex",
         flexDirection: "column",
-        height: "100%",
+        flex: 1,
+        minHeight: 0,
         overflow: "hidden",
       }}
     >
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #f0f0f0" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
           <Typography.Text strong>风险识别</Typography.Text>
-          <Button
-            size="small"
-            type="primary"
-            icon={<ScanOutlined />}
-            loading={analyzing}
-            onClick={handleAnalyze}
-            disabled={!requirementId}
-          >
-            分析
-          </Button>
+          <Tooltip title={stats.pending > 0 ? "请先处理所有待处理风险项" : undefined}>
+            <span>
+              <Button
+                size="small"
+                type="primary"
+                icon={<ScanOutlined />}
+                loading={analyzing}
+                onClick={handleAnalyze}
+                disabled={!requirementId || stats.pending > 0}
+              >
+                分析
+              </Button>
+            </span>
+          </Tooltip>
         </div>
         <Space size={12} wrap>
           <span>
@@ -275,20 +291,23 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
         </Space>
       </div>
 
-      <div style={{ flex: 1, overflow: "auto", padding: "8px 0" }}>
-        {loading ? (
-          <div style={{ textAlign: "center", padding: 32 }}>
-            <Spin />
-          </div>
-        ) : risks.length === 0 ? (
-          <Empty description="暂无风险项" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-        ) : (
-          <Collapse
-            ghost
-            defaultActiveKey={Object.keys(groupedRisks)}
-            items={collapseItems}
-          />
-        )}
+      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, overflow: "auto", padding: "8px 0" }}>
+          {loading ? (
+            <div style={{ textAlign: "center", padding: 32 }}>
+              <Spin />
+            </div>
+          ) : risks.length === 0 ? (
+            <Empty description="暂无风险项" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          ) : (
+            <Collapse
+              ghost
+              activeKey={activeKeys}
+              onChange={(keys) => setActiveKeys(keys as string[])}
+              items={collapseItems}
+            />
+          )}
+        </div>
       </div>
 
       <Modal

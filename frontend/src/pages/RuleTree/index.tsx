@@ -8,17 +8,21 @@ import {
   Form,
   Input,
   InputNumber,
+  Menu,
   Modal,
+  Popconfirm,
   Select,
   Space,
   Steps,
   Table,
+  Tabs,
   Tag,
+  Tooltip,
   Tree,
   Typography,
   message,
 } from "antd";
-import { DownOutlined, HistoryOutlined, RobotOutlined, WarningOutlined } from "@ant-design/icons";
+import { DeleteOutlined, DownOutlined, EditOutlined, HistoryOutlined, PlusOutlined, RobotOutlined, WarningOutlined } from "@ant-design/icons";
 import { getErrorMessage } from "../../api/client";
 import { createNewVersion, fetchRequirementVersions, fetchRequirements } from "../../api/projects";
 import { fetchRisks } from "../../api/risks";
@@ -31,11 +35,12 @@ import {
   updateRuleTreeSession,
 } from "../../api/ruleTreeSession";
 import { aiParse, createRuleNode, deleteRuleNode, fetchRuleTree, updateRuleNode } from "../../api/rules";
-import { fetchSemanticDiff } from "../../api/treeDiff";
+import { deleteDiffRecord, fetchDiffHistory, fetchSemanticDiff } from "../../api/treeDiff";
 import { useAppStore } from "../../stores/appStore";
 import type {
   AIParseNode,
   AIParseResult,
+  DiffRecordRead,
   RuleTreeSession,
   RuleTreeSessionDetail,
   RuleTreeSessionGenerateResult,
@@ -95,6 +100,90 @@ type RuleTreeNavNode = {
   children?: RuleTreeNavNode[];
 };
 
+function DiffResultDisplay({ result }: { result: SemanticDiffResult }) {
+  return (
+    <>
+      <Alert
+        style={{ marginBottom: 12 }}
+        type="info"
+        message={`对比总结（v${result.base_version} → v${result.compare_version}）`}
+        description={
+          <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+            {result.summary}
+          </Typography.Paragraph>
+        }
+        showIcon
+      />
+
+      {result.risk_notes && (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type="warning"
+          message="风险提示"
+          description={result.risk_notes}
+          showIcon
+        />
+      )}
+
+      {result.flow_changes.length === 0 ? (
+        <Alert style={{ marginBottom: 12 }} type="success" message="两个版本无实质性流程差异" />
+      ) : (
+        <Table
+          size="small"
+          rowKey={(_, index) => String(index)}
+          dataSource={result.flow_changes}
+          pagination={false}
+          expandable={{
+            expandedRowRender: (record) =>
+              record.detail ? (
+                <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                  {record.detail}
+                </Typography.Paragraph>
+              ) : (
+                <Typography.Text type="secondary">无详细说明</Typography.Text>
+              ),
+            rowExpandable: (record) => !!record.detail,
+          }}
+          columns={[
+            {
+              title: "变更类型",
+              dataIndex: "change_type",
+              width: 100,
+              render: (type: string) => {
+                const meta: Record<string, { color: string; label: string }> = {
+                  added: { color: "green", label: "新增" },
+                  removed: { color: "red", label: "删除" },
+                  modified: { color: "orange", label: "修改" },
+                };
+                const m = meta[type] || { color: "default", label: type };
+                return <Tag color={m.color}>{m.label}</Tag>;
+              },
+            },
+            {
+              title: "变更描述",
+              dataIndex: "description",
+            },
+            {
+              title: "影响程度",
+              dataIndex: "impact",
+              width: 100,
+              render: (impact: string) => {
+                const meta: Record<string, { color: string; label: string }> = {
+                  high: { color: "red", label: "高" },
+                  medium: { color: "orange", label: "中" },
+                  low: { color: "blue", label: "低" },
+                };
+                const m = meta[impact] || { color: "default", label: impact };
+                return <Tag color={m.color}>{m.label}</Tag>;
+              },
+            },
+          ]}
+        />
+      )}
+    </>
+  );
+}
+
 export default function RuleTreePage() {
   const {
     selectedProjectId,
@@ -111,6 +200,10 @@ export default function RuleTreePage() {
   const [compareVersionRequirementId, setCompareVersionRequirementId] = useState<number>();
   const [diffLoading, setDiffLoading] = useState(false);
   const [semanticDiffResult, setSemanticDiffResult] = useState<SemanticDiffResult | null>(null);
+  const [diffHistory, setDiffHistory] = useState<DiffRecordRead[]>([]);
+  const [diffHistoryLoading, setDiffHistoryLoading] = useState(false);
+  const [diffActiveTab, setDiffActiveTab] = useState<string>("new");
+  const [viewingHistoryResult, setViewingHistoryResult] = useState<SemanticDiffResult | null>(null);
   const [domainNodes, setDomainNodes] = useState<RuleNode[]>([]);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [treeSearch, setTreeSearch] = useState("");
@@ -149,6 +242,7 @@ export default function RuleTreePage() {
   const [lastImpact, setLastImpact] = useState<number[]>([]);
   const [riskItems, setRiskItems] = useState<RiskItem[]>([]);
   const [riskPanelVisible, setRiskPanelVisible] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
 
   const mindMapRef = useRef<MindMapWrapperRef | null>(null);
   const canvasSyncTimerRef = useRef<number | null>(null);
@@ -188,23 +282,10 @@ export default function RuleTreePage() {
     [beginSuppressCanvasSync],
   );
 
-  const loadRisks = useCallback(async (requirementId: number | null) => {
-    if (!requirementId) {
-      setRiskItems([]);
-      return;
-    }
-    try {
-      const resp = await fetchRisks(requirementId);
-      setRiskItems(resp.risks);
-    } catch {
-      /* risk loading is non-critical */
-    }
-  }, []);
-
   const reload = useCallback(async (targetRequirementId?: number | null) => {
     const requirementId = targetRequirementId ?? activeRequirementIdRef.current;
-    beginSuppressCanvasSync();
     if (!requirementId) {
+      beginSuppressCanvasSync();
       domainNodesRef.current = [];
       setDomainNodes([]);
       setFocusedNodeId(null);
@@ -213,18 +294,22 @@ export default function RuleTreePage() {
       return;
     }
 
-    const tree = await fetchRuleTree(requirementId);
+    const [tree, risksResp] = await Promise.all([
+      fetchRuleTree(requirementId),
+      fetchRisks(requirementId).catch(() => ({ risks: [] as RiskItem[] })),
+    ]);
     if (activeRequirementIdRef.current !== requirementId) {
       return;
     }
+    beginSuppressCanvasSync();
     const normalizedNodes = tree.nodes.map((node) => ({
       ...node,
       content: normalizeRuleNodeContent(node.content),
     }));
     domainNodesRef.current = normalizedNodes;
     setDomainNodes(normalizedNodes);
-    loadRisks(requirementId);
-  }, [beginSuppressCanvasSync, loadRisks]);
+    setRiskItems(risksResp.risks);
+  }, [beginSuppressCanvasSync]);
 
   useEffect(() => {
     domainNodesRef.current = domainNodes;
@@ -511,14 +596,75 @@ export default function RuleTreePage() {
     (nodeId: string) => {
       const domainNode = nodeMap.get(nodeId);
       if (!domainNode) return;
-
       setFocusedNodeId(nodeId);
-      if (isReadonlyVersion) return;
-      setEditingNode(domainNode);
-      form.setFieldsValue(domainNode);
+      setContextMenu(null);
     },
-    [form, isReadonlyVersion, nodeMap],
+    [nodeMap],
   );
+
+  const onMindMapNodeContextMenu = useCallback(
+    (nodeId: string, position: { x: number; y: number }) => {
+      const domainNode = nodeMap.get(nodeId);
+      if (!domainNode) return;
+      setFocusedNodeId(nodeId);
+      setContextMenu({ x: position.x, y: position.y, nodeId });
+    },
+    [nodeMap],
+  );
+
+  const handleContextMenuAction = useCallback(
+    (key: string) => {
+      if (!contextMenu) return;
+      const domainNode = nodeMap.get(contextMenu.nodeId);
+      setContextMenu(null);
+
+      if (!domainNode) return;
+
+      switch (key) {
+        case "edit":
+          setEditingNode(domainNode);
+          form.setFieldsValue(domainNode);
+          break;
+        case "addChild":
+          createForm.resetFields();
+          createForm.setFieldsValue({ parent_id: domainNode.id, node_type: "condition", risk_level: "medium" });
+          setCreateOpen(true);
+          break;
+        case "delete":
+          Modal.confirm({
+            title: "确认删除",
+            content: `确定要删除节点「${domainNode.content.length > 30 ? domainNode.content.slice(0, 30) + "..." : domainNode.content}」吗？`,
+            okText: "删除",
+            okButtonProps: { danger: true },
+            cancelText: "取消",
+            onOk: async () => {
+              const resp = await deleteRuleNode(domainNode.id);
+              setLastImpact(resp.impact.needs_review_case_ids);
+              message.success("节点已删除");
+              await reload();
+            },
+          });
+          break;
+      }
+    },
+    [contextMenu, createForm, form, nodeMap, reload],
+  );
+
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const dismiss = () => setContextMenu(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismiss();
+    };
+
+    document.addEventListener("click", dismiss);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("click", dismiss);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [contextMenu]);
 
   const syncCanvasChanges = useCallback(
     (nextTree: MindMapTreeNode) => {
@@ -772,6 +918,21 @@ export default function RuleTreePage() {
     message.success(`已创建 v${created.version}`);
   };
 
+  const loadDiffHistory = useCallback(async () => {
+    if (!selectedProjectId) return;
+    setDiffHistoryLoading(true);
+    try {
+      const activeReq = requirements.find((r) => r.id === activeRequirementId);
+      const groupId = activeReq?.requirement_group_id ?? undefined;
+      const list = await fetchDiffHistory(selectedProjectId, groupId);
+      setDiffHistory(list);
+    } catch {
+      /* ignore */
+    } finally {
+      setDiffHistoryLoading(false);
+    }
+  }, [selectedProjectId, activeRequirementId, requirements]);
+
   const handleRunDiff = async () => {
     if (!baseVersionRequirementId || !compareVersionRequirementId) {
       message.warning("请选择对比版本");
@@ -786,10 +947,21 @@ export default function RuleTreePage() {
     try {
       const result = await fetchSemanticDiff(baseVersionRequirementId, compareVersionRequirementId);
       setSemanticDiffResult(result);
+      loadDiffHistory();
     } catch (error) {
       message.error(getErrorMessage(error, "版本对比失败"));
     } finally {
       setDiffLoading(false);
+    }
+  };
+
+  const handleDeleteDiffRecord = async (recordId: number) => {
+    try {
+      await deleteDiffRecord(recordId);
+      message.success("已删除");
+      loadDiffHistory();
+    } catch (error) {
+      message.error(getErrorMessage(error, "删除失败"));
     }
   };
 
@@ -878,6 +1050,27 @@ export default function RuleTreePage() {
       setSessionConfirmed(true);
     } catch (error) {
       message.error(getErrorMessage(error, "确认导入失败"));
+    } finally {
+      setSessionConfirmLoading(false);
+    }
+  };
+
+  const handleApplyHistorySnapshot = async (msg: { tree_snapshot: string | null }) => {
+    if (!selectedSessionId || !msg.tree_snapshot) return;
+    const treeJson = JSON.parse(msg.tree_snapshot);
+    setSessionConfirmLoading(true);
+    try {
+      const resp = await confirmRuleTreeSession(selectedSessionId, {
+        tree_json: treeJson,
+        requirement_text: sessionUpdateText.trim() || sessionRequirementText.trim() || "",
+      });
+      await reload();
+      const detail = await fetchRuleTreeSessionDetail(selectedSessionId);
+      setSessionDetail(detail);
+      message.success(`已从历史记录恢复，写入 ${resp.imported_nodes} 个节点`);
+      setSessionConfirmed(true);
+    } catch (error) {
+      message.error(getErrorMessage(error, "从历史记录恢复失败"));
     } finally {
       setSessionConfirmLoading(false);
     }
@@ -1105,12 +1298,15 @@ export default function RuleTreePage() {
               flexDirection: "column",
             }}
           >
-            <div style={{ padding: 10, borderBottom: "1px solid #eef2f7" }}>
+            <div style={{ padding: 10, borderBottom: "1px solid #eef2f7", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <Typography.Text>
                 当前选中：{focusedNodeId ? nodeMap.get(focusedNodeId)?.content || focusedNodeId : "-"}
               </Typography.Text>
+              {!isReadonlyVersion && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>右键节点可编辑</Typography.Text>
+              )}
             </div>
-            <div style={{ flex: 1 }}>
+            <div style={{ flex: 1, position: "relative" }}>
               <MindMapWrapper
                 key={activeRequirementId ?? "no-requirement"}
                 ref={mindMapRef}
@@ -1121,6 +1317,7 @@ export default function RuleTreePage() {
                 editable={!isReadonlyVersion}
                 textAutoWrapWidth={textAutoWrapWidth}
                 onNodeClick={onMindMapNodeClick}
+                onNodeContextMenu={isReadonlyVersion ? undefined : onMindMapNodeContextMenu}
                 onDataChange={syncCanvasChanges}
               />
             </div>
@@ -1130,6 +1327,7 @@ export default function RuleTreePage() {
             <div
               style={{
                 width: 340,
+                minHeight: 0,
                 border: "1px solid #d7e2ee",
                 borderRadius: 10,
                 display: "flex",
@@ -1147,9 +1345,36 @@ export default function RuleTreePage() {
                 onRiskConverted={() => {
                   reload();
                 }}
+                onRisksChange={(risks) => setRiskItems(risks)}
               />
             </div>
           )}
+        </div>
+      )}
+
+      {contextMenu && (
+        <div
+          style={{
+            position: "fixed",
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 1050,
+            boxShadow: "0 3px 12px rgba(0,0,0,0.15)",
+            borderRadius: 8,
+            background: "#fff",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Menu
+            style={{ borderRadius: 8, minWidth: 160 }}
+            items={[
+              { key: "edit", label: "编辑节点", icon: <EditOutlined /> },
+              { key: "addChild", label: "新增子节点", icon: <PlusOutlined /> },
+              { type: "divider" },
+              { key: "delete", label: "删除节点", icon: <DeleteOutlined />, danger: true },
+            ]}
+            onClick={({ key }) => handleContextMenuAction(key)}
+          />
         </div>
       )}
 
@@ -1410,9 +1635,23 @@ export default function RuleTreePage() {
                     <Tag color="blue">{item.message_type}</Tag>
                     <Typography.Text type="secondary">{new Date(item.created_at).toLocaleString()}</Typography.Text>
                   </Space>
-                  <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                  <Typography.Paragraph style={{ marginBottom: item.role === "assistant" && item.tree_snapshot ? 8 : 0, whiteSpace: "pre-wrap" }}>
                     {item.content.length > 500 ? `${item.content.slice(0, 500)}...` : item.content}
                   </Typography.Paragraph>
+                  {item.role === "assistant" && item.tree_snapshot && (
+                    <div style={{ textAlign: "right" }}>
+                      <Popconfirm
+                        title="确定要将此版本应用到规则树吗？当前规则树将被覆盖。"
+                        onConfirm={() => handleApplyHistorySnapshot(item)}
+                        okText="确定"
+                        cancelText="取消"
+                      >
+                        <Button size="small" type="primary" ghost loading={sessionConfirmLoading}>
+                          应用此版本到规则树
+                        </Button>
+                      </Popconfirm>
+                    </div>
+                  )}
                 </div>
               ))
             )}
@@ -1426,111 +1665,139 @@ export default function RuleTreePage() {
         onCancel={() => {
           setDiffOpen(false);
           setSemanticDiffResult(null);
+          setViewingHistoryResult(null);
+          setDiffActiveTab("new");
         }}
         footer={null}
         width={980}
+        afterOpenChange={(open) => {
+          if (open) loadDiffHistory();
+        }}
       >
-        <Space style={{ marginBottom: 16 }} wrap>
-          <Select
-            style={{ width: 320 }}
-            placeholder="基准版本"
-            value={baseVersionRequirementId}
-            options={versions.map((item) => ({ value: item.id, label: `v${item.version} · ${item.title}` }))}
-            onChange={(value) => setBaseVersionRequirementId(value)}
-          />
-          <Select
-            style={{ width: 320 }}
-            placeholder="对比版本"
-            value={compareVersionRequirementId}
-            options={versions.map((item) => ({ value: item.id, label: `v${item.version} · ${item.title}` }))}
-            onChange={(value) => setCompareVersionRequirementId(value)}
-          />
-          <Button type="primary" onClick={handleRunDiff} loading={diffLoading}>
-            开始对比
-          </Button>
-        </Space>
+        <Tabs
+          activeKey={diffActiveTab}
+          onChange={(key) => {
+            setDiffActiveTab(key);
+            setViewingHistoryResult(null);
+          }}
+          items={[
+            {
+              key: "new",
+              label: "新对比",
+              children: (
+                <>
+                  <Space style={{ marginBottom: 16 }} wrap>
+                    <Select
+                      style={{ width: 320 }}
+                      placeholder="基准版本"
+                      value={baseVersionRequirementId}
+                      options={versions.map((item) => ({ value: item.id, label: `v${item.version} · ${item.title}` }))}
+                      onChange={(value) => setBaseVersionRequirementId(value)}
+                    />
+                    <Select
+                      style={{ width: 320 }}
+                      placeholder="对比版本"
+                      value={compareVersionRequirementId}
+                      options={versions.map((item) => ({ value: item.id, label: `v${item.version} · ${item.title}` }))}
+                      onChange={(value) => setCompareVersionRequirementId(value)}
+                    />
+                    <Button type="primary" onClick={handleRunDiff} loading={diffLoading}>
+                      开始对比
+                    </Button>
+                  </Space>
 
-        {semanticDiffResult && (
-          <>
-            <Alert
-              style={{ marginBottom: 12 }}
-              type="info"
-              message={`对比总结（v${semanticDiffResult.base_version} → v${semanticDiffResult.compare_version}）`}
-              description={
-                <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                  {semanticDiffResult.summary}
-                </Typography.Paragraph>
-              }
-              showIcon
-            />
-
-            {semanticDiffResult.risk_notes && (
-              <Alert
-                style={{ marginBottom: 12 }}
-                type="warning"
-                message="风险提示"
-                description={semanticDiffResult.risk_notes}
-                showIcon
-              />
-            )}
-
-            {semanticDiffResult.flow_changes.length === 0 ? (
-              <Alert style={{ marginBottom: 12 }} type="success" message="两个版本无实质性流程差异" />
-            ) : (
-              <Table
-                size="small"
-                rowKey={(_, index) => String(index)}
-                dataSource={semanticDiffResult.flow_changes}
-                pagination={false}
-                expandable={{
-                  expandedRowRender: (record) =>
-                    record.detail ? (
-                      <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                        {record.detail}
-                      </Typography.Paragraph>
-                    ) : (
-                      <Typography.Text type="secondary">无详细说明</Typography.Text>
-                    ),
-                  rowExpandable: (record) => !!record.detail,
-                }}
-                columns={[
-                  {
-                    title: "变更类型",
-                    dataIndex: "change_type",
-                    width: 100,
-                    render: (type: string) => {
-                      const meta: Record<string, { color: string; label: string }> = {
-                        added: { color: "green", label: "新增" },
-                        removed: { color: "red", label: "删除" },
-                        modified: { color: "orange", label: "修改" },
-                      };
-                      const m = meta[type] || { color: "default", label: type };
-                      return <Tag color={m.color}>{m.label}</Tag>;
+                  {semanticDiffResult && (
+                    <DiffResultDisplay result={semanticDiffResult} />
+                  )}
+                </>
+              ),
+            },
+            {
+              key: "history",
+              label: `历史记录${diffHistory.length ? ` (${diffHistory.length})` : ""}`,
+              children: viewingHistoryResult ? (
+                <>
+                  <Button
+                    style={{ marginBottom: 12 }}
+                    onClick={() => setViewingHistoryResult(null)}
+                  >
+                    返回列表
+                  </Button>
+                  <DiffResultDisplay result={viewingHistoryResult} />
+                </>
+              ) : (
+                <Table
+                  size="small"
+                  rowKey="id"
+                  loading={diffHistoryLoading}
+                  dataSource={diffHistory}
+                  pagination={diffHistory.length > 10 ? { pageSize: 10 } : false}
+                  columns={[
+                    {
+                      title: "对比版本",
+                      key: "versions",
+                      width: 160,
+                      render: (_: unknown, record: DiffRecordRead) => (
+                        <span>v{record.base_version} → v{record.compare_version}</span>
+                      ),
                     },
-                  },
-                  {
-                    title: "变更描述",
-                    dataIndex: "description",
-                  },
-                  {
-                    title: "影响程度",
-                    dataIndex: "impact",
-                    width: 100,
-                    render: (impact: string) => {
-                      const meta: Record<string, { color: string; label: string }> = {
-                        high: { color: "red", label: "高" },
-                        medium: { color: "orange", label: "中" },
-                        low: { color: "blue", label: "低" },
-                      };
-                      const m = meta[impact] || { color: "default", label: impact };
-                      return <Tag color={m.color}>{m.label}</Tag>;
+                    {
+                      title: "对比方式",
+                      dataIndex: "diff_type",
+                      width: 100,
+                      render: (t: string) => (
+                        <Tag color={t === "semantic" ? "blue" : "default"}>
+                          {t === "semantic" ? "语义" : "算法"}
+                        </Tag>
+                      ),
                     },
-                  },
-                ]}
-              />
-            )}
-          </>
-        )}
+                    {
+                      title: "变更数",
+                      key: "changes",
+                      width: 80,
+                      render: (_: unknown, record: DiffRecordRead) =>
+                        record.result.flow_changes.length,
+                    },
+                    {
+                      title: "对比时间",
+                      dataIndex: "created_at",
+                      width: 180,
+                      render: (v: string) => new Date(v).toLocaleString(),
+                    },
+                    {
+                      title: "操作",
+                      key: "action",
+                      width: 120,
+                      render: (_: unknown, record: DiffRecordRead) => (
+                        <Space>
+                          <Tooltip title="查看详情">
+                            <Button
+                              size="small"
+                              type="link"
+                              onClick={() => setViewingHistoryResult(record.result)}
+                            >
+                              查看
+                            </Button>
+                          </Tooltip>
+                          <Popconfirm
+                            title="确定删除此对比记录？"
+                            onConfirm={() => handleDeleteDiffRecord(record.id)}
+                            okText="确定"
+                            cancelText="取消"
+                          >
+                            <Button size="small" type="link" danger>
+                              删除
+                            </Button>
+                          </Popconfirm>
+                        </Space>
+                      ),
+                    },
+                  ]}
+                />
+              ),
+            },
+          ]}
+        />
       </Modal>
     </div>
   );
