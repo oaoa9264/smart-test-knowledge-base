@@ -269,6 +269,8 @@
                           └───────────┘
 
 Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCase
+
+Project 1 ─── N DiffRecord (base_requirement_id / compare_requirement_id → Requirement)
 ```
 
 ### 3.2 实体详细定义
@@ -433,6 +435,20 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 | message_type | String(50) | NOT NULL | 消息类型 (user_input/generation/review/update/confirm 等) |
 | tree_snapshot | Text | 可选 | 该消息关联的规则树 JSON 快照 |
 | created_at | DateTime | NOT NULL | 创建时间 |
+
+#### DiffRecord (版本对比记录，P1+ 新增)
+
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| id | Integer | PK, 自增 | 记录 ID |
+| project_id | Integer | FK → projects.id, NOT NULL, 索引 | 所属项目 |
+| base_requirement_id | Integer | FK → requirements.id, NOT NULL | 基准需求版本 |
+| compare_requirement_id | Integer | FK → requirements.id, NOT NULL | 对比需求版本 |
+| base_version | Integer | NOT NULL | 基准版本号 |
+| compare_version | Integer | NOT NULL | 对比版本号 |
+| result_json | Text | NOT NULL | 对比结果 JSON（SemanticDiffResult 序列化） |
+| diff_type | String(20) | NOT NULL, 默认 semantic | 对比方式（semantic / algorithmic） |
+| created_at | DateTime | NOT NULL, 默认 UTC now | 创建时间 |
 
 #### 关联表
 
@@ -661,7 +677,10 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 
 | 方法 | 路径 | 说明 | 请求体 | 响应 |
 |------|------|------|--------|------|
-| GET | `/api/rules/diff?old_requirement_id=N&new_requirement_id=M` | 语义级规则树版本对比 | — | SemanticDiffResult |
+| GET | `/api/rules/diff?base_requirement_id=N&compare_requirement_id=M` | 语义级规则树版本对比（自动保存对比记录） | — | SemanticDiffResult |
+| GET | `/api/rules/diff/history?project_id=N&requirement_group_id=M` | 获取对比历史列表（按时间倒序，最多 50 条） | — | DiffRecordRead[] |
+| GET | `/api/rules/diff/history/{record_id}` | 获取单条对比记录详情 | — | DiffRecordRead |
+| DELETE | `/api/rules/diff/history/{record_id}` | 删除对比记录 | — | `{ok: true}` |
 
 **SemanticDiffResult 响应结构：**
 ```json
@@ -682,11 +701,27 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 }
 ```
 
+**DiffRecordRead 响应结构：**
+```json
+{
+  "id": 1,
+  "base_requirement_id": 1,
+  "compare_requirement_id": 2,
+  "base_version": 1,
+  "compare_version": 2,
+  "diff_type": "semantic",
+  "created_at": "2026-03-06T12:00:00",
+  "result": { "...SemanticDiffResult..." }
+}
+```
+
 **关键机制：**
 - 优先使用 LLM 进行语义级 Diff，生成 `summary` 和 `flow_changes`（流程变更）
 - LLM Diff 失败时自动回退到算法 Diff（基于节点内容模糊匹配 + SequenceMatcher）
 - 算法 Diff 分为三类：`added`（新增节点）、`removed`（删除节点）、`modified`（内容变更节点）
 - 序列化使用缩进文本格式传递给 LLM，提高语义理解准确度
+- 每次执行 Diff 后自动将结果保存为 `DiffRecord`，保存失败不影响 Diff 结果返回
+- 历史记录列表支持按 `project_id` 过滤，可选按 `requirement_group_id` 进一步缩小范围
 
 ### 4.11 规则树会话式 AI 生成 (`/api/rules/sessions`，P1+ 新增)
 
@@ -994,7 +1029,7 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 
 **需求操作：**
 1. 点击「新建需求」→ Modal 表单 (标题 + 原文)
-2. 需求表格展示 ID / 标题 / 来源类型 (中文标签)，每行含「查看」「修改」「删除」
+2. 需求表格展示 ID / 标题 / 版本 (Tag `vN`) / 来源类型 (中文标签)，每行含「查看」「修改」「删除」
 3. 「修改」→ Modal 表单含来源类型 Select (需求文档/流程图/接口文档)
 4. 点击需求行 → 设为当前选中需求
 
@@ -1002,7 +1037,7 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 
 1. 选择需求 → 加载规则树，前端将 `RuleNode[]` 通过 `dataAdapter` 转为 `MindMapTreeNode`，由 simple-mind-map 渲染
 2. 页面采用「左侧规则目录 + 右侧思维导图」双栏；目录支持关键字过滤、展开全部、仅根节点
-3. 点击左侧目录节点 → 画布执行聚焦与高亮；点击画布节点 → 打开编辑抽屉 (Drawer)
+3. 点击左侧目录节点 → 画布执行聚焦与高亮；左键点击画布节点 → 选中并聚焦；右键点击画布节点 → 弹出上下文菜单（编辑 / 新增子节点 / 删除）
 4. 画布编辑（拖拽改父子关系、文本调整等）触发 `data_change`，前端基于新旧树 diff 并节流 420ms 同步后端 CRUD
 5. 同步顺序为「先建新增节点 → 再更新已有节点 → 最后删除缺失节点」，并处理临时 ID 到真实 ID 的映射
 6. 同步成功后提示新增/更新/删除计数，并展示影响分析 Alert（受影响用例标记为 `needs_review`）
@@ -1015,18 +1050,23 @@ Requirement 1 ─── N RecoRun 1 ─── N RecoResult N ─── 1 TestCas
 10. 工具栏新增版本选择器下拉框，展示当前需求所有版本 (`v1`, `v2`, ...)
 11. 点击「创建新版本」→ 基于当前版本创建新版本，自动跳转到新版本
 12. 选择旧版本 → 页面进入只读模式，禁用编辑/新增/删除/AI解析等操作
-13. 点击「版本对比」→ 弹窗展示两个版本的语义 Diff（LLM 生成的变更摘要 + 流程级变更列表 + 节点级增删改）
+13. 点击「版本对比」→ 弹窗展示两个版本的语义 Diff，弹窗包含两个 Tab：
+    - 「新对比」Tab：选择基准/对比版本并执行 Diff，展示变更摘要 + 流程级变更列表 + 节点级增删改
+    - 「历史记录」Tab：展示已保存的对比记录列表，支持查看详情和删除
 
 **会话式 AI 生成 (P1+ 新增)：**
 14. 点击「AI 生成规则树」→ 打开右侧抽屉 (Drawer)，可创建新会话或选择历史会话
 15. 输入需求描述 → AI 生成规则树 + 自动审查 → 展示生成结果和审查意见
 16. 对生成结果可进行增量更新：输入修改意见 → AI 基于原树和反馈重新生成
 17. 确认满意后点击「确认导入」→ 规则树写入正式库，清理旧节点并重算路径
+18. 会话消息历史中，AI 生成的消息（含 `tree_snapshot`）支持「应用此版本到规则树」操作，可从历史消息恢复特定版本的规则树
 
 **风险识别面板 (P1+ 新增)：**
-18. 工具栏新增「风险识别」按钮，点击后底部展开 RiskPanel
-19. AI 分析当前规则树识别潜在风险点，每条风险可操作：接受 / 忽略 / 转为规则节点
-20. 风险高亮：存在风险的节点在思维导图中以特殊标记显示（通过 `dataAdapter` 中的 `nodeRiskMap` 实现）
+19. 工具栏新增「风险识别」按钮，点击后底部展开 RiskPanel
+20. AI 分析当前规则树识别潜在风险点，每条风险可操作：接受 / 忽略 / 转为规则节点
+21. 风险高亮：存在风险的节点在思维导图中以特殊标记显示（通过 `dataAdapter` 中的 `nodeRiskMap` 实现）
+22. 存在待处理（pending）风险项时，「分析」按钮禁用并提示"请先处理所有待处理风险项"
+23. 风险分析完成或决策处理后，通过 `onRisksChange` 回调同步更新父组件的风险状态
 
 ### 6.5 用例管理页面交互流程
 
@@ -1372,6 +1412,51 @@ Utils (utils/)
 ```
 
 ### 12.2 更新日志
+
+#### 2026-03-06 — 规则树交互增强（右键菜单/Diff 历史持久化/风险面板优化）
+
+**范围：**
+- 后端 / 前端
+
+**改动摘要：**
+- **Diff 历史持久化**：新增 `DiffRecord` 数据模型，版本对比结果自动保存；新增 3 个 API（历史列表/详情/删除）；版本对比弹窗新增「历史记录」Tab，支持查看和删除历史对比
+- **右键上下文菜单**：规则树节点左键点击改为仅选中聚焦，右键点击弹出上下文菜单（编辑 / 新增子节点 / 删除），替代原来左键直接打开编辑抽屉的行为；画布顶部新增"右键节点可编辑"提示
+- **MindMapWrapper 稳定性增强**：新增 `pendingDataRef` 队列机制，当 `setData` 正在执行时将后续数据排队等待，解决并发调用竞态条件
+- **风险面板改进**：存在待处理风险项时禁用分析按钮并提示；新增 `onRisksChange` 回调同步父组件风险状态；滚动区域使用绝对定位修复溢出问题；折叠面板改为受控模式
+- **需求列表版本列**：项目需求表格新增"版本"列，以 Tag `vN` 形式展示
+- **并行加载优化**：规则树与风险数据改为 `Promise.all` 并行加载，减少页面初始化等待
+- **会话快照恢复**：会话消息历史中 AI 生成的消息支持「应用此版本到规则树」操作
+- **DiffResultDisplay 组件抽取**：将 Diff 结果展示逻辑提取为独立组件，在"新对比"和"历史记录"中复用
+- **Literal 导入兼容**：`risk.py` 将 `Literal` 从 `typing_extensions` 导入，兼容 Python 3.7
+
+**涉及文件：**
+- `backend/app/api/tree_diff.py`
+- `backend/app/models/entities.py`
+- `backend/app/schemas/risk.py`
+- `backend/app/schemas/tree_diff.py`
+- `frontend/src/api/treeDiff.ts`
+- `frontend/src/pages/ProjectList/index.tsx`
+- `frontend/src/pages/RuleTree/MindMapWrapper.tsx`
+- `frontend/src/pages/RuleTree/RiskPanel.tsx`
+- `frontend/src/pages/RuleTree/index.tsx`
+- `frontend/src/types/index.ts`
+
+**接口/模型变更：**
+- API: `GET /api/rules/diff/history?project_id=N&requirement_group_id=M` (新增)
+- API: `GET /api/rules/diff/history/{record_id}` (新增)
+- API: `DELETE /api/rules/diff/history/{record_id}` (新增)
+- API: `GET /api/rules/diff` 行为增强 — 执行对比后自动保存 `DiffRecord`
+- Model: `DiffRecord` (新增表 `diff_records`)
+- Schema: `DiffRecordRead` (新增)
+- Type: `DiffRecordRead` (前端类型新增)
+
+**兼容性说明：**
+- 新增 API 均为增量接口，不影响已有接口行为
+- `DiffRecord` 表通过 `create_all` 自动创建，无需手动迁移
+- Diff 结果保存失败不影响 Diff 接口正常返回（try-except 保护）
+- 前端规则树交互变更：左键不再直接打开编辑抽屉，改为右键上下文菜单
+
+---
 
 #### 2026-03-06 — 需求版本化 + 规则树版本 Diff + 会话式 AI 生成 + 风险识别分析
 
