@@ -24,6 +24,7 @@ import {
 } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
 import {
+  batchDeleteTestCases,
   confirmImport,
   createTestCase,
   deleteTestCase,
@@ -135,6 +136,8 @@ export default function TestCasesPage() {
   const [deletingCaseId, setDeletingCaseId] = useState<number | null>(null);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [createFormCollapsed, setCreateFormCollapsed] = useState(true);
+  const [selectedCaseIds, setSelectedCaseIds] = useState<number[]>([]);
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importStep, setImportStep] = useState(0);
@@ -415,13 +418,25 @@ export default function TestCasesPage() {
     };
   }, [importRows]);
 
-  const requirementOptions = useMemo(
-    () =>
-      requirements
-        .filter((item) => !selectedProjectId || item.project_id === selectedProjectId)
-        .map((item) => ({ label: item.title, value: item.id })),
-    [requirements, selectedProjectId],
-  );
+  const requirementOptions = useMemo(() => {
+    const filtered = requirements.filter(
+      (item) => !selectedProjectId || item.project_id === selectedProjectId,
+    );
+    const maxVersionByGroup = new Map<number, number>();
+    for (const item of filtered) {
+      if (item.requirement_group_id != null) {
+        const cur = maxVersionByGroup.get(item.requirement_group_id) ?? 0;
+        if (item.version > cur) maxVersionByGroup.set(item.requirement_group_id, item.version);
+      }
+    }
+    return filtered.map((item) => {
+      const isLatest =
+        item.requirement_group_id != null &&
+        item.version === maxVersionByGroup.get(item.requirement_group_id);
+      const suffix = isLatest ? `v${item.version}(最新)` : `v${item.version}`;
+      return { label: `${item.title} ${suffix}`, value: item.id };
+    });
+  }, [requirements, selectedProjectId]);
 
   const submit = async () => {
     if (!selectedProjectId) {
@@ -453,6 +468,7 @@ export default function TestCasesPage() {
     setEditingCase(row);
     editForm.setFieldsValue({
       title: row.title,
+      precondition: row.precondition || "",
       steps: row.steps,
       expected_result: row.expected_result,
       risk_level: row.risk_level,
@@ -494,6 +510,7 @@ export default function TestCasesPage() {
     try {
       await deleteTestCase(caseId);
       setCases((prev) => prev.filter((item) => item.id !== caseId));
+      setSelectedCaseIds((prev) => prev.filter((id) => id !== caseId));
       if (viewingCase?.id === caseId) {
         setViewingCase(null);
       }
@@ -502,6 +519,28 @@ export default function TestCasesPage() {
       message.error("删除失败");
     } finally {
       setDeletingCaseId(null);
+    }
+  };
+
+  const batchRemoveCases = async () => {
+    if (!selectedCaseIds.length) {
+      message.warning("请先选择要删除的用例");
+      return;
+    }
+    setBatchDeleting(true);
+    try {
+      const result = await batchDeleteTestCases(selectedCaseIds);
+      const deletedSet = new Set(selectedCaseIds);
+      setCases((prev) => prev.filter((item) => !deletedSet.has(item.id)));
+      if (viewingCase && deletedSet.has(viewingCase.id)) {
+        setViewingCase(null);
+      }
+      setSelectedCaseIds([]);
+      message.success(`已删除 ${result.deleted_count} 条用例`);
+    } catch {
+      message.error("批量删除失败");
+    } finally {
+      setBatchDeleting(false);
     }
   };
 
@@ -720,10 +759,13 @@ export default function TestCasesPage() {
             <Form
               form={form}
               layout="vertical"
-              initialValues={{ risk_level: "medium", status: "active", bound_rule_node_ids: [], bound_path_ids: [] }}
+              initialValues={{ risk_level: "medium", status: "active", precondition: "", bound_rule_node_ids: [], bound_path_ids: [] }}
             >
               <Form.Item name="title" label="用例标题" rules={[{ required: true, message: "请输入标题" }]}>
                 <Input />
+              </Form.Item>
+              <Form.Item name="precondition" label="前置条件">
+                <Input.TextArea rows={3} placeholder="如：存在一个客户，客户类型=代理商" />
               </Form.Item>
               <Form.Item name="steps" label="执行步骤" rules={[{ required: true, message: "请输入步骤" }]}>
                 <Input.TextArea rows={4} />
@@ -776,6 +818,17 @@ export default function TestCasesPage() {
             title="用例列表"
             extra={
               <Space>
+                <Popconfirm
+                  title={`确认删除选中的 ${selectedCaseIds.length} 条用例吗？`}
+                  okText="删除"
+                  cancelText="取消"
+                  onConfirm={batchRemoveCases}
+                  disabled={!selectedCaseIds.length}
+                >
+                  <Button danger loading={batchDeleting} disabled={!selectedCaseIds.length}>
+                    批量删除{selectedCaseIds.length > 0 ? ` (${selectedCaseIds.length})` : ""}
+                  </Button>
+                </Popconfirm>
                 <Button type="primary" onClick={openImportModal}>
                   导入用例
                 </Button>
@@ -787,6 +840,10 @@ export default function TestCasesPage() {
           >
             <Table<TestCase>
               rowKey="id"
+              rowSelection={{
+                selectedRowKeys: selectedCaseIds,
+                onChange: (keys) => setSelectedCaseIds(keys as number[]),
+              }}
               rowClassName={(row) => (row.id === highlightedCaseId ? "focus-case-row" : "")}
               size="small"
               pagination={{ pageSize: 8 }}
@@ -1159,6 +1216,9 @@ export default function TestCasesPage() {
           <Form.Item name="title" label="用例标题" rules={[{ required: true, message: "请输入标题" }]}>
             <Input />
           </Form.Item>
+          <Form.Item name="precondition" label="前置条件">
+            <Input.TextArea rows={3} placeholder="如：存在一个客户，客户类型=代理商" />
+          </Form.Item>
           <Form.Item name="steps" label="执行步骤" rules={[{ required: true, message: "请输入步骤" }]}>
             <Input.TextArea rows={4} />
           </Form.Item>
@@ -1217,6 +1277,9 @@ export default function TestCasesPage() {
             <Tag color={getRiskTagColor(viewingCase?.risk_level)}>{getRiskLevelLabel(viewingCase?.risk_level)}</Tag>
           </Descriptions.Item>
           <Descriptions.Item label="状态">{getTestCaseStatusLabel(viewingCase?.status)}</Descriptions.Item>
+          <Descriptions.Item label="前置条件">
+            <div style={{ whiteSpace: "pre-wrap" }}>{viewingCase?.precondition || "-"}</div>
+          </Descriptions.Item>
           <Descriptions.Item label="执行步骤">{viewingCase?.steps || "-"}</Descriptions.Item>
           <Descriptions.Item label="预期结果">{viewingCase?.expected_result || "-"}</Descriptions.Item>
           <Descriptions.Item label="绑定节点">

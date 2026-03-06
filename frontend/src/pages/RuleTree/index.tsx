@@ -8,11 +8,13 @@ import {
   Form,
   Input,
   InputNumber,
+  List,
   Menu,
   Modal,
   Popconfirm,
   Select,
   Space,
+  Spin,
   Steps,
   Table,
   Tabs,
@@ -20,10 +22,22 @@ import {
   Tooltip,
   Tree,
   Typography,
+  Upload,
   message,
 } from "antd";
-import { DeleteOutlined, DownOutlined, EditOutlined, HistoryOutlined, PlusOutlined, RobotOutlined, WarningOutlined } from "@ant-design/icons";
+import type { UploadFile } from "antd/es/upload/interface";
+import { CheckCircleOutlined, CloseOutlined, DeleteOutlined, DownOutlined, EditOutlined, ExperimentOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, RobotOutlined, SaveOutlined, WarningOutlined } from "@ant-design/icons";
 import { getErrorMessage } from "../../api/client";
+import {
+  generateTestPlan,
+  generateTestCases,
+  confirmTestCases,
+  getTestPlanSessions,
+  createTestPlanSession,
+  archiveTestPlanSession,
+  updateSessionCases,
+  updateTestPlan,
+} from "../../api/testPlan";
 import { createNewVersion, fetchRequirementVersions, fetchRequirements } from "../../api/projects";
 import { fetchRisks } from "../../api/risks";
 import {
@@ -34,13 +48,12 @@ import {
   generateRuleTreeSession,
   updateRuleTreeSession,
 } from "../../api/ruleTreeSession";
-import { aiParse, createRuleNode, deleteRuleNode, fetchRuleTree, updateRuleNode } from "../../api/rules";
+import { createRuleNode, deleteRuleNode, fetchRuleTree, updateRuleNode } from "../../api/rules";
 import { deleteDiffRecord, fetchDiffHistory, fetchSemanticDiff } from "../../api/treeDiff";
 import { useAppStore } from "../../stores/appStore";
 import type {
-  AIParseNode,
-  AIParseResult,
   DiffRecordRead,
+  GeneratedTestCase,
   RuleTreeSession,
   RuleTreeSessionDetail,
   RuleTreeSessionGenerateResult,
@@ -50,8 +63,9 @@ import type {
   RiskLevel,
   RuleNode,
   SemanticDiffResult,
+  TestPlanSession,
+  TestPoint,
 } from "../../types";
-import { getNodeTypeLabel, riskLevelLabels } from "../../utils/enumLabels";
 import type { MindMapTreeNode } from "./dataAdapter";
 import { buildNodeRiskMap, mindMapDataToRuleNodes, normalizeRuleNodeContent, ruleNodesToMindMapData } from "./dataAdapter";
 import MindMapWrapper, { type MindMapExportType, type MindMapWrapperRef } from "./MindMapWrapper";
@@ -72,27 +86,6 @@ const nodeTypeOptions = [
   { label: "动作", value: "action" },
   { label: "异常", value: "exception" },
 ];
-
-const aiParseModeMeta: Record<
-  AIParseResult["analysis_mode"],
-  { label: string; alertType: "success" | "warning" | "info"; hint: string }
-> = {
-  llm: {
-    label: "LLM",
-    alertType: "success",
-    hint: "当前草稿由 LLM 生成。",
-  },
-  mock_fallback: {
-    label: "Mock（LLM降级）",
-    alertType: "warning",
-    hint: "LLM 不可用或返回异常，已自动降级到规则分句解析。",
-  },
-  mock: {
-    label: "Mock",
-    alertType: "info",
-    hint: "当前使用规则分句解析。",
-  },
-};
 
 type RuleTreeNavNode = {
   key: string;
@@ -219,10 +212,6 @@ export default function RuleTreePage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createForm] = Form.useForm();
 
-  const [aiOpen, setAiOpen] = useState(false);
-  const [aiText, setAiText] = useState("");
-  const [aiDraft, setAiDraft] = useState<AIParseNode[]>([]);
-  const [aiParseMode, setAiParseMode] = useState<AIParseResult["analysis_mode"] | null>(null);
   const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
   const [showSessionUpdate, setShowSessionUpdate] = useState(false);
   const [showSessionHistory, setShowSessionHistory] = useState(false);
@@ -238,11 +227,33 @@ export default function RuleTreePage() {
   const [sessionGenerateResult, setSessionGenerateResult] = useState<RuleTreeSessionGenerateResult | null>(null);
   const [sessionUpdateResult, setSessionUpdateResult] = useState<RuleTreeSessionUpdateResult | null>(null);
   const [sessionConfirmed, setSessionConfirmed] = useState(false);
+  const [sessionImageFile, setSessionImageFile] = useState<UploadFile[]>([]);
 
   const [lastImpact, setLastImpact] = useState<number[]>([]);
   const [riskItems, setRiskItems] = useState<RiskItem[]>([]);
   const [riskPanelVisible, setRiskPanelVisible] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
+
+  const [testPlanDrawerOpen, setTestPlanDrawerOpen] = useState(false);
+  const [testPlanStep, setTestPlanStep] = useState(0);
+  const [testPlanLoading, setTestPlanLoading] = useState(false);
+  const [testCaseGenLoading, setTestCaseGenLoading] = useState(false);
+  const [testCaseConfirmLoading, setTestCaseConfirmLoading] = useState(false);
+  const [testPlanMarkdown, setTestPlanMarkdown] = useState("");
+  const [testPlanPoints, setTestPlanPoints] = useState<TestPoint[]>([]);
+  const [generatedCases, setGeneratedCases] = useState<GeneratedTestCase[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
+  const [currentSessionConfirmed, setCurrentSessionConfirmed] = useState(false);
+  const [testPlanSessionLoading, setTestPlanSessionLoading] = useState(false);
+  const [sessionCreatedAt, setSessionCreatedAt] = useState<string | null>(null);
+  const [historySessions, setHistorySessions] = useState<TestPlanSession[]>([]);
+  const [isEditingPlan, setIsEditingPlan] = useState(false);
+  const [editingMarkdown, setEditingMarkdown] = useState("");
+  const [editingPoints, setEditingPoints] = useState<TestPoint[]>([]);
+  const [planSaveLoading, setPlanSaveLoading] = useState(false);
+  const [editingPointModalOpen, setEditingPointModalOpen] = useState(false);
+  const [editingPointIndex, setEditingPointIndex] = useState<number | null>(null);
+  const [editingPointForm] = Form.useForm();
 
   const mindMapRef = useRef<MindMapWrapperRef | null>(null);
   const canvasSyncTimerRef = useRef<number | null>(null);
@@ -869,40 +880,6 @@ export default function RuleTreePage() {
     await reload();
   };
 
-  const runAIParse = async () => {
-    const result = await aiParse(aiText);
-    setAiDraft(result.nodes);
-    setAiParseMode(result.analysis_mode);
-  };
-
-  const importAIDraft = async () => {
-    if (!activeRequirementId) {
-      message.warning("请先选择需求");
-      return;
-    }
-
-    const idMap = new Map<string, string>();
-
-    for (const draft of aiDraft) {
-      const parentId = draft.parent_id ? idMap.get(draft.parent_id) || null : null;
-      const created = await createRuleNode({
-        requirement_id: activeRequirementId,
-        parent_id: parentId,
-        node_type: draft.type,
-        content: draft.content,
-        risk_level: draft.type === "root" ? "high" : "medium",
-      });
-      idMap.set(draft.id, created.id);
-    }
-
-    message.success("AI 草稿已导入");
-    setAiOpen(false);
-    setAiText("");
-    setAiDraft([]);
-    setAiParseMode(null);
-    await reload();
-  };
-
   const handleCreateVersion = async () => {
     if (!selectedProjectId || !activeRequirementId) {
       message.warning("请先选择项目和需求");
@@ -994,6 +971,7 @@ export default function RuleTreePage() {
     setShowSessionUpdate(false);
     setShowSessionHistory(false);
     setSessionConfirmed(false);
+    setSessionImageFile([]);
     setSessionPanelOpen(true);
   };
 
@@ -1009,9 +987,11 @@ export default function RuleTreePage() {
 
     setSessionLoading(true);
     try {
+      const rawFile = sessionImageFile[0]?.originFileObj as File | undefined;
       const result = await generateRuleTreeSession(selectedSessionId, {
         requirement_text: sessionRequirementText.trim(),
         title: sessionTitleInput.trim() || undefined,
+        image: rawFile,
       });
       setSessionGenerateResult(result);
       setSessionUpdateResult(null);
@@ -1113,6 +1093,274 @@ export default function RuleTreePage() {
     }
   };
 
+  const openTestPlanDrawer = async () => {
+    if (!activeRequirementId) {
+      message.warning("请先选择需求");
+      return;
+    }
+    if (domainNodes.length === 0) {
+      message.warning("规则树为空，请先创建规则树");
+      return;
+    }
+
+    setTestPlanSessionLoading(true);
+    setTestPlanDrawerOpen(true);
+
+    try {
+      const resp = await getTestPlanSessions(activeRequirementId);
+
+      const displayable = resp.sessions.filter((s) =>
+        ["plan_generated", "cases_generated", "confirmed", "archived"].includes(s.status),
+      );
+      setHistorySessions(displayable);
+
+      const activeSession = resp.sessions.find(
+        (s) =>
+          s.status === "plan_generated" ||
+          s.status === "cases_generated",
+      );
+
+      if (activeSession) {
+        setCurrentSessionId(activeSession.id);
+        setCurrentSessionConfirmed(false);
+        setSessionCreatedAt(activeSession.updated_at || activeSession.created_at);
+        setTestPlanMarkdown(activeSession.plan_markdown || "");
+        setTestPlanPoints(activeSession.test_points || []);
+
+        if (activeSession.status === "cases_generated" && activeSession.generated_cases) {
+          setGeneratedCases(activeSession.generated_cases);
+          setTestPlanStep(2);
+        } else {
+          setGeneratedCases([]);
+          setTestPlanStep(1);
+        }
+      } else {
+        setCurrentSessionId(null);
+        setCurrentSessionConfirmed(false);
+        setSessionCreatedAt(null);
+        setTestPlanStep(0);
+        setTestPlanMarkdown("");
+        setTestPlanPoints([]);
+        setGeneratedCases([]);
+      }
+    } catch {
+      setCurrentSessionId(null);
+      setCurrentSessionConfirmed(false);
+      setSessionCreatedAt(null);
+      setHistorySessions([]);
+      setTestPlanStep(0);
+      setTestPlanMarkdown("");
+      setTestPlanPoints([]);
+      setGeneratedCases([]);
+    } finally {
+      setTestPlanSessionLoading(false);
+    }
+  };
+
+  const handleRestoreSession = (session: TestPlanSession, targetStep: number) => {
+    setCurrentSessionId(session.id);
+    setCurrentSessionConfirmed(session.status === "confirmed");
+    setSessionCreatedAt(session.updated_at || session.created_at);
+    setTestPlanMarkdown(session.plan_markdown || "");
+    setTestPlanPoints(session.test_points || []);
+    setGeneratedCases(session.generated_cases || []);
+    setIsEditingPlan(false);
+    setTestPlanStep(targetStep);
+  };
+
+  const sessionStatusConfig: Record<string, { label: string; color: string }> = {
+    plan_generated: { label: "已生成方案", color: "blue" },
+    cases_generated: { label: "已生成用例", color: "green" },
+    confirmed: { label: "已导入", color: "default" },
+    archived: { label: "已归档", color: "default" },
+  };
+
+  const handleGenerateTestPlan = async () => {
+    if (!activeRequirementId) return;
+    setTestPlanLoading(true);
+    try {
+      let sessionId = currentSessionId;
+      if (!sessionId) {
+        const session = await createTestPlanSession(activeRequirementId);
+        sessionId = session.id;
+        setCurrentSessionId(sessionId);
+        setCurrentSessionConfirmed(false);
+      }
+
+      const result = await generateTestPlan(activeRequirementId, sessionId);
+      setTestPlanMarkdown(result.markdown);
+      setTestPlanPoints(result.test_points);
+      setSessionCreatedAt(new Date().toISOString());
+      setTestPlanStep(1);
+      message.success("测试方案生成完成");
+    } catch (error) {
+      message.error(getErrorMessage(error, "生成测试方案失败"));
+    } finally {
+      setTestPlanLoading(false);
+    }
+  };
+
+  const handleGenerateTestCases = async () => {
+    if (!activeRequirementId) return;
+    setTestCaseGenLoading(true);
+    try {
+      const result = await generateTestCases({
+        requirement_id: activeRequirementId,
+        test_plan_markdown: testPlanMarkdown,
+        test_points: testPlanPoints,
+        session_id: currentSessionId,
+      });
+      setGeneratedCases(result.test_cases);
+      setSessionCreatedAt(new Date().toISOString());
+      setTestPlanStep(2);
+      message.success(`已生成 ${result.test_cases.length} 条测试用例`);
+    } catch (error) {
+      message.error(getErrorMessage(error, "生成测试用例失败"));
+    } finally {
+      setTestCaseGenLoading(false);
+    }
+  };
+
+  const handleConfirmTestCases = async () => {
+    if (!activeRequirementId || generatedCases.length === 0) return;
+    setTestCaseConfirmLoading(true);
+    try {
+      const result = await confirmTestCases({
+        requirement_id: activeRequirementId,
+        test_cases: generatedCases,
+        session_id: currentSessionId,
+      });
+      message.success(`成功导入 ${result.created_count} 条测试用例`);
+      setCurrentSessionId(null);
+      setCurrentSessionConfirmed(false);
+      setSessionCreatedAt(null);
+      setTestPlanDrawerOpen(false);
+    } catch (error) {
+      message.error(getErrorMessage(error, "导入测试用例失败"));
+    } finally {
+      setTestCaseConfirmLoading(false);
+    }
+  };
+
+  const handleRemoveGeneratedCase = (index: number) => {
+    setGeneratedCases((prev) => {
+      const updated = prev.filter((_, i) => i !== index);
+      if (currentSessionId && !currentSessionConfirmed) {
+        updateSessionCases(currentSessionId, updated).catch(() => {});
+      }
+      return updated;
+    });
+  };
+
+  const handleStartEditPlan = () => {
+    setEditingMarkdown(testPlanMarkdown);
+    setEditingPoints(testPlanPoints.map((p) => ({ ...p })));
+    setIsEditingPlan(true);
+  };
+
+  const handleCancelEditPlan = () => {
+    setIsEditingPlan(false);
+    setEditingMarkdown("");
+    setEditingPoints([]);
+  };
+
+  const handleSavePlan = () => {
+    Modal.confirm({
+      title: "确认保存修改",
+      content: "保存后将覆盖 AI 生成的原始方案，历史记录中将显示您修改后的版本。确定要保存吗？",
+      okText: "确认保存",
+      cancelText: "取消",
+      onOk: async () => {
+        if (!currentSessionId) {
+          message.warning("当前没有关联的会话，无法保存");
+          return;
+        }
+        setPlanSaveLoading(true);
+        try {
+          await updateTestPlan(currentSessionId, {
+            plan_markdown: editingMarkdown,
+            test_points: editingPoints,
+          });
+          setTestPlanMarkdown(editingMarkdown);
+          setTestPlanPoints(editingPoints);
+          setIsEditingPlan(false);
+          setGeneratedCases([]);
+          message.success("测试方案已更新");
+        } catch (error) {
+          message.error(getErrorMessage(error, "保存测试方案失败"));
+        } finally {
+          setPlanSaveLoading(false);
+        }
+      },
+    });
+  };
+
+  const handleEditPoint = (index: number) => {
+    const point = editingPoints[index];
+    editingPointForm.setFieldsValue(point);
+    setEditingPointIndex(index);
+    setEditingPointModalOpen(true);
+  };
+
+  const handleSavePoint = async () => {
+    const values = await editingPointForm.validateFields();
+    setEditingPoints((prev) => {
+      const next = [...prev];
+      if (editingPointIndex !== null && editingPointIndex < next.length) {
+        next[editingPointIndex] = { ...next[editingPointIndex], ...values };
+      }
+      return next;
+    });
+    setEditingPointModalOpen(false);
+    setEditingPointIndex(null);
+  };
+
+  const handleDeletePoint = (index: number) => {
+    setEditingPoints((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleAddPoint = () => {
+    const newId = `tp_custom_${Date.now()}`;
+    editingPointForm.resetFields();
+    editingPointForm.setFieldsValue({
+      id: newId,
+      name: "",
+      description: "",
+      type: "normal",
+      priority: "medium",
+      related_node_ids: [],
+    });
+    setEditingPointIndex(null);
+    setEditingPointModalOpen(true);
+  };
+
+  const handleSaveNewPoint = async () => {
+    const values = await editingPointForm.validateFields();
+    if (editingPointIndex !== null) {
+      handleSavePoint();
+      return;
+    }
+    const newPoint: TestPoint = {
+      id: values.id || `tp_custom_${Date.now()}`,
+      name: values.name,
+      description: values.description,
+      type: values.type,
+      priority: values.priority,
+      related_node_ids: values.related_node_ids || [],
+    };
+    setEditingPoints((prev) => [...prev, newPoint]);
+    setEditingPointModalOpen(false);
+  };
+
+  const testPlanCoverageStats = useMemo(() => {
+    const coverableNodes = domainNodes.filter(
+      (n) => n.node_type === "action" || n.node_type === "branch" || n.node_type === "exception",
+    );
+    const coveredIds = new Set(generatedCases.flatMap((c) => c.related_node_ids));
+    const coveredCount = coverableNodes.filter((n) => coveredIds.has(n.id)).length;
+    return { total: coverableNodes.length, covered: coveredCount };
+  }, [domainNodes, generatedCases]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 150px)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
@@ -1139,12 +1387,9 @@ export default function RuleTreePage() {
         <Divider type="vertical" style={{ height: 24, margin: "0 4px" }} />
 
         {!isReadonlyVersion ? (
-          <Space size={6}>
-            <Button type="primary" onClick={() => setCreateOpen(true)}>
-              新增节点
-            </Button>
-            <Button onClick={() => setAiOpen(true)}>AI 解析需求</Button>
-          </Space>
+          <Button type="primary" onClick={() => setCreateOpen(true)}>
+            新增节点
+          </Button>
         ) : (
           <Tag color="gold" style={{ margin: 0 }}>当前版本只读</Tag>
         )}
@@ -1157,6 +1402,14 @@ export default function RuleTreePage() {
           disabled={!activeRequirementId}
         >
           AI 生成规则树
+        </Button>
+
+        <Button
+          icon={<ExperimentOutlined />}
+          onClick={openTestPlanDrawer}
+          disabled={!activeRequirementId || domainNodes.length === 0}
+        >
+          AI 生成测试方案
         </Button>
 
         <Divider type="vertical" style={{ height: 24, margin: "0 4px" }} />
@@ -1428,59 +1681,6 @@ export default function RuleTreePage() {
         )}
       </Drawer>
 
-      <Modal
-        title="AI 解析需求"
-        open={aiOpen}
-        onCancel={() => {
-          setAiOpen(false);
-          setAiParseMode(null);
-        }}
-        onOk={importAIDraft}
-        okText="确认导入"
-        width={840}
-      >
-        <Typography.Paragraph type="secondary">
-          输入 PRD 片段，系统先返回草稿节点，你确认后再导入正式规则树。
-        </Typography.Paragraph>
-        <Input.TextArea
-          rows={5}
-          value={aiText}
-          onChange={(event) => setAiText(event.target.value)}
-          placeholder="例如：如果用户未实名认证，则禁止提现；如果实名认证且余额充足，则允许提现"
-        />
-        <div style={{ marginTop: 10, marginBottom: 10 }}>
-          <Button onClick={runAIParse} disabled={!aiText.trim()}>
-            生成草稿
-          </Button>
-        </div>
-        {aiParseMode && (
-          <Alert
-            style={{ marginBottom: 10 }}
-            type={aiParseModeMeta[aiParseMode].alertType}
-            message={`解析引擎：${aiParseModeMeta[aiParseMode].label}`}
-            description={aiParseModeMeta[aiParseMode].hint}
-            showIcon
-          />
-        )}
-        <Table
-          size="small"
-          rowKey="id"
-          dataSource={aiDraft}
-          pagination={false}
-          columns={[
-            { title: "临时ID", dataIndex: "id", width: 120 },
-            { title: "类型", dataIndex: "type", render: (value) => <Tag>{getNodeTypeLabel(value)}</Tag>, width: 120 },
-            { title: "内容", dataIndex: "content" },
-            { title: "父节点", dataIndex: "parent_id", width: 120 },
-            {
-              title: "默认风险",
-              render: (_, row) => <Tag>{riskLevelLabels[row.type === "root" ? "high" : "medium"]}</Tag>,
-              width: 120,
-            },
-          ]}
-        />
-      </Modal>
-
       <Drawer
         open={sessionPanelOpen}
         title="AI 规则树生成"
@@ -1533,6 +1733,19 @@ export default function RuleTreePage() {
                 onChange={(event) => setSessionRequirementText(event.target.value)}
                 placeholder="请输入用于生成规则树的需求文本"
               />
+            </Form.Item>
+            <Form.Item label="流程图（可选，支持图片识别）" style={{ marginBottom: 12 }}>
+              <Upload.Dragger
+                accept="image/*"
+                maxCount={1}
+                fileList={sessionImageFile}
+                beforeUpload={() => false}
+                onChange={({ fileList }) => setSessionImageFile(fileList.slice(-1))}
+              >
+                <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+                <p className="ant-upload-text">点击或拖拽上传流程图</p>
+                <p className="ant-upload-hint">上传后 AI 将结合图片内容辅助生成规则树</p>
+              </Upload.Dragger>
             </Form.Item>
           </Form>
           <Button
@@ -1657,6 +1870,477 @@ export default function RuleTreePage() {
             )}
           </Space>
         )}
+      </Drawer>
+
+      <Drawer
+        open={testPlanDrawerOpen}
+        title="AI 生成测试方案"
+        width={720}
+        onClose={() => {
+          setTestPlanDrawerOpen(false);
+          setIsEditingPlan(false);
+        }}
+      >
+        <Spin spinning={testPlanSessionLoading} tip="加载会话...">
+        <Steps
+          current={testPlanStep}
+          size="small"
+          style={{ marginBottom: 24 }}
+          items={[
+            { title: "生成测试方案" },
+            { title: "审核测试方案" },
+            { title: "生成并导入用例" },
+          ]}
+        />
+
+        {testPlanStep === 0 && (
+          <div>
+            <Alert
+              type="info"
+              style={{ marginBottom: 16 }}
+              message="基于当前规则树生成测试方案"
+              description={
+                <Space direction="vertical" size={4}>
+                  <span>总节点数：{domainNodes.length}</span>
+                  <span>
+                    可测试节点：
+                    {domainNodes.filter((n) => n.node_type === "action" || n.node_type === "branch" || n.node_type === "exception").length}
+                    （action / branch / exception）
+                  </span>
+                </Space>
+              }
+            />
+            <Button
+              type="primary"
+              size="large"
+              icon={<ExperimentOutlined />}
+              onClick={handleGenerateTestPlan}
+              loading={testPlanLoading}
+              block
+            >
+              开始生成测试方案
+            </Button>
+
+            {historySessions.length > 0 && (
+              <>
+                <Divider style={{ margin: "20px 0 12px" }}>
+                  <Space size={4}>
+                    <HistoryOutlined />
+                    <span>历史记录</span>
+                  </Space>
+                </Divider>
+                <List
+                  size="small"
+                  dataSource={historySessions}
+                  renderItem={(s) => {
+                    const cfg = sessionStatusConfig[s.status] || { label: s.status, color: "default" };
+                    const caseCount = s.generated_cases?.length ?? 0;
+                    const hasCase = caseCount > 0;
+                    const isConfirmed = s.status === "confirmed";
+                    return (
+                      <List.Item
+                        style={{ padding: "10px 12px" }}
+                        actions={[
+                          <Button
+                            key="view"
+                            size="small"
+                            type="link"
+                            disabled={!s.plan_markdown}
+                            onClick={() => handleRestoreSession(s, 1)}
+                          >
+                            查看方案
+                          </Button>,
+                          ...(hasCase
+                            ? [
+                                <Button
+                                  key="import"
+                                  size="small"
+                                  type="link"
+                                  onClick={() => handleRestoreSession(s, 2)}
+                                >
+                                  {isConfirmed ? "重新导入" : "导入用例"}
+                                </Button>,
+                              ]
+                            : []),
+                        ]}
+                      >
+                        <List.Item.Meta
+                          title={
+                            <Space size={8}>
+                              <Typography.Text style={{ fontSize: 13 }}>
+                                {new Date(s.created_at).toLocaleString()}
+                              </Typography.Text>
+                              <Tag color={cfg.color}>{cfg.label}</Tag>
+                              {hasCase && (
+                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                  {caseCount} 条用例
+                                </Typography.Text>
+                              )}
+                            </Space>
+                          }
+                          description={
+                            s.test_points && s.test_points.length > 0
+                              ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>{s.test_points.length} 个测试点</Typography.Text>
+                              : null
+                          }
+                        />
+                      </List.Item>
+                    );
+                  }}
+                />
+              </>
+            )}
+          </div>
+        )}
+
+        {testPlanStep === 1 && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <Typography.Title level={5} style={{ marginBottom: 0 }}>测试方案预览</Typography.Title>
+              {!isEditingPlan ? (
+                <Button icon={<EditOutlined />} size="small" onClick={handleStartEditPlan}>
+                  编辑方案
+                </Button>
+              ) : (
+                <Space size={8}>
+                  <Tag color="orange">编辑模式</Tag>
+                  <Button size="small" icon={<CloseOutlined />} onClick={handleCancelEditPlan}>
+                    取消
+                  </Button>
+                  <Button size="small" type="primary" icon={<SaveOutlined />} onClick={handleSavePlan} loading={planSaveLoading}>
+                    保存修改
+                  </Button>
+                </Space>
+              )}
+            </div>
+
+            {isEditingPlan ? (
+              <Input.TextArea
+                value={editingMarkdown}
+                onChange={(e) => setEditingMarkdown(e.target.value)}
+                autoSize={{ minRows: 6, maxRows: 20 }}
+                style={{
+                  marginBottom: 16,
+                  fontSize: 13,
+                  lineHeight: 1.8,
+                  fontFamily: "inherit",
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  background: "#fafbfc",
+                  border: "1px solid #eef2f7",
+                  borderRadius: 8,
+                  padding: 16,
+                  marginBottom: 16,
+                  maxHeight: 400,
+                  overflow: "auto",
+                  whiteSpace: "pre-wrap",
+                  lineHeight: 1.8,
+                  fontSize: 13,
+                }}
+              >
+                {testPlanMarkdown || "暂无内容"}
+              </div>
+            )}
+
+            {(() => {
+              const pointsData = isEditingPlan ? editingPoints : testPlanPoints;
+              if (pointsData.length === 0 && !isEditingPlan) return null;
+              return (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                    <Typography.Title level={5} style={{ marginBottom: 0 }}>
+                      测试点列表（{pointsData.length} 个）
+                    </Typography.Title>
+                    {isEditingPlan && (
+                      <Button size="small" icon={<PlusOutlined />} onClick={handleAddPoint}>
+                        添加测试点
+                      </Button>
+                    )}
+                  </div>
+                  <Table
+                    size="small"
+                    rowKey="id"
+                    dataSource={pointsData}
+                    pagination={false}
+                    style={{ marginBottom: 16 }}
+                    columns={[
+                      { title: "测试点", dataIndex: "name", width: 160 },
+                      { title: "描述", dataIndex: "description", ellipsis: true },
+                      {
+                        title: "类型",
+                        dataIndex: "type",
+                        width: 80,
+                        render: (type: string) => {
+                          const colors: Record<string, string> = { normal: "blue", exception: "red", boundary: "orange" };
+                          return <Tag color={colors[type] || "default"}>{type}</Tag>;
+                        },
+                      },
+                      {
+                        title: "优先级",
+                        dataIndex: "priority",
+                        width: 80,
+                        render: (p: string) => {
+                          const colors: Record<string, string> = { high: "red", medium: "orange", low: "blue" };
+                          return <Tag color={colors[p] || "default"}>{p}</Tag>;
+                        },
+                      },
+                      {
+                        title: "关联节点",
+                        dataIndex: "related_node_ids",
+                        width: 80,
+                        render: (ids: string[]) => ids?.length || 0,
+                      },
+                      ...(isEditingPlan
+                        ? [
+                            {
+                              title: "操作",
+                              width: 100,
+                              render: (_: unknown, __: unknown, index: number) => (
+                                <Space size={4}>
+                                  <Button size="small" type="link" onClick={() => handleEditPoint(index)}>
+                                    编辑
+                                  </Button>
+                                  <Popconfirm title="确认删除该测试点？" onConfirm={() => handleDeletePoint(index)} okText="确定" cancelText="取消">
+                                    <Button size="small" type="link" danger>
+                                      删除
+                                    </Button>
+                                  </Popconfirm>
+                                </Space>
+                              ),
+                            },
+                          ]
+                        : []),
+                    ]}
+                  />
+                </>
+              );
+            })()}
+
+            {sessionCreatedAt && (
+              <Typography.Text type="secondary" style={{ fontSize: 12, marginBottom: 12, display: "block" }}>
+                生成时间：{new Date(sessionCreatedAt).toLocaleString()}
+              </Typography.Text>
+            )}
+
+            <Space>
+              {currentSessionConfirmed ? (
+                <Button
+                  onClick={() => {
+                    setCurrentSessionId(null);
+                    setCurrentSessionConfirmed(false);
+                    setSessionCreatedAt(null);
+                    setTestPlanStep(0);
+                    setTestPlanMarkdown("");
+                    setTestPlanPoints([]);
+                    setGeneratedCases([]);
+                  }}
+                >
+                  返回历史记录
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    disabled={isEditingPlan}
+                    onClick={async () => {
+                      if (currentSessionId) {
+                        try {
+                          await archiveTestPlanSession(currentSessionId);
+                        } catch { /* ignore */ }
+                      }
+                      setCurrentSessionId(null);
+                      setCurrentSessionConfirmed(false);
+                      setSessionCreatedAt(null);
+                      setTestPlanStep(0);
+                      setTestPlanMarkdown("");
+                      setTestPlanPoints([]);
+                      setGeneratedCases([]);
+                    }}
+                  >
+                    重新生成
+                  </Button>
+                  <Button
+                    type="primary"
+                    icon={<CheckCircleOutlined />}
+                    onClick={handleGenerateTestCases}
+                    loading={testCaseGenLoading}
+                    disabled={isEditingPlan}
+                  >
+                    测试方案通过，生成用例
+                  </Button>
+                </>
+              )}
+            </Space>
+          </div>
+        )}
+
+        {testPlanStep === 2 && (
+          <div>
+            {currentSessionConfirmed && (
+              <Alert
+                type="warning"
+                style={{ marginBottom: 12 }}
+                message="该批次用例曾已导入，您可选择需要的用例重新导入"
+                description="移除不需要的用例后点击下方导入按钮，移除操作不会影响历史记录中保存的原始用例数据。"
+                showIcon
+              />
+            )}
+            <Alert
+              type="success"
+              style={{ marginBottom: 16 }}
+              message={`${currentSessionConfirmed ? "历史生成" : "已生成"} ${generatedCases.length} 条测试用例`}
+              description={
+                <span>
+                  节点覆盖：{testPlanCoverageStats.covered} / {testPlanCoverageStats.total} 个可测试节点
+                  {testPlanCoverageStats.total > 0 && (
+                    <>（{Math.round((testPlanCoverageStats.covered / testPlanCoverageStats.total) * 100)}%）</>
+                  )}
+                </span>
+              }
+            />
+
+            <Table
+              size="small"
+              rowKey={(_, index) => String(index)}
+              dataSource={generatedCases}
+              pagination={generatedCases.length > 8 ? { pageSize: 8 } : false}
+              style={{ marginBottom: 16 }}
+              columns={[
+                { title: "标题", dataIndex: "title", width: 160, ellipsis: true },
+                {
+                  title: "前置条件",
+                  dataIndex: "preconditions",
+                  width: 180,
+                  ellipsis: true,
+                  render: (val: string[] | string | undefined) => {
+                    if (!val) return "-";
+                    if (typeof val === "string") return val;
+                    return val.map((s, i) => <div key={i}>- {s}</div>);
+                  },
+                },
+                {
+                  title: "执行步骤",
+                  dataIndex: "steps",
+                  ellipsis: true,
+                  render: (val: string[] | string | undefined) => {
+                    if (!val) return "-";
+                    if (typeof val === "string") return val;
+                    return val.map((s, i) => <div key={i}>{i + 1}. {s}</div>);
+                  },
+                },
+                {
+                  title: "预期结果",
+                  dataIndex: "expected_result",
+                  width: 180,
+                  ellipsis: true,
+                  render: (val: string[] | string | undefined) => {
+                    if (!val) return "-";
+                    if (typeof val === "string") return val;
+                    return val.map((s, i) => <div key={i}>- {s}</div>);
+                  },
+                },
+                {
+                  title: "风险",
+                  dataIndex: "risk_level",
+                  width: 70,
+                  render: (level: string) => {
+                    const colors: Record<string, string> = { critical: "red", high: "orange", medium: "blue", low: "green" };
+                    return <Tag color={colors[level] || "default"}>{level}</Tag>;
+                  },
+                },
+                {
+                  title: "绑定节点",
+                  dataIndex: "related_node_ids",
+                  width: 100,
+                  render: (ids: string[]) => (
+                    <Tooltip
+                      title={ids?.map((id) => nodeMap.get(id)?.content || id).join("、") || "无"}
+                    >
+                      <Tag>{ids?.length || 0} 个节点</Tag>
+                    </Tooltip>
+                  ),
+                },
+                {
+                  title: "操作",
+                  width: 60,
+                  render: (_: unknown, __: unknown, index: number) => (
+                    <Popconfirm title="确认移除？" onConfirm={() => handleRemoveGeneratedCase(index)} okText="确定" cancelText="取消">
+                      <Button size="small" type="link" danger>
+                        移除
+                      </Button>
+                    </Popconfirm>
+                  ),
+                },
+              ]}
+            />
+
+            {sessionCreatedAt && (
+              <Typography.Text type="secondary" style={{ fontSize: 12, marginBottom: 12, display: "block" }}>
+                生成时间：{new Date(sessionCreatedAt).toLocaleString()}
+              </Typography.Text>
+            )}
+
+            <Space>
+              <Button
+                onClick={() => {
+                  setTestPlanStep(currentSessionConfirmed ? 0 : 1);
+                }}
+              >
+                {currentSessionConfirmed ? "返回历史记录" : "返回测试方案"}
+              </Button>
+              <Button
+                type="primary"
+                onClick={handleConfirmTestCases}
+                loading={testCaseConfirmLoading}
+                disabled={generatedCases.length === 0}
+              >
+                {currentSessionConfirmed ? "重新导入" : "确认导入"} {generatedCases.length} 条用例
+              </Button>
+            </Space>
+          </div>
+        )}
+        </Spin>
+
+        <Modal
+          title={editingPointIndex !== null ? "编辑测试点" : "添加测试点"}
+          open={editingPointModalOpen}
+          onCancel={() => {
+            setEditingPointModalOpen(false);
+            setEditingPointIndex(null);
+          }}
+          onOk={editingPointIndex !== null ? handleSavePoint : handleSaveNewPoint}
+          okText="确定"
+          cancelText="取消"
+        >
+          <Form layout="vertical" form={editingPointForm}>
+            <Form.Item name="name" label="测试点名称" rules={[{ required: true, message: "请输入测试点名称" }]}>
+              <Input />
+            </Form.Item>
+            <Form.Item name="description" label="描述" rules={[{ required: true, message: "请输入描述" }]}>
+              <Input.TextArea rows={3} />
+            </Form.Item>
+            <Form.Item name="type" label="类型" rules={[{ required: true }]}>
+              <Select
+                options={[
+                  { label: "normal", value: "normal" },
+                  { label: "exception", value: "exception" },
+                  { label: "boundary", value: "boundary" },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="priority" label="优先级" rules={[{ required: true }]}>
+              <Select
+                options={[
+                  { label: "high", value: "high" },
+                  { label: "medium", value: "medium" },
+                  { label: "low", value: "low" },
+                ]}
+              />
+            </Form.Item>
+          </Form>
+        </Modal>
       </Drawer>
 
       <Modal

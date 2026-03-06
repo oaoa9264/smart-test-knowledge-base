@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from app.services.llm_client import LLMClient
+from app.services.prompts.risk_analysis import RISK_WRITING_GUIDE
 
 
 logger = logging.getLogger(__name__)
@@ -11,15 +12,15 @@ AI_PARSE_SYSTEM_PROMPT = """
 你是测试规则树助手。请把需求文本拆解为规则树草稿节点，并识别潜在风险。
 
 只返回 JSON 对象，不要输出任何解释。格式如下：
-{
+{{
   "nodes": [
-    {"id":"temp_1","type":"root","content":"...","parent_id":null},
-    {"id":"temp_2","type":"condition","content":"...","parent_id":"temp_1"}
+    {{"id":"temp_1","type":"root","content":"...","parent_id":null}},
+    {{"id":"temp_2","type":"condition","content":"...","parent_id":"temp_1"}}
   ],
   "risks": [
-    {"id":"risk_1","related_node_id":"temp_2","category":"flow_gap","risk_level":"high","description":"...","suggestion":"..."}
+    {{"id":"risk_1","related_node_id":"temp_2","category":"flow_gap","risk_level":"high","description":"...","suggestion":"..."}}
   ]
-}
+}}
 
 nodes 约束：
 1) type 只能是 root/condition/branch/action/exception。
@@ -33,10 +34,11 @@ risks 约束：
 2) related_node_id 引用 nodes 中已有 id，全局风险设为 null；
 3) category 只能是 input_validation/flow_gap/data_integrity/boundary/security；
 4) risk_level 只能是 critical/high/medium/low；
-5) description 描述需求中遗漏或模糊的异常场景；
-6) suggestion 给出建议处理方式；
-7) 风险项建议 2-6 个。
-""".strip()
+5) 风险项建议 2-6 个；
+6) description 和 suggestion 必须严格遵循以下书写规范：
+
+{risk_writing_guide}
+""".strip().format(risk_writing_guide=RISK_WRITING_GUIDE)
 
 AI_PARSE_USER_TEMPLATE = """
 请拆解以下需求文本为规则树草稿节点：

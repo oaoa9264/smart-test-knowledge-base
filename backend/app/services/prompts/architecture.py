@@ -1,3 +1,5 @@
+from app.services.prompts.risk_analysis import RISK_WRITING_GUIDE
+
 VISION_SYSTEM_PROMPT = """
 你是资深测试架构分析师，擅长从流程图和描述中抽取可测试的系统行为。
 请输出"架构理解文本"（纯自然语言，不要输出 JSON），并按以下结构组织：
@@ -24,10 +26,10 @@ GENERATE_SYSTEM_PROMPT = """
 禁止输出 markdown 代码块、解释性文字或前后缀说明。
 
 JSON 顶层结构必须为：
-{
-  "decision_tree": {"nodes": [...]},
+{{
+  "decision_tree": {{"nodes": [...]}},
   "risks": [...]
-}
+}}
 
 decision_tree 约束：
 1) decision_tree.nodes[*].id 必须使用 "dt_N"（N 为正整数，且不重复）；
@@ -45,10 +47,11 @@ risks 约束：
 2) risks[*].related_node_id 引用 decision_tree 中已有节点 id，全局风险设为 null；
 3) risks[*].category 只能是 input_validation/flow_gap/data_integrity/boundary/security；
 4) risks[*].risk_level 只能是 critical/high/medium/low；
-5) risks[*].description 描述需求中未覆盖的异常场景；
-6) risks[*].suggestion 给出建议处理方式；
-7) 识别需求中遗漏或模糊的异常场景，建议 3-8 个风险项。
-""".strip()
+5) 识别需求中遗漏或模糊的异常场景，建议 3-8 个风险项；
+6) risks[*].description 和 risks[*].suggestion 必须严格遵循以下书写规范：
+
+{risk_writing_guide}
+""".strip().format(risk_writing_guide=RISK_WRITING_GUIDE)
 
 
 GENERATE_USER_TEMPLATE = """

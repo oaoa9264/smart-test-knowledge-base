@@ -154,6 +154,7 @@ export interface TestCase {
   id: number;
   project_id: number;
   title: string;
+  precondition: string;
   steps: string;
   expected_result: string;
   risk_level: RiskLevel;
@@ -211,6 +212,8 @@ export interface ImportConfirmResponse {
 export interface CoverageRow {
   node_id: string;
   content: string;
+  node_type: NodeType;
+  coverable: boolean;
   risk_level: RiskLevel;
   covered_cases: number;
   uncovered_paths: number;
@@ -219,6 +222,7 @@ export interface CoverageRow {
 export interface CoverageSummary {
   total_nodes: number;
   covered_nodes: number;
+  structural_nodes: number;
   coverage_rate: number;
   uncovered_critical: string[];
   uncovered_paths: string[][];
@@ -396,4 +400,75 @@ export interface RecoRequest {
   changed_node_ids?: string[];
   case_filter?: RecoCaseFilter;
   cost_mode?: "UNIT" | "TIME";
+}
+
+export interface TestPoint {
+  id: string;
+  name: string;
+  description: string;
+  type: "normal" | "exception" | "boundary" | string;
+  related_node_ids: string[];
+  priority: "high" | "medium" | "low" | string;
+}
+
+export interface TestPlanResponse {
+  markdown: string;
+  test_points: TestPoint[];
+  session_id?: number | null;
+}
+
+export interface GeneratedTestCase {
+  title: string;
+  preconditions: string[] | string;
+  steps: string[] | string;
+  expected_result: string[] | string;
+  risk_level: string;
+  related_node_ids: string[];
+}
+
+export interface TestCaseGenRequest {
+  requirement_id: number;
+  test_plan_markdown: string;
+  test_points: TestPoint[];
+  session_id?: number | null;
+}
+
+export interface TestCaseGenResponse {
+  test_cases: GeneratedTestCase[];
+  session_id?: number | null;
+}
+
+export interface TestCaseConfirmRequest {
+  requirement_id: number;
+  test_cases: GeneratedTestCase[];
+  session_id?: number | null;
+}
+
+export interface TestCaseConfirmResponse {
+  created_count: number;
+  created_case_ids: number[];
+}
+
+export type TestPlanSessionStatus =
+  | "plan_generating"
+  | "plan_generated"
+  | "cases_generating"
+  | "cases_generated"
+  | "confirmed"
+  | "archived";
+
+export interface TestPlanSession {
+  id: number;
+  requirement_id: number;
+  status: TestPlanSessionStatus;
+  plan_markdown: string | null;
+  test_points: TestPoint[] | null;
+  generated_cases: GeneratedTestCase[] | null;
+  confirmed_case_ids: number[] | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TestPlanSessionListResponse {
+  sessions: TestPlanSession[];
 }

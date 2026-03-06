@@ -11,6 +11,7 @@ export async function fetchTestCases(projectId: number, requirementId?: number):
 export async function createTestCase(payload: {
   project_id: number;
   title: string;
+  precondition?: string;
   steps: string;
   expected_result: string;
   risk_level: string;
@@ -26,6 +27,7 @@ export async function updateTestCase(
   caseId: number,
   payload: {
     title: string;
+    precondition?: string;
     steps: string;
     expected_result: string;
     risk_level: string;
@@ -45,6 +47,11 @@ export async function fetchTestCase(caseId: number): Promise<TestCase> {
 
 export async function deleteTestCase(caseId: number): Promise<void> {
   await http.delete(`/api/testcases/${caseId}`);
+}
+
+export async function batchDeleteTestCases(ids: number[]): Promise<{ deleted_count: number }> {
+  const { data } = await http.post<{ deleted_count: number }>("/api/testcases/batch-delete", { ids });
+  return data;
 }
 
 export async function parseImportFile(file: File, requirementId: number): Promise<ImportParseResponse> {

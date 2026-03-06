@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.entities import NodeStatus, Requirement, RuleNode, RulePath, TestCase, TestCaseStatus
+from app.models.entities import NodeStatus, Requirement, RiskItem, RuleNode, RulePath, TestCase, TestCaseStatus
 from app.schemas.rule import RuleNodeCreate, RuleNodeRead, RuleNodeUpdate, RulePathRead, RuleTreeRead
 from app.services.impact import analyze_impact
 from app.services.rule_engine import derive_rule_paths
@@ -190,6 +190,7 @@ def delete_node(node_id: str, db: Session = Depends(get_db)):
 
     node.status = NodeStatus.deleted
     node.version += 1
+    db.query(RiskItem).filter(RiskItem.related_node_id == node_id).delete()
     db.commit()
 
     _regenerate_paths(db, node.requirement_id)

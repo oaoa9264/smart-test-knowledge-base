@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/coverage", tags=["coverage"])
 
 
 def _empty_coverage():
-    return {"rows": [], "summary": {"total_nodes": 0, "covered_nodes": 0, "coverage_rate": 0, "uncovered_critical": [], "uncovered_paths": []}}
+    return {"rows": [], "summary": {"total_nodes": 0, "covered_nodes": 0, "structural_nodes": 0, "coverage_rate": 0, "uncovered_critical": [], "uncovered_paths": []}}
 
 
 def _build_requirement_coverage(project_id: int, requirement_id: int, db: Session):
@@ -36,6 +36,7 @@ def _build_requirement_coverage(project_id: int, requirement_id: int, db: Sessio
         {
             "id": n.id,
             "content": n.content,
+            "node_type": n.node_type.value if hasattr(n.node_type, "value") else str(n.node_type),
             "risk_level": n.risk_level.value if hasattr(n.risk_level, "value") else str(n.risk_level),
         }
         for n in nodes
@@ -75,6 +76,7 @@ def coverage_by_project(project_id: int, requirement_id: Optional[int] = None, d
         {
             "id": n.id,
             "content": n.content,
+            "node_type": n.node_type.value if hasattr(n.node_type, "value") else str(n.node_type),
             "risk_level": n.risk_level.value if hasattr(n.risk_level, "value") else str(n.risk_level),
         }
         for n in nodes

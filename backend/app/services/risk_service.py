@@ -122,6 +122,14 @@ def decide_risk(
     return risk
 
 
+def delete_risk(db: Session, risk_id: str) -> None:
+    risk = db.query(RiskItem).filter(RiskItem.id == risk_id).first()
+    if not risk:
+        raise ValueError("risk item not found")
+    db.delete(risk)
+    db.commit()
+
+
 def risk_to_node(
     db: Session,
     risk_id: str,

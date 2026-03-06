@@ -13,6 +13,8 @@ from app.services.testcase_importer import ParsedTestCase
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
 _VALID_CONFIDENCE = {"high", "medium", "low", "none"}
 _CHINESE_ONLY_PATTERN = re.compile(r"^[\u4e00-\u9fff]+$")
+_COVERABLE_TYPES = {"action", "branch", "exception"}
+_EXCLUDED_MATCH_TYPES = {"root"}
 
 
 @dataclass
@@ -159,9 +161,12 @@ class TestCaseMatcher:
         parsed_cases: Sequence[ParsedTestCase],
         rule_nodes: Sequence[RuleNode],
     ) -> List[MatchResult]:
+        matchable_nodes = [n for n in rule_nodes if self._node_type_str(n) not in _EXCLUDED_MATCH_TYPES]
+        if not matchable_nodes:
+            matchable_nodes = list(rule_nodes)
         results: List[MatchResult] = []
         for index, case in enumerate(parsed_cases):
-            scored = self._score_nodes(case.raw_text, rule_nodes)
+            scored = self._score_nodes(case.raw_text, matchable_nodes)
             if not scored or scored[0][1] <= 0:
                 results.append(
                     MatchResult(
@@ -198,11 +203,14 @@ class TestCaseMatcher:
         nodes: Sequence[RuleNode],
         top_k: int,
     ) -> List[RuleNode]:
-        scored = self._score_nodes(case_text, nodes)
+        matchable = [n for n in nodes if self._node_type_str(n) not in _EXCLUDED_MATCH_TYPES]
+        if not matchable:
+            matchable = list(nodes)
+        scored = self._score_nodes(case_text, matchable)
         selected = [node for node, _ in scored if _ > 0][:top_k]
         if selected:
             return selected
-        return list(nodes[:top_k])
+        return list(matchable[:top_k])
 
     def _score_nodes(self, case_text: str, nodes: Sequence[RuleNode]) -> List[Tuple[RuleNode, int]]:
         case_tokens = self._tokenize(case_text)
@@ -213,9 +221,17 @@ class TestCaseMatcher:
             substring_bonus = 0
             if case_text and node.content and node.content in case_text:
                 substring_bonus = 2
-            scored.append((node, overlap + substring_bonus))
+            type_bonus = 1 if self._node_type_str(node) in _COVERABLE_TYPES else 0
+            scored.append((node, overlap + substring_bonus + type_bonus))
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored
+
+    @staticmethod
+    def _node_type_str(node: RuleNode) -> str:
+        nt = getattr(node, "node_type", None)
+        if nt is None:
+            return ""
+        return nt.value if hasattr(nt, "value") else str(nt)
 
     @staticmethod
     def _tokenize(text: str) -> Set[str]:

@@ -20,3 +20,14 @@ def ensure_requirements_versioning_columns(engine: Engine) -> None:
                 "ON requirements (requirement_group_id)"
             )
         )
+
+
+def ensure_test_cases_precondition_column(engine: Engine) -> None:
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "test_cases" not in inspector.get_table_names():
+            return
+
+        columns = {item["name"] for item in inspector.get_columns("test_cases")}
+        if "precondition" not in columns:
+            conn.execute(text("ALTER TABLE test_cases ADD COLUMN precondition TEXT DEFAULT ''"))

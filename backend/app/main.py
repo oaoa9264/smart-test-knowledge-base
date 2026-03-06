@@ -55,17 +55,19 @@ from app.api.coverage import router as coverage_router
 from app.api.projects import router as project_router
 from app.api.recommendation import router as recommendation_router
 from app.api.risks import router as risk_router
+from app.api.test_plan import router as test_plan_router
 from app.api.rule_tree_session import router as rule_tree_session_router
 from app.api.rules import router as rule_router
 from app.api.testcase_import import router as testcase_import_router
 from app.api.testcases import router as testcase_router
 from app.api.tree_diff import router as tree_diff_router
 from app.core.database import engine
-from app.core.schema_migrations import ensure_requirements_versioning_columns
+from app.core.schema_migrations import ensure_requirements_versioning_columns, ensure_test_cases_precondition_column
 from app.models.entities import Base
 
 Base.metadata.create_all(bind=engine)
 ensure_requirements_versioning_columns(engine)
+ensure_test_cases_precondition_column(engine)
 
 app = FastAPI(title="Test Knowledge Base MVP", version="0.1.0")
 
@@ -97,3 +99,4 @@ app.include_router(recommendation_router)
 app.include_router(ai_router)
 app.include_router(architecture_router)
 app.include_router(risk_router)
+app.include_router(test_plan_router)

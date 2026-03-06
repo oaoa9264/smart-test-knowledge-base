@@ -29,6 +29,10 @@ export async function decideRisk(
   return data;
 }
 
+export async function deleteRisk(riskId: string): Promise<void> {
+  await http.delete(`/api/rules/risks/${riskId}`);
+}
+
 export async function riskToNode(riskId: string): Promise<RuleNode> {
   const { data } = await http.post<RuleNode>(`/api/rules/risks/${riskId}/to-node`);
   return data;

@@ -82,6 +82,15 @@ class RuleTreeSessionStatus(str, enum.Enum):
     archived = "archived"
 
 
+class TestPlanSessionStatus(str, enum.Enum):
+    plan_generating = "plan_generating"
+    plan_generated = "plan_generated"
+    cases_generating = "cases_generating"
+    cases_generated = "cases_generated"
+    confirmed = "confirmed"
+    archived = "archived"
+
+
 case_rule_node_assoc = Table(
     "case_rule_node_assoc",
     Base.metadata,
@@ -133,6 +142,7 @@ class Requirement(Base):
     reco_runs = relationship("RecoRun", back_populates="requirement", cascade="all, delete-orphan")
     risk_items = relationship("RiskItem", back_populates="requirement", cascade="all, delete-orphan")
     rule_tree_sessions = relationship("RuleTreeSession", back_populates="requirement", cascade="all, delete-orphan")
+    test_plan_sessions = relationship("TestPlanSession", back_populates="requirement", cascade="all, delete-orphan")
 
 
 class RuleNode(Base):
@@ -170,6 +180,7 @@ class TestCase(Base):
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
     title = Column(String(255), nullable=False)
+    precondition = Column(Text, nullable=True, default="")
     steps = Column(Text, nullable=False)
     expected_result = Column(Text, nullable=False)
     risk_level = Column(Enum(RiskLevel), default=RiskLevel.medium, nullable=False)
@@ -283,6 +294,26 @@ class RuleTreeMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     session = relationship("RuleTreeSession", back_populates="messages")
+
+
+class TestPlanSession(Base):
+    __tablename__ = "test_plan_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False, index=True)
+    status = Column(
+        Enum(TestPlanSessionStatus),
+        default=TestPlanSessionStatus.plan_generating,
+        nullable=False,
+    )
+    plan_markdown = Column(Text, nullable=True)
+    test_points_json = Column(Text, nullable=True)
+    generated_cases_json = Column(Text, nullable=True)
+    confirmed_case_ids_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    requirement = relationship("Requirement", back_populates="test_plan_sessions")
 
 
 class DiffRecord(Base):

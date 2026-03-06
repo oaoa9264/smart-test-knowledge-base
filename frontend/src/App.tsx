@@ -4,7 +4,6 @@ import { Layout, Menu, Select, Space, Typography, message } from "antd";
 import {
   AppstoreOutlined,
   ClusterOutlined,
-  DeploymentUnitOutlined,
   FireOutlined,
   FolderOpenOutlined,
   TableOutlined,
@@ -15,7 +14,6 @@ import ProjectListPage from "./pages/ProjectList";
 import RuleTreePage from "./pages/RuleTree";
 import TestCasesPage from "./pages/TestCases";
 import CoveragePage from "./pages/Coverage";
-import ArchitectureAnalysisPage from "./pages/ArchitectureAnalysis";
 import RecommendationPage from "./pages/Recommendation";
 
 const { Header, Sider, Content } = Layout;
@@ -26,7 +24,6 @@ const menuItems = [
   { key: "/test-cases", label: <Link to="/test-cases">用例管理</Link>, icon: <AppstoreOutlined /> },
   { key: "/coverage", label: <Link to="/coverage">覆盖矩阵</Link>, icon: <TableOutlined /> },
   { key: "/recommendation", label: <Link to="/recommendation">回归推荐</Link>, icon: <FireOutlined /> },
-  { key: "/architecture", label: <Link to="/architecture">需求拆解</Link>, icon: <DeploymentUnitOutlined /> },
 ];
 
 function AppShell() {
@@ -120,7 +117,22 @@ function AppShell() {
               placeholder="选择需求"
               value={selectedRequirementId ?? undefined}
               onChange={(value) => setSelectedRequirementId(value)}
-              options={requirements.map((r) => ({ label: `${r.title} (#${r.id})`, value: r.id }))}
+              options={(() => {
+                const maxVersionByGroup = new Map<number, number>();
+                for (const r of requirements) {
+                  if (r.requirement_group_id != null) {
+                    const cur = maxVersionByGroup.get(r.requirement_group_id) ?? 0;
+                    if (r.version > cur) maxVersionByGroup.set(r.requirement_group_id, r.version);
+                  }
+                }
+                return requirements.map((r) => {
+                  const isLatest =
+                    r.requirement_group_id != null &&
+                    r.version === maxVersionByGroup.get(r.requirement_group_id);
+                  const suffix = isLatest ? `v${r.version}(最新)` : `v${r.version}`;
+                  return { label: `${r.title} ${suffix}`, value: r.id };
+                });
+              })()}
             />
           </Space>
         </Header>
@@ -131,7 +143,6 @@ function AppShell() {
             <Route path="/test-cases" element={<TestCasesPage />} />
             <Route path="/coverage" element={<CoveragePage />} />
             <Route path="/recommendation" element={<RecommendationPage />} />
-            <Route path="/architecture" element={<ArchitectureAnalysisPage />} />
           </Routes>
         </Content>
       </Layout>

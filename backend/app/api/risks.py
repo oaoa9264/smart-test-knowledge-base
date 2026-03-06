@@ -15,6 +15,7 @@ from app.schemas.risk import (
 from app.services.risk_service import (
     analyze_risks,
     decide_risk,
+    delete_risk,
     get_risks_for_requirement,
     risk_to_node,
 )
@@ -72,6 +73,14 @@ def make_risk_decision(risk_id: str, payload: RiskDecisionRequest, db: Session =
             pass
 
     return RiskItemRead.from_orm(risk)
+
+
+@router.delete("/api/rules/risks/{risk_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_risk(risk_id: str, db: Session = Depends(get_db)):
+    try:
+        delete_risk(db=db, risk_id=risk_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.post("/api/rules/risks/{risk_id}/to-node", response_model=RuleNodeRead, status_code=status.HTTP_201_CREATED)

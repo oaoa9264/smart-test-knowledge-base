@@ -1,13 +1,14 @@
-from typing import List
+import os
+import uuid
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.schemas.rule_tree_session import (
     RuleTreeConfirmPayload,
     RuleTreeConfirmResponse,
-    RuleTreeGeneratePayload,
     RuleTreeGenerateResponse,
     RuleTreeSessionCreate,
     RuleTreeSessionDetailRead,
@@ -23,6 +24,22 @@ from app.services.rule_tree_session import (
     incremental_update,
     list_sessions,
 )
+
+CURRENT_DIR = os.path.dirname(__file__)
+BACKEND_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
+UPLOAD_DIR = os.path.join(BACKEND_DIR, "uploads", "session_images")
+
+
+def _save_session_image(upload_file: Optional[UploadFile]) -> Optional[str]:
+    if not upload_file or not upload_file.filename:
+        return None
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    ext = os.path.splitext(upload_file.filename)[1] or ".bin"
+    filename = "{0}{1}".format(uuid.uuid4().hex, ext)
+    abs_path = os.path.join(UPLOAD_DIR, filename)
+    with open(abs_path, "wb") as fp:
+        fp.write(upload_file.file.read())
+    return abs_path
 
 router = APIRouter(prefix="/api/rules/sessions", tags=["rule-tree-sessions"])
 
@@ -50,13 +67,21 @@ def get_rule_tree_session(session_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{session_id}/generate", response_model=RuleTreeGenerateResponse)
-def generate_rule_tree(session_id: int, payload: RuleTreeGeneratePayload, db: Session = Depends(get_db)):
+async def generate_rule_tree(
+    session_id: int,
+    requirement_text: str = Form(...),
+    title: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+):
     try:
+        image_path = _save_session_image(image)
         return generate_with_review(
             db=db,
             session_id=session_id,
-            requirement_text=payload.requirement_text,
-            title=payload.title,
+            requirement_text=requirement_text,
+            title=title,
+            image_path=image_path,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

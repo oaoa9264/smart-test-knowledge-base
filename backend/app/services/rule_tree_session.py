@@ -9,6 +9,7 @@ from app.models.entities import (
     NodeStatus,
     NodeType,
     Requirement,
+    RiskItem,
     RiskLevel,
     RuleNode,
     RulePath,
@@ -17,6 +18,10 @@ from app.models.entities import (
     RuleTreeSessionStatus,
 )
 from app.services.llm_client import LLMClient
+from app.services.prompts.architecture import (
+    VISION_SYSTEM_PROMPT,
+    VISION_USER_TEMPLATE,
+)
 from app.services.prompts.rule_tree_session import (
     GENERATE_SYSTEM_PROMPT,
     GENERATE_USER_TEMPLATE,
@@ -257,6 +262,7 @@ def _import_tree_to_requirement(db: Session, requirement_id: int, tree_json: Dic
     for node in existing_nodes:
         node.status = NodeStatus.deleted
         node.version += 1
+    db.query(RiskItem).filter(RiskItem.requirement_id == requirement_id).delete()
     db.flush()
 
     nodes = (tree_json or {}).get("decision_tree", {}).get("nodes", [])
@@ -369,11 +375,26 @@ def build_messages_for_llm(db: Session, session_id: int, limit: int = 12) -> Lis
     return [{"role": item.role, "content": item.content} for item in history]
 
 
+def _vision_preprocess(llm: Any, image_path: str, description: str) -> str:
+    """Extract architecture understanding from a flowchart image via vision LLM."""
+    image_url = llm.image_to_base64_url(image_path)
+    user_prompt = VISION_USER_TEMPLATE.format(description=description or "无")
+    user_content = [
+        {"type": "text", "text": user_prompt},
+        {"type": "image_url", "image_url": {"url": image_url}},
+    ]
+    understanding = llm.chat_with_vision(
+        system_prompt=VISION_SYSTEM_PROMPT, user_content=user_content
+    )
+    return (understanding or description or "")[:4000]
+
+
 def generate_with_review(
     db: Session,
     session_id: int,
     requirement_text: str,
     title: Optional[str] = None,
+    image_path: Optional[str] = None,
     llm_client: Optional[Any] = None,
 ) -> Dict[str, Any]:
     session, _ = _get_session_with_requirement(db, session_id)
@@ -381,7 +402,16 @@ def generate_with_review(
         session.title = title.strip() or session.title
 
     llm = llm_client or LLMClient()
-    wrapped_requirement = GENERATE_USER_TEMPLATE.format(requirement_text=requirement_text)
+
+    effective_text = requirement_text
+    if image_path:
+        vision_understanding = _vision_preprocess(llm, image_path, requirement_text)
+        effective_text = (
+            "{req}\n\n【流程图解析结果】\n{vision}"
+            .format(req=requirement_text, vision=vision_understanding)
+        )
+
+    wrapped_requirement = GENERATE_USER_TEMPLATE.format(requirement_text=effective_text)
     base_messages = [
         {"role": "system", "content": GENERATE_SYSTEM_PROMPT},
         {"role": "user", "content": wrapped_requirement},

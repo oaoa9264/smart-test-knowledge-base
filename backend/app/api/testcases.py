@@ -18,6 +18,7 @@ def _to_read_model(case: TestCase) -> TestCaseRead:
         id=case.id,
         project_id=case.project_id,
         title=case.title,
+        precondition=case.precondition or "",
         steps=case.steps,
         expected_result=case.expected_result,
         risk_level=risk_value,
@@ -36,6 +37,7 @@ def create_testcase(payload: TestCaseCreate, db: Session = Depends(get_db)):
     case = TestCase(
         project_id=payload.project_id,
         title=payload.title,
+        precondition=payload.precondition,
         steps=payload.steps,
         expected_result=payload.expected_result,
         risk_level=payload.risk_level,
@@ -99,6 +101,7 @@ def update_testcase(case_id: int, payload: TestCaseUpdate, db: Session = Depends
         raise HTTPException(status_code=404, detail="testcase not found")
 
     case.title = payload.title
+    case.precondition = payload.precondition
     case.steps = payload.steps
     case.expected_result = payload.expected_result
     case.risk_level = payload.risk_level
@@ -127,3 +130,16 @@ def delete_testcase(case_id: int, db: Session = Depends(get_db)):
     db.delete(case)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/batch-delete")
+def batch_delete_testcases(payload: dict, db: Session = Depends(get_db)):
+    ids: List[int] = payload.get("ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids is required")
+    cases = db.query(TestCase).filter(TestCase.id.in_(ids)).all()
+    deleted_count = len(cases)
+    for case in cases:
+        db.delete(case)
+    db.commit()
+    return {"deleted_count": deleted_count}

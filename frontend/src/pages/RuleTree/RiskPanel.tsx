@@ -7,6 +7,7 @@ import {
   Form,
   Input,
   Modal,
+  Popconfirm,
   Select,
   Space,
   Spin,
@@ -23,7 +24,7 @@ import {
   ScanOutlined,
 } from "@ant-design/icons";
 import type { RiskCategory, RiskDecisionType, RiskItem } from "../../types";
-import { analyzeRisks, decideRisk, fetchRisks } from "../../api/risks";
+import { analyzeRisks, decideRisk, deleteRisk, fetchRisks } from "../../api/risks";
 
 const categoryLabels: Record<RiskCategory, string> = {
   input_validation: "输入校验",
@@ -166,6 +167,17 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     }
   };
 
+  const handleDelete = async (riskId: string) => {
+    try {
+      await deleteRisk(riskId);
+      message.success("已删除");
+      const newRisks = await loadRisks();
+      onRisksChange?.(newRisks);
+    } catch {
+      message.error("删除失败");
+    }
+  };
+
   const collapseItems = Object.entries(groupedRisks).map(([category, items]) => ({
     key: category,
     label: (
@@ -235,6 +247,16 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
                   </Button>
                 </>
               )}
+              <Popconfirm
+                title="确定删除该风险项吗？"
+                onConfirm={() => handleDelete(risk.id)}
+                okText="确定"
+                cancelText="取消"
+              >
+                <Button size="small" danger>
+                  删除
+                </Button>
+              </Popconfirm>
             </div>
             {risk.decision_reason && (
               <Typography.Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: "block" }}>

@@ -6,6 +6,7 @@ from pydantic import BaseModel
 class TestCaseCreate(BaseModel):
     project_id: int
     title: str
+    precondition: str = ""
     steps: str
     expected_result: str
     risk_level: str = "medium"
@@ -18,6 +19,7 @@ class TestCaseRead(BaseModel):
     id: int
     project_id: int
     title: str
+    precondition: str = ""
     steps: str
     expected_result: str
     risk_level: str
@@ -28,6 +30,7 @@ class TestCaseRead(BaseModel):
 
 class TestCaseUpdate(BaseModel):
     title: str
+    precondition: str = ""
     steps: str
     expected_result: str
     risk_level: str = "medium"

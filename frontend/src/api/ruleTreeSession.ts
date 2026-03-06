@@ -30,11 +30,21 @@ export async function fetchRuleTreeSessionDetail(sessionId: number): Promise<Rul
 
 export async function generateRuleTreeSession(
   sessionId: number,
-  payload: { requirement_text: string; title?: string },
+  payload: { requirement_text: string; title?: string; image?: File },
 ): Promise<RuleTreeSessionGenerateResult> {
-  const { data } = await http.post<RuleTreeSessionGenerateResult>(`/api/rules/sessions/${sessionId}/generate`, payload, {
-    timeout: LONG_LLM_TIMEOUT_MS,
-  });
+  const formData = new FormData();
+  formData.append("requirement_text", payload.requirement_text);
+  if (payload.title) {
+    formData.append("title", payload.title);
+  }
+  if (payload.image) {
+    formData.append("image", payload.image);
+  }
+  const { data } = await http.post<RuleTreeSessionGenerateResult>(
+    `/api/rules/sessions/${sessionId}/generate`,
+    formData,
+    { timeout: LONG_LLM_TIMEOUT_MS },
+  );
   return data;
 }
 
