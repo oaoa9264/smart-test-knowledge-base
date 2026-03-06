@@ -1,0 +1,44 @@
+from datetime import datetime
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel
+
+
+class RiskItemRead(BaseModel):
+    id: str
+    requirement_id: int
+    related_node_id: Optional[str] = None
+    category: str
+    risk_level: str
+    description: str
+    suggestion: str
+    decision: str
+    decision_reason: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True
+
+
+class RiskDecisionRequest(BaseModel):
+    decision: Literal["accepted", "ignored"]
+    reason: str
+    auto_create_node: bool = False
+
+
+class RiskAnalyzeRequest(BaseModel):
+    requirement_id: int
+
+
+class RiskAnalyzeResponse(BaseModel):
+    risks: List[RiskItemRead]
+    total: int
+
+
+class RiskListResponse(BaseModel):
+    risks: List[RiskItemRead]
+    total: int
+    pending: int
+    accepted: int
+    ignored: int
