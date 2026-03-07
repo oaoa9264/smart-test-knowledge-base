@@ -26,7 +26,7 @@ import {
   message,
 } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
-import { CheckCircleOutlined, CloseOutlined, DeleteOutlined, DownOutlined, EditOutlined, ExperimentOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, RobotOutlined, SaveOutlined, WarningOutlined } from "@ant-design/icons";
+import { CheckCircleOutlined, CloseOutlined, DeleteOutlined, DownOutlined, EditOutlined, ExperimentOutlined, HistoryOutlined, InboxOutlined, PlusOutlined, RobotOutlined, SaveOutlined, UploadOutlined, WarningOutlined } from "@ant-design/icons";
 import { getErrorMessage } from "../../api/client";
 import {
   generateTestPlan,
@@ -333,6 +333,7 @@ export default function RuleTreePage() {
   const [editingMarkdown, setEditingMarkdown] = useState("");
   const [editingPoints, setEditingPoints] = useState<TestPoint[]>([]);
   const [planSaveLoading, setPlanSaveLoading] = useState(false);
+  const [importPlanLoading, setImportPlanLoading] = useState(false);
   const [editingPointModalOpen, setEditingPointModalOpen] = useState(false);
   const [editingPointIndex, setEditingPointIndex] = useState<number | null>(null);
   const [editingPointForm] = Form.useForm();
@@ -1282,6 +1283,35 @@ export default function RuleTreePage() {
     }
   };
 
+  const handleImportTestPlan = async (file: File) => {
+    if (!activeRequirementId) return;
+    setImportPlanLoading(true);
+    try {
+      const content = await file.text();
+      if (!content.trim()) {
+        message.warning("文件内容为空");
+        return;
+      }
+      const session = await createTestPlanSession(activeRequirementId);
+      await updateTestPlan(session.id, { plan_markdown: content, test_points: [] });
+      setCurrentSessionId(session.id);
+      setCurrentSessionConfirmed(false);
+      setTestPlanMarkdown(content);
+      setTestPlanPoints([]);
+      setGeneratedCases([]);
+      setSessionCreatedAt(new Date().toISOString());
+      setEditingMarkdown(content);
+      setEditingPoints([]);
+      setIsEditingPlan(true);
+      setTestPlanStep(1);
+      message.success("测试方案导入成功");
+    } catch (error) {
+      message.error(getErrorMessage(error, "导入测试方案失败"));
+    } finally {
+      setImportPlanLoading(false);
+    }
+  };
+
   const handleGenerateTestCases = async () => {
     if (!activeRequirementId) return;
     setTestCaseGenLoading(true);
@@ -1504,6 +1534,7 @@ export default function RuleTreePage() {
                 { key: "png", label: "导出 PNG" },
                 { key: "svg", label: "导出 SVG" },
                 { key: "xmind", label: "导出 XMind" },
+                { key: "md", label: "导出 Markdown" },
               ],
               onClick: ({ key }) => handleExport(key as MindMapExportType),
             }}
@@ -2003,6 +2034,29 @@ export default function RuleTreePage() {
               开始生成测试方案
             </Button>
 
+            <Divider style={{ margin: "16px 0" }}>或</Divider>
+
+            <Upload
+              accept=".md"
+              showUploadList={false}
+              beforeUpload={(file) => {
+                handleImportTestPlan(file);
+                return false;
+              }}
+            >
+              <Button
+                size="large"
+                icon={<UploadOutlined />}
+                loading={importPlanLoading}
+                block
+              >
+                导入测试方案（Markdown）
+              </Button>
+            </Upload>
+            <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+              可先导出规则树 Markdown，基于该文件编写测试方案后导入，跳过 AI 生成步骤
+            </Typography.Text>
+
             {historySessions.length > 0 && (
               <>
                 <Divider style={{ margin: "20px 0 12px" }}>
@@ -2129,7 +2183,17 @@ export default function RuleTreePage() {
 
             {(() => {
               const pointsData = isEditingPlan ? editingPoints : testPlanPoints;
-              if (pointsData.length === 0 && !isEditingPlan) return null;
+              if (pointsData.length === 0 && !isEditingPlan) {
+                return (
+                  <Alert
+                    type="info"
+                    style={{ marginBottom: 16 }}
+                    message="当前没有测试点"
+                    description="可点击「编辑方案」手动添加测试点，或直接生成用例（AI 将根据方案内容自动提取测试点）"
+                    showIcon
+                  />
+                );
+              }
               return (
                 <>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
