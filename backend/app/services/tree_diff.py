@@ -26,27 +26,63 @@ _LLM_SEMANTIC_DIFF_SYSTEM_PROMPT = """
 你是测试规则树版本对比专家。你会拿到同一需求在不同版本下独立生成的两棵规则树（v1 和 v2）。
 两棵树由 AI 各自独立生成，节点 ID 不存在对应关系，你需要从业务流程语义层面理解并对比。
 
+## 受众
+你的输出会被产品经理、测试工程师和开发人员直接阅读。
+请用简洁、具体的业务语言描述变更，就像你在跟同事面对面说"这次改了什么"一样。
+禁止使用抽象术语（如"策略反转""精细控制约束""幂等性"），要说清楚具体改了什么。
+
+## 输出格式
 请严格按以下 JSON 格式输出，不要输出其它内容：
 {
+  "summary": "用 1~2 句话概括这次版本变更的整体方向，让人 5 秒内知道改了什么",
+  "key_changes": [
+    "核心变化要点 1（一句话说清楚，例如：代理商客户从'不展示认证信息'改为'默认展示'）",
+    "核心变化要点 2"
+  ],
   "flow_changes": [
     {
       "change_type": "added 或 removed 或 modified",
-      "description": "用业务语言描述变更，不要出现节点 ID",
-      "detail": "可选，更详细的说明",
-      "impact": "low 或 medium 或 high"
+      "title": "变更的简短标题（5~15 字）",
+      "before": "旧版本的具体行为（如果是新增则写'无'）",
+      "after": "新版本的具体行为（如果是删除则写'无'）",
+      "description": "补充说明这个变更的业务背景或影响，不要重复 before/after 的内容",
+      "detail": "可选，需要进一步解释时填写",
+      "impact": "low 或 medium 或 high",
+      "test_suggestion": "针对这个变更，建议怎么测试（用具体的操作描述，如'用代理商账号登录后检查认证信息是否展示'）"
     }
   ],
-  "summary": "一句话总结两个版本的主要差异",
-  "risk_notes": "可选，需要关注的回归风险"
+  "risks": [
+    {
+      "risk": "具体的风险点（说清楚可能出什么问题）",
+      "suggestion": "建议的验证方式（给出可执行的操作，不要说'回归验证'这种空话）"
+    }
+  ]
 }
 
-关键约束：
+## 关键约束
 1. 只输出实际变化的部分，不要描述未变化的流程
-2. description 用业务语言，禁止出现节点 ID 或 UUID
-3. 按变更影响从 high 到 low 排序
-4. 如果两个版本的流程本质相同（只是措辞差异），flow_changes 留空数组，summary 标注为"无实质变化"
+2. 所有文字描述禁止出现节点 ID、UUID 或技术标识符
+3. flow_changes 按变更影响从 high 到 low 排序
+4. 如果两个版本的流程本质相同（只是措辞差异），flow_changes 留空数组，summary 写"无实质变化"
 5. change_type 只能是 added / removed / modified 三选一
 6. impact 只能是 low / medium / high 三选一
+7. key_changes 控制在 2~5 条，每条不超过 30 字
+8. before 和 after 要具体到业务行为，不要写"逻辑调整""策略变更"这种空话
+9. test_suggestion 要写出可执行的操作步骤，不要写"需要回归测试"这种泛泛的建议
+10. risks 数组在没有明显风险时可以为空数组
+
+## 正面示例
+输入差异：v1 中代理商客户不展示认证信息，v2 改为默认展示
+好的输出：
+- summary: "本次改版调整了代理商和直销客户的认证信息展示规则，并简化了号码隐藏功能。"
+- key_changes: ["代理商客户：从'不展示'改为'默认展示'认证信息", "直销客户：统一不展示认证信息", "号码隐藏：去掉了撤销/恢复功能"]
+- flow_changes 中的 before/after: before="代理商客户不展示认证信息" after="代理商客户默认展示认证信息"
+- risks 中的 suggestion: "用代理商账号登录，确认认证信息区域是否正确展示；再用直销客户账号登录，确认认证信息区域不展示"
+
+## 反面示例（禁止这样写）
+- summary: "v2将客户类型判定逻辑大幅简化并重写了代理商/直销客户的展示结论，同时弱化了隐藏操作的精细控制约束"  ← 太抽象，读者不知道具体改了什么
+- description: "触发隐藏的操作标识从唯一ID变为号码"  ← 什么是"操作标识"？应该写"隐藏号码时，从按唯一ID隐藏改为按号码本身隐藏"
+- risk: "需重点回归验证代理商与直销客户展示结果是否符合真实业务口径，并补测号码隐藏的误命中、幂等性和误操作恢复能力"  ← 堆砌术语，不可执行
 """.strip()
 
 
@@ -214,9 +250,23 @@ def diff_trees_with_llm(db: Session, old_requirement_id: int, new_requirement_id
 
     flow_changes = payload.get("flow_changes") or []
     summary = str(payload.get("summary") or "").strip()
+
+    raw_key_changes = payload.get("key_changes") or []
+    key_changes = [str(kc).strip() for kc in raw_key_changes if isinstance(kc, str) and str(kc).strip()]
+
     risk_notes = (payload.get("risk_notes") or None)
     if isinstance(risk_notes, str):
         risk_notes = risk_notes.strip() or None
+
+    raw_risks = payload.get("risks") or []
+    sanitized_risks = []
+    for r in raw_risks:
+        if not isinstance(r, dict):
+            continue
+        risk_text = str(r.get("risk", "")).strip()
+        suggestion_text = str(r.get("suggestion", "")).strip()
+        if risk_text:
+            sanitized_risks.append({"risk": risk_text, "suggestion": suggestion_text})
 
     valid_change_types = {"added", "removed", "modified"}
     valid_impacts = {"low", "medium", "high"}
@@ -232,9 +282,13 @@ def diff_trees_with_llm(db: Session, old_requirement_id: int, new_requirement_id
             imp = "medium"
         sanitized_changes.append({
             "change_type": ct,
+            "title": (str(change.get("title", "")).strip() or None),
+            "before": (str(change.get("before", "")).strip() or None),
+            "after": (str(change.get("after", "")).strip() or None),
             "description": str(change.get("description", "")).strip(),
             "detail": (str(change.get("detail", "")).strip() or None),
             "impact": imp,
+            "test_suggestion": (str(change.get("test_suggestion", "")).strip() or None),
         })
 
     impact_order = {"high": 0, "medium": 1, "low": 2}
@@ -245,7 +299,9 @@ def diff_trees_with_llm(db: Session, old_requirement_id: int, new_requirement_id
         "compare_version": int(new_requirement.version or 1),
         "flow_changes": sanitized_changes,
         "summary": summary or "无实质变化",
+        "key_changes": key_changes or None,
         "risk_notes": risk_notes,
+        "risks": sanitized_risks or None,
     }
 
 

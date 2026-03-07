@@ -34,9 +34,18 @@ class TreeDiffSummaryResult(BaseModel):
 
 class FlowChange(BaseModel):
     change_type: str
+    title: Optional[str] = None
+    before: Optional[str] = None
+    after: Optional[str] = None
     description: str
     detail: Optional[str] = None
     impact: str
+    test_suggestion: Optional[str] = None
+
+
+class RiskNote(BaseModel):
+    risk: str
+    suggestion: str
 
 
 class SemanticDiffResult(BaseModel):
@@ -44,7 +53,9 @@ class SemanticDiffResult(BaseModel):
     compare_version: int
     flow_changes: List[FlowChange]
     summary: str
+    key_changes: Optional[List[str]] = None
     risk_notes: Optional[str] = None
+    risks: Optional[List[RiskNote]] = None
 
 
 class DiffRecordRead(BaseModel):

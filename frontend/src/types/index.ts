@@ -80,9 +80,18 @@ export interface TreeDiffSummaryResult {
 
 export interface FlowChange {
   change_type: "added" | "removed" | "modified";
+  title?: string | null;
+  before?: string | null;
+  after?: string | null;
   description: string;
   detail?: string | null;
   impact: "low" | "medium" | "high";
+  test_suggestion?: string | null;
+}
+
+export interface RiskNote {
+  risk: string;
+  suggestion: string;
 }
 
 export interface SemanticDiffResult {
@@ -90,7 +99,9 @@ export interface SemanticDiffResult {
   compare_version: number;
   flow_changes: FlowChange[];
   summary: string;
+  key_changes?: string[] | null;
   risk_notes?: string | null;
+  risks?: RiskNote[] | null;
 }
 
 export interface DiffRecordRead {

@@ -94,6 +94,20 @@ type RuleTreeNavNode = {
 };
 
 function DiffResultDisplay({ result }: { result: SemanticDiffResult }) {
+  const changeTypeMeta: Record<string, { color: string; label: string }> = {
+    added: { color: "green", label: "新增" },
+    removed: { color: "red", label: "删除" },
+    modified: { color: "orange", label: "修改" },
+  };
+  const impactMeta: Record<string, { color: string; label: string }> = {
+    high: { color: "red", label: "高" },
+    medium: { color: "orange", label: "中" },
+    low: { color: "blue", label: "低" },
+  };
+
+  const hasKeyChanges = result.key_changes && result.key_changes.length > 0;
+  const hasRisks = result.risks && result.risks.length > 0;
+
   return (
     <>
       <Alert
@@ -101,14 +115,49 @@ function DiffResultDisplay({ result }: { result: SemanticDiffResult }) {
         type="info"
         message={`对比总结（v${result.base_version} → v${result.compare_version}）`}
         description={
-          <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-            {result.summary}
-          </Typography.Paragraph>
+          <div>
+            <Typography.Paragraph style={{ marginBottom: hasKeyChanges ? 8 : 0, whiteSpace: "pre-wrap" }}>
+              {result.summary}
+            </Typography.Paragraph>
+            {hasKeyChanges && (
+              <ul style={{ margin: 0, paddingLeft: 20 }}>
+                {result.key_changes!.map((item, idx) => (
+                  <li key={idx} style={{ marginBottom: 2 }}>
+                    <Typography.Text>{item}</Typography.Text>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         }
         showIcon
       />
 
-      {result.risk_notes && (
+      {hasRisks ? (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type="warning"
+          message="风险提示"
+          description={
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {result.risks!.map((item, idx) => (
+                <div key={idx} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <Tag color="red" style={{ flexShrink: 0, marginTop: 2 }}>风险</Tag>
+                  <div style={{ flex: 1 }}>
+                    <Typography.Text strong>{item.risk}</Typography.Text>
+                    {item.suggestion && (
+                      <Typography.Text type="secondary" style={{ display: "block", fontSize: 12, marginTop: 2 }}>
+                        验证建议：{item.suggestion}
+                      </Typography.Text>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          }
+          showIcon
+        />
+      ) : result.risk_notes ? (
         <Alert
           style={{ marginBottom: 12 }}
           type="warning"
@@ -116,7 +165,7 @@ function DiffResultDisplay({ result }: { result: SemanticDiffResult }) {
           description={result.risk_notes}
           showIcon
         />
-      )}
+      ) : null}
 
       {result.flow_changes.length === 0 ? (
         <Alert style={{ marginBottom: 12 }} type="success" message="两个版本无实质性流程差异" />
@@ -127,46 +176,79 @@ function DiffResultDisplay({ result }: { result: SemanticDiffResult }) {
           dataSource={result.flow_changes}
           pagination={false}
           expandable={{
-            expandedRowRender: (record) =>
-              record.detail ? (
-                <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                  {record.detail}
-                </Typography.Paragraph>
-              ) : (
-                <Typography.Text type="secondary">无详细说明</Typography.Text>
-              ),
-            rowExpandable: (record) => !!record.detail,
+            expandedRowRender: (record) => {
+              const parts: React.ReactNode[] = [];
+              if (record.detail) {
+                parts.push(
+                  <Typography.Paragraph key="detail" style={{ marginBottom: 8, whiteSpace: "pre-wrap" }}>
+                    {record.detail}
+                  </Typography.Paragraph>
+                );
+              }
+              if (record.test_suggestion) {
+                parts.push(
+                  <div key="suggestion" style={{ background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6, padding: "6px 10px" }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>测试建议：</Typography.Text>
+                    <Typography.Text style={{ fontSize: 13 }}>{record.test_suggestion}</Typography.Text>
+                  </div>
+                );
+              }
+              return parts.length > 0 ? <>{parts}</> : <Typography.Text type="secondary">无详细说明</Typography.Text>;
+            },
+            rowExpandable: (record) => !!record.detail || !!record.test_suggestion,
           }}
           columns={[
             {
               title: "变更类型",
               dataIndex: "change_type",
-              width: 100,
+              width: 80,
               render: (type: string) => {
-                const meta: Record<string, { color: string; label: string }> = {
-                  added: { color: "green", label: "新增" },
-                  removed: { color: "red", label: "删除" },
-                  modified: { color: "orange", label: "修改" },
-                };
-                const m = meta[type] || { color: "default", label: type };
+                const m = changeTypeMeta[type] || { color: "default", label: type };
                 return <Tag color={m.color}>{m.label}</Tag>;
               },
             },
             {
-              title: "变更描述",
-              dataIndex: "description",
+              title: "变更内容",
+              key: "change_content",
+              render: (_: unknown, record: typeof result.flow_changes[number]) => {
+                const hasBefore = record.before && record.before !== "无";
+                const hasAfter = record.after && record.after !== "无";
+                const hasBeforeAfter = hasBefore || hasAfter;
+                return (
+                  <div>
+                    {record.title && (
+                      <Typography.Text strong style={{ display: "block", marginBottom: hasBeforeAfter ? 4 : 0 }}>
+                        {record.title}
+                      </Typography.Text>
+                    )}
+                    {hasBeforeAfter ? (
+                      <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                        {hasBefore && (
+                          <div>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>旧：</Typography.Text>
+                            <Typography.Text delete type="secondary">{record.before}</Typography.Text>
+                          </div>
+                        )}
+                        {hasAfter && (
+                          <div>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>新：</Typography.Text>
+                            <Typography.Text>{record.after}</Typography.Text>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <Typography.Text>{record.description}</Typography.Text>
+                    )}
+                  </div>
+                );
+              },
             },
             {
-              title: "影响程度",
+              title: "影响",
               dataIndex: "impact",
-              width: 100,
+              width: 70,
               render: (impact: string) => {
-                const meta: Record<string, { color: string; label: string }> = {
-                  high: { color: "red", label: "高" },
-                  medium: { color: "orange", label: "中" },
-                  low: { color: "blue", label: "低" },
-                };
-                const m = meta[impact] || { color: "default", label: impact };
+                const m = impactMeta[impact] || { color: "default", label: impact };
                 return <Tag color={m.color}>{m.label}</Tag>;
               },
             },
