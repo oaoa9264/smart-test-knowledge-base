@@ -1,9 +1,13 @@
 import { http } from "./client";
 import type { RiskAnalyzeResponse, RiskItem, RiskListResponse, RuleNode } from "../types";
 
+const LONG_LLM_TIMEOUT_MS = 180000;
+
 export async function analyzeRisks(requirementId: number): Promise<RiskAnalyzeResponse> {
   const { data } = await http.post<RiskAnalyzeResponse>("/api/ai/risks/analyze", {
     requirement_id: requirementId,
+  }, {
+    timeout: LONG_LLM_TIMEOUT_MS,
   });
   return data;
 }

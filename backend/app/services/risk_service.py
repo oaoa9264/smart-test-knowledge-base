@@ -1,9 +1,11 @@
 import json
 import logging
 import os
+import threading
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -27,9 +29,44 @@ logger = logging.getLogger(__name__)
 
 _VALID_CATEGORIES = {c.value for c in RiskCategory}
 _VALID_RISK_LEVELS = {r.value for r in RiskLevel}
+_ANALYSIS_STATE_GUARD = threading.Lock()
+
+
+@dataclass
+class _AnalysisState:
+    condition: threading.Condition = field(default_factory=threading.Condition)
+    running: bool = False
+    error: Optional[Exception] = None
+
+
+_ANALYSIS_STATES: Dict[int, _AnalysisState] = {}
 
 
 def analyze_risks(
+    db: Session,
+    requirement_id: int,
+    llm_client: Optional[Any] = None,
+) -> List[RiskItem]:
+    state, should_wait = _begin_requirement_analysis(requirement_id)
+    if should_wait:
+        _wait_for_requirement_analysis(state)
+        return get_risks_for_requirement(db=db, requirement_id=requirement_id)
+
+    try:
+        risk_items = _analyze_risks_once(
+            db=db,
+            requirement_id=requirement_id,
+            llm_client=llm_client,
+        )
+    except Exception as exc:
+        _finish_requirement_analysis(requirement_id=requirement_id, state=state, error=exc)
+        raise
+
+    _finish_requirement_analysis(requirement_id=requirement_id, state=state, error=None)
+    return risk_items
+
+
+def _analyze_risks_once(
     db: Session,
     requirement_id: int,
     llm_client: Optional[Any] = None,
@@ -69,6 +106,41 @@ def analyze_risks(
         valid_node_ids=node_id_set,
     )
     return risk_items
+
+
+def _begin_requirement_analysis(requirement_id: int) -> Tuple[_AnalysisState, bool]:
+    with _ANALYSIS_STATE_GUARD:
+        state = _ANALYSIS_STATES.get(requirement_id)
+        if state is None:
+            state = _AnalysisState()
+            _ANALYSIS_STATES[requirement_id] = state
+
+    with state.condition:
+        if state.running:
+            return state, True
+        state.running = True
+        state.error = None
+        return state, False
+
+
+def _wait_for_requirement_analysis(state: _AnalysisState) -> None:
+    with state.condition:
+        while state.running:
+            state.condition.wait()
+        if state.error is not None:
+            raise state.error
+
+
+def _finish_requirement_analysis(requirement_id: int, state: _AnalysisState, error: Optional[Exception]) -> None:
+    with state.condition:
+        state.running = False
+        state.error = error
+        state.condition.notify_all()
+
+    with _ANALYSIS_STATE_GUARD:
+        current = _ANALYSIS_STATES.get(requirement_id)
+        if current is state and not state.running:
+            _ANALYSIS_STATES.pop(requirement_id, None)
 
 
 def save_risks_from_generation(
@@ -252,9 +324,11 @@ def _save_risks(
     db: Session,
     requirement_id: int,
     raw_risks: List[Dict[str, Any]],
-    valid_node_ids: set,
+    valid_node_ids: Set[str],
 ) -> List[RiskItem]:
     saved: List[RiskItem] = []
+    db.query(RiskItem).filter(RiskItem.requirement_id == requirement_id).delete()
+    db.flush()
     for risk_data in raw_risks:
         related_node_id = risk_data.get("related_node_id")
         if related_node_id and related_node_id not in valid_node_ids:
