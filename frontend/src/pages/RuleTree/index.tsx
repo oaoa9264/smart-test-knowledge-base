@@ -109,6 +109,17 @@ const RULE_TREE_STATUS_META: Record<string, { color: string; label: string }> = 
   archived: { color: "default", label: "已归档" },
 };
 
+const RULE_TREE_STAGE_LABELS: Record<string, string> = {
+  queued: "排队中",
+  generating: "生成规则树",
+  reviewing: "AI 复核",
+  saving: "保存结果",
+  completed: "生成完成",
+  failed: "生成失败",
+  interrupted: "任务中断",
+  confirmed: "已应用到规则树",
+};
+
 function parseSessionTreeSnapshot(snapshot: string | null | undefined): { decision_tree: { nodes: DecisionTreeNode[] } } | null {
   if (!snapshot) return null;
   try {
@@ -399,6 +410,7 @@ export default function RuleTreePage() {
   const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
   const [showSessionUpdate, setShowSessionUpdate] = useState(false);
   const [showSessionHistory, setShowSessionHistory] = useState(false);
+  const [sessionCreateLoading, setSessionCreateLoading] = useState(false);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [sessionUpdateLoading, setSessionUpdateLoading] = useState(false);
   const [sessionConfirmLoading, setSessionConfirmLoading] = useState(false);
@@ -444,6 +456,7 @@ export default function RuleTreePage() {
   const canvasSyncTimerRef = useRef<number | null>(null);
   const canvasSyncSuppressTimerRef = useRef<number | null>(null);
   const sessionPollTimerRef = useRef<number | null>(null);
+  const sessionCreateInFlightRef = useRef(false);
   const isCanvasSyncingRef = useRef(false);
   const suppressCanvasSyncRef = useRef(false);
   const previousSessionStatusRef = useRef<string | null>(null);
@@ -1197,27 +1210,54 @@ export default function RuleTreePage() {
       message.warning("请先选择需求");
       return;
     }
-    const created = await createRuleTreeSession(activeRequirementId, "规则树会话");
-    await reloadSessions(activeRequirementId);
-    setSelectedSessionId(created.id);
-    message.success("会话已创建");
-  };
+    if (sessionCreateInFlightRef.current) {
+      return;
+    }
 
-  const sessionStep = useMemo(() => {
-    if (!selectedSessionId) return 0;
-    if (sessionConfirmed) return 2;
-    if (sessionGenerateResult || sessionUpdateResult) return 1;
-    return 0;
-  }, [selectedSessionId, sessionConfirmed, sessionGenerateResult, sessionUpdateResult]);
+    sessionCreateInFlightRef.current = true;
+    setSessionCreateLoading(true);
+    try {
+      const created = await createRuleTreeSession(activeRequirementId, "规则树会话");
+      await reloadSessions(activeRequirementId);
+      setSelectedSessionId(created.id);
+      message.success("会话已创建");
+    } catch (error) {
+      message.error(getErrorMessage(error, "创建会话失败"));
+    } finally {
+      sessionCreateInFlightRef.current = false;
+      setSessionCreateLoading(false);
+    }
+  };
 
   const currentRuleTreeSession = useMemo(
     () => sessionDetail?.session || sessions.find((item) => item.id === selectedSessionId) || null,
     [selectedSessionId, sessionDetail, sessions],
   );
 
+  const isRuleTreeSessionApplied = useMemo(
+    () => currentRuleTreeSession?.status === "confirmed" || sessionConfirmed,
+    [currentRuleTreeSession, sessionConfirmed],
+  );
+
+  const sessionStep = useMemo(() => {
+    if (!selectedSessionId) return 0;
+    if (isRuleTreeSessionApplied) return 2;
+    if (sessionGenerateResult || sessionUpdateResult) return 1;
+    return 0;
+  }, [isRuleTreeSessionApplied, selectedSessionId, sessionGenerateResult, sessionUpdateResult]);
+
   const currentRuleTreeSessionStatusMeta = useMemo(() => {
     if (!currentRuleTreeSession) return null;
     return RULE_TREE_STATUS_META[currentRuleTreeSession.status] || { color: "default", label: currentRuleTreeSession.status };
+  }, [currentRuleTreeSession]);
+
+  const currentRuleTreeSessionStageLabel = useMemo(() => {
+    if (!currentRuleTreeSession) return null;
+    if (currentRuleTreeSession.status === "confirmed") {
+      return RULE_TREE_STAGE_LABELS.confirmed;
+    }
+    const stage = currentRuleTreeSession.progress_stage || currentRuleTreeSession.status;
+    return RULE_TREE_STAGE_LABELS[stage] || stage;
   }, [currentRuleTreeSession]);
 
   const currentRuleTreeSessionStageIndex = useMemo(() => {
@@ -2009,7 +2049,7 @@ export default function RuleTreePage() {
               }))}
               onChange={(value) => setSelectedSessionId(value)}
             />
-            <Button onClick={handleCreateSession} disabled={!activeRequirementId}>
+            <Button onClick={handleCreateSession} disabled={!activeRequirementId || sessionCreateLoading} loading={sessionCreateLoading}>
               新建
             </Button>
           </div>
@@ -2067,12 +2107,21 @@ export default function RuleTreePage() {
           <div style={{ marginBottom: 16, padding: 12, border: "1px solid #eef2f7", borderRadius: 8, background: "#fafcff" }}>
             <Space style={{ marginBottom: 8, flexWrap: "wrap" }}>
               <Tag color={currentRuleTreeSessionStatusMeta.color}>{currentRuleTreeSessionStatusMeta.label}</Tag>
-              {currentRuleTreeSession.progress_stage && (
-                <Typography.Text type="secondary">阶段：{currentRuleTreeSession.progress_stage}</Typography.Text>
+              {currentRuleTreeSessionStageLabel && (
+                <Typography.Text type="secondary">阶段：{currentRuleTreeSessionStageLabel}</Typography.Text>
               )}
-              {currentRuleTreeSession.current_task_started_at && (
+              {currentRuleTreeSession.status === "confirmed" ? (
+                <Typography.Text type="secondary">
+                  完成于 {new Date(currentRuleTreeSession.updated_at).toLocaleString()}
+                </Typography.Text>
+              ) : currentRuleTreeSession.current_task_started_at ? (
                 <Typography.Text type="secondary">
                   开始于 {new Date(currentRuleTreeSession.current_task_started_at).toLocaleString()}
+                </Typography.Text>
+              ) : null}
+              {currentRuleTreeSession.current_task_finished_at && currentRuleTreeSession.status !== "confirmed" && (
+                <Typography.Text type="secondary">
+                  结束于 {new Date(currentRuleTreeSession.current_task_finished_at).toLocaleString()}
                 </Typography.Text>
               )}
             </Space>
@@ -2156,7 +2205,7 @@ export default function RuleTreePage() {
               >
                 {showSessionUpdate ? "收起" : "修改需求文本"}
               </Button>
-              <Button type="primary" onClick={handleSessionConfirmImport} loading={sessionConfirmLoading} disabled={sessionConfirmed}>
+              <Button type="primary" onClick={handleSessionConfirmImport} loading={sessionConfirmLoading} disabled={isRuleTreeSessionApplied}>
                 应用到规则树
               </Button>
             </Space>
