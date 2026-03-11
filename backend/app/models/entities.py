@@ -78,6 +78,12 @@ class RecoMode(str, enum.Enum):
 
 class RuleTreeSessionStatus(str, enum.Enum):
     active = "active"
+    generating = "generating"
+    reviewing = "reviewing"
+    saving = "saving"
+    completed = "completed"
+    failed = "failed"
+    interrupted = "interrupted"
     confirmed = "confirmed"
     archived = "archived"
 
@@ -275,6 +281,14 @@ class RuleTreeSession(Base):
     status = Column(Enum(RuleTreeSessionStatus), default=RuleTreeSessionStatus.active, nullable=False)
     confirmed_tree_snapshot = Column(Text, nullable=True)
     requirement_text_snapshot = Column(Text, nullable=True)
+    progress_stage = Column(String(50), nullable=True)
+    progress_message = Column(Text, nullable=True)
+    progress_percent = Column(Integer, nullable=True)
+    last_error = Column(Text, nullable=True)
+    generated_tree_snapshot = Column(Text, nullable=True)
+    reviewed_tree_snapshot = Column(Text, nullable=True)
+    current_task_started_at = Column(DateTime, nullable=True)
+    current_task_finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

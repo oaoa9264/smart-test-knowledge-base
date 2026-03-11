@@ -16,6 +16,14 @@ class RuleTreeSessionRead(BaseModel):
     status: str
     confirmed_tree_snapshot: Optional[str] = None
     requirement_text_snapshot: Optional[str] = None
+    progress_stage: Optional[str] = None
+    progress_message: Optional[str] = None
+    progress_percent: Optional[int] = None
+    last_error: Optional[str] = None
+    generated_tree_snapshot: Optional[str] = None
+    reviewed_tree_snapshot: Optional[str] = None
+    current_task_started_at: Optional[datetime] = None
+    current_task_finished_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
