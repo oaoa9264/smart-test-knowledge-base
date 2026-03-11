@@ -46,12 +46,13 @@ def build_coverage_matrix(nodes: List[Dict], testcases: List[Dict], paths: List[
             node_coverage[node_id]["covered_cases"] = len(case_ids)
 
     coverable_rows = [v for v in node_coverage.values() if v["coverable"]]
-    total_nodes = len(coverable_rows)
-    covered_nodes = len([v for v in coverable_rows if v["covered_cases"] > 0])
-    structural_nodes = len(nodes) - total_nodes
+    summary_rows = coverable_rows if coverable_rows else list(node_coverage.values())
+    total_nodes = len(summary_rows)
+    covered_nodes = len([v for v in summary_rows if v["covered_cases"] > 0])
+    structural_nodes = 0 if not coverable_rows else len(nodes) - total_nodes
     uncovered_critical = [
         n["node_id"]
-        for n in coverable_rows
+        for n in summary_rows
         if n["risk_level"] == "critical" and n["covered_cases"] == 0
     ]
 

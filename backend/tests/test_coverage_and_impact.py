@@ -47,6 +47,24 @@ def test_build_coverage_matrix_excludes_structural_nodes_from_rate():
     assert rows_by_id["e1"]["coverable"] is True
 
 
+def test_build_coverage_matrix_falls_back_to_all_nodes_when_no_coverable_nodes_exist():
+    nodes = [
+        {"id": "r1", "content": "Root", "node_type": "root", "risk_level": "low"},
+        {"id": "c1", "content": "Condition", "node_type": "condition", "risk_level": "medium"},
+    ]
+    testcases = [
+        {"id": "tc1", "bound_rule_nodes": ["r1"], "bound_paths": []},
+    ]
+    paths = [["r1", "c1"]]
+
+    result = build_coverage_matrix(nodes=nodes, testcases=testcases, paths=paths)
+
+    assert result["summary"]["total_nodes"] == 2
+    assert result["summary"]["covered_nodes"] == 1
+    assert result["summary"]["structural_nodes"] == 0
+    assert result["summary"]["coverage_rate"] == 0.5
+
+
 def test_analyze_impact_marks_directly_bound_cases_for_review():
     changed_node_ids = ["n2"]
     testcases = [
