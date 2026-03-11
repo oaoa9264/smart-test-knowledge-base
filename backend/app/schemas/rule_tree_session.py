@@ -55,10 +55,8 @@ class RuleTreeGeneratePayload(BaseModel):
 
 
 class RuleTreeGenerateResponse(BaseModel):
+    accepted: bool
     session: RuleTreeSessionRead
-    generated_tree: Dict[str, Any]
-    reviewed_tree: Dict[str, Any]
-    diff: Dict[str, Any]
 
 
 class RuleTreeUpdatePayload(BaseModel):

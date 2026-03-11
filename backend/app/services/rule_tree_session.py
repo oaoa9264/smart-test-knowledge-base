@@ -1,10 +1,13 @@
 import difflib
 import json
+import threading
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from app.core.database import SessionLocal
 from app.models.entities import (
     NodeStatus,
     NodeType,
@@ -54,6 +57,16 @@ _RISK_LEVEL_ALIASES = {
     "中": "medium",
     "低": "low",
 }
+
+_IN_PROGRESS_SESSION_STATUSES = {
+    RuleTreeSessionStatus.generating,
+    RuleTreeSessionStatus.reviewing,
+    RuleTreeSessionStatus.saving,
+}
+
+
+class RuleTreeSessionConflictError(ValueError):
+    pass
 
 
 def _json_dumps(value: Any) -> str:
@@ -389,6 +402,38 @@ def _vision_preprocess(llm: Any, image_path: str, description: str) -> str:
     return (understanding or description or "")[:4000]
 
 
+def run_rule_tree_generation_task(
+    session_id: int,
+    requirement_text: str,
+    title: Optional[str] = None,
+    image_path: Optional[str] = None,
+    llm_client: Optional[Any] = None,
+) -> None:
+    return None
+
+
+def _launch_generation_worker(
+    *,
+    session_id: int,
+    requirement_text: str,
+    title: Optional[str],
+    image_path: Optional[str],
+    llm_client: Optional[Any] = None,
+) -> None:
+    worker = threading.Thread(
+        target=run_rule_tree_generation_task,
+        kwargs={
+            "session_id": session_id,
+            "requirement_text": requirement_text,
+            "title": title,
+            "image_path": image_path,
+            "llm_client": llm_client,
+        },
+        daemon=True,
+    )
+    worker.start()
+
+
 def generate_with_review(
     db: Session,
     session_id: int,
@@ -487,6 +532,52 @@ def incremental_update(
         "updated_tree": updated_tree,
         "requirement_diff": requirement_diff,
         "node_diff": node_diff,
+    }
+
+
+def start_generation(
+    db: Session,
+    session_id: int,
+    requirement_text: str,
+    title: Optional[str] = None,
+    image_path: Optional[str] = None,
+    llm_client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    session, _ = _get_session_with_requirement(db, session_id)
+    if session.status in _IN_PROGRESS_SESSION_STATUSES:
+        raise RuleTreeSessionConflictError("当前会话生成中，请稍后再试")
+
+    normalized_text = (requirement_text or "").strip()
+    if not normalized_text:
+        raise ValueError("requirement_text is required")
+
+    if title:
+        session.title = title.strip() or session.title
+
+    session.status = RuleTreeSessionStatus.generating
+    session.requirement_text_snapshot = normalized_text
+    session.progress_stage = RuleTreeSessionStatus.generating.value
+    session.progress_message = "已接受生成任务，准备开始生成规则树"
+    session.progress_percent = 5
+    session.last_error = None
+    session.generated_tree_snapshot = None
+    session.reviewed_tree_snapshot = None
+    session.current_task_started_at = datetime.utcnow()
+    session.current_task_finished_at = None
+    db.commit()
+    db.refresh(session)
+
+    _launch_generation_worker(
+        session_id=session.id,
+        requirement_text=normalized_text,
+        title=session.title,
+        image_path=image_path,
+        llm_client=llm_client,
+    )
+
+    return {
+        "accepted": True,
+        "session": session,
     }
 
 

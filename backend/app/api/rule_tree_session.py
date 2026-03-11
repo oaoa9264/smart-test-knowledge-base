@@ -17,12 +17,13 @@ from app.schemas.rule_tree_session import (
     RuleTreeUpdateResponse,
 )
 from app.services.rule_tree_session import (
+    RuleTreeSessionConflictError,
     confirm_tree,
     create_session,
-    generate_with_review,
     get_session_detail,
     incremental_update,
     list_sessions,
+    start_generation,
 )
 
 CURRENT_DIR = os.path.dirname(__file__)
@@ -76,13 +77,15 @@ async def generate_rule_tree(
 ):
     try:
         image_path = _save_session_image(image)
-        return generate_with_review(
+        return start_generation(
             db=db,
             session_id=session_id,
             requirement_text=requirement_text,
             title=title,
             image_path=image_path,
         )
+    except RuleTreeSessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

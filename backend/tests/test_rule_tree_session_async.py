@@ -1,9 +1,42 @@
 from datetime import datetime
 
+from fastapi.testclient import TestClient
+
 from app.core.database import SessionLocal
-from app.main import recover_interrupted_rule_tree_sessions
+from app.main import app, recover_interrupted_rule_tree_sessions
 from app.models.entities import Project, Requirement, RuleTreeSession, RuleTreeSessionStatus, SourceType
 from app.schemas.rule_tree_session import RuleTreeSessionRead
+from app.services import rule_tree_session as rule_tree_session_service
+
+
+def _create_requirement_and_session(
+    session_status: RuleTreeSessionStatus = RuleTreeSessionStatus.active,
+) -> RuleTreeSession:
+    db = SessionLocal()
+    project = Project(name="异步规则树项目-{0}".format(datetime.utcnow().timestamp()), description="rule tree async")
+    db.add(project)
+    db.flush()
+
+    requirement = Requirement(
+        project_id=project.id,
+        title="登录需求",
+        raw_text="原始需求",
+        source_type=SourceType.prd,
+    )
+    db.add(requirement)
+    db.flush()
+
+    session = RuleTreeSession(
+        requirement_id=requirement.id,
+        title="规则树会话",
+        status=session_status,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    db.expunge(session)
+    db.close()
+    return session
 
 
 def test_session_schema_exposes_async_fields():
@@ -105,3 +138,56 @@ def test_startup_recovery_marks_in_progress_sessions_interrupted():
     assert [item.progress_stage for item in sessions[:3]] == ["interrupted", "interrupted", "interrupted"]
     assert all(item.current_task_finished_at is not None for item in sessions[:3])
     assert all(item.last_error == "服务重启导致任务中断，请重新发起生成" for item in sessions[:3])
+
+
+def test_generate_returns_immediately(monkeypatch):
+    session = _create_requirement_and_session()
+    launch_calls = []
+
+    def _fake_launch(*, session_id, requirement_text, title, image_path, llm_client=None):
+        launch_calls.append(
+            {
+                "session_id": session_id,
+                "requirement_text": requirement_text,
+                "title": title,
+                "image_path": image_path,
+            }
+        )
+
+    monkeypatch.setattr(rule_tree_session_service, "_launch_generation_worker", _fake_launch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/rules/sessions/{0}/generate".format(session.id),
+            data={"requirement_text": "新的需求文本", "title": "新的会话标题"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["session"]["status"] == "generating"
+    assert body["session"]["title"] == "新的会话标题"
+    assert body["session"]["requirement_text_snapshot"] == "新的需求文本"
+    assert body["session"]["progress_stage"] == "generating"
+    assert body["session"]["progress_message"] == "已接受生成任务，准备开始生成规则树"
+    assert body["session"]["current_task_started_at"] is not None
+    assert launch_calls == [
+        {
+            "session_id": session.id,
+            "requirement_text": "新的需求文本",
+            "title": "新的会话标题",
+            "image_path": None,
+        }
+    ]
+
+
+def test_duplicate_generate_returns_conflict():
+    with TestClient(app) as client:
+        session = _create_requirement_and_session(RuleTreeSessionStatus.generating)
+        response = client.post(
+            "/api/rules/sessions/{0}/generate".format(session.id),
+            data={"requirement_text": "重复提交的需求文本"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "当前会话生成中，请稍后再试"
