@@ -39,6 +39,17 @@ def _create_requirement_and_session(
     return session
 
 
+class _FakeLLMClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    def chat_with_messages(self, messages, response_format=None):
+        next_item = self._responses.pop(0)
+        if isinstance(next_item, Exception):
+            raise next_item
+        return next_item
+
+
 def test_session_schema_exposes_async_fields():
     created_at = datetime.utcnow()
     started_at = datetime.utcnow()
@@ -191,3 +202,87 @@ def test_duplicate_generate_returns_conflict():
 
     assert response.status_code == 409
     assert response.json()["detail"] == "当前会话生成中，请稍后再试"
+
+
+def test_worker_success_persists_snapshots_and_terminal_state():
+    session = _create_requirement_and_session(RuleTreeSessionStatus.generating)
+    recorded_stages = []
+    fake_llm = _FakeLLMClient(
+        [
+            {
+                "decision_tree": {
+                    "nodes": [
+                        {"id": "root", "type": "root", "content": "登录", "risk_level": "high", "parent_id": None}
+                    ]
+                }
+            },
+            {
+                "decision_tree": {
+                    "nodes": [
+                        {"id": "root", "type": "root", "content": "登录", "risk_level": "high", "parent_id": None},
+                        {"id": "n2", "type": "condition", "content": "密码正确", "risk_level": "medium", "parent_id": "root"},
+                    ]
+                }
+            },
+        ]
+    )
+
+    rule_tree_session_service.run_rule_tree_generation_task(
+        session_id=session.id,
+        requirement_text="用户登录需求",
+        title="异步规则树",
+        llm_client=fake_llm,
+        db_session_factory=SessionLocal,
+        progress_callback=recorded_stages.append,
+    )
+
+    db = SessionLocal()
+    persisted = db.query(RuleTreeSession).filter(RuleTreeSession.id == session.id).first()
+    db.close()
+
+    assert recorded_stages == ["generating", "reviewing", "saving", "completed"]
+    assert persisted.status == RuleTreeSessionStatus.completed
+    assert persisted.progress_stage == "completed"
+    assert persisted.progress_percent == 100
+    assert persisted.generated_tree_snapshot is not None
+    assert persisted.reviewed_tree_snapshot is not None
+    assert persisted.last_error is None
+    assert persisted.current_task_finished_at is not None
+
+
+def test_worker_failure_marks_session_failed():
+    session = _create_requirement_and_session(RuleTreeSessionStatus.generating)
+    recorded_stages = []
+    fake_llm = _FakeLLMClient(
+        [
+            {
+                "decision_tree": {
+                    "nodes": [
+                        {"id": "root", "type": "root", "content": "登录", "risk_level": "high", "parent_id": None}
+                    ]
+                }
+            },
+            RuntimeError("review failed"),
+        ]
+    )
+
+    rule_tree_session_service.run_rule_tree_generation_task(
+        session_id=session.id,
+        requirement_text="用户登录需求",
+        title="异步规则树",
+        llm_client=fake_llm,
+        db_session_factory=SessionLocal,
+        progress_callback=recorded_stages.append,
+    )
+
+    db = SessionLocal()
+    persisted = db.query(RuleTreeSession).filter(RuleTreeSession.id == session.id).first()
+    db.close()
+
+    assert recorded_stages == ["generating", "reviewing", "failed"]
+    assert persisted.status == RuleTreeSessionStatus.failed
+    assert persisted.progress_stage == "failed"
+    assert persisted.generated_tree_snapshot is not None
+    assert persisted.reviewed_tree_snapshot is None
+    assert persisted.last_error == "review failed"
+    assert persisted.current_task_finished_at is not None

@@ -3,7 +3,7 @@ import json
 import threading
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -67,6 +67,15 @@ _IN_PROGRESS_SESSION_STATUSES = {
 
 class RuleTreeSessionConflictError(ValueError):
     pass
+
+
+_STAGE_PROGRESS = {
+    RuleTreeSessionStatus.generating.value: ("正在生成规则树", 45),
+    RuleTreeSessionStatus.reviewing.value: ("正在复核规则树", 80),
+    RuleTreeSessionStatus.saving.value: ("正在保存规则树", 95),
+    RuleTreeSessionStatus.completed.value: ("规则树生成完成", 100),
+    RuleTreeSessionStatus.failed.value: ("规则树生成失败", 100),
+}
 
 
 def _json_dumps(value: Any) -> str:
@@ -402,14 +411,115 @@ def _vision_preprocess(llm: Any, image_path: str, description: str) -> str:
     return (understanding or description or "")[:4000]
 
 
+def _persist_progress(
+    db: Session,
+    session: RuleTreeSession,
+    *,
+    status: RuleTreeSessionStatus,
+    last_error: Optional[str] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> None:
+    progress_message, progress_percent = _STAGE_PROGRESS[status.value]
+    session.status = status
+    session.progress_stage = status.value
+    session.progress_message = progress_message
+    session.progress_percent = progress_percent
+    session.last_error = last_error
+    if session.current_task_started_at is None:
+        session.current_task_started_at = datetime.utcnow()
+    if status in {RuleTreeSessionStatus.completed, RuleTreeSessionStatus.failed, RuleTreeSessionStatus.interrupted}:
+        session.current_task_finished_at = datetime.utcnow()
+    else:
+        session.current_task_finished_at = None
+    db.commit()
+    db.refresh(session)
+    if progress_callback:
+        progress_callback(status.value)
+
+
 def run_rule_tree_generation_task(
     session_id: int,
     requirement_text: str,
     title: Optional[str] = None,
     image_path: Optional[str] = None,
     llm_client: Optional[Any] = None,
+    db_session_factory: Callable[[], Session] = SessionLocal,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> None:
-    return None
+    db = db_session_factory()
+    try:
+        session, _ = _get_session_with_requirement(db, session_id)
+        if title:
+            session.title = title.strip() or session.title
+        _persist_progress(
+            db,
+            session,
+            status=RuleTreeSessionStatus.generating,
+            progress_callback=progress_callback,
+        )
+
+        llm = llm_client or LLMClient()
+        effective_text = requirement_text
+        if image_path:
+            vision_understanding = _vision_preprocess(llm, image_path, requirement_text)
+            effective_text = (
+                "{req}\n\n【流程图解析结果】\n{vision}".format(req=requirement_text, vision=vision_understanding)
+            )
+
+        wrapped_requirement = GENERATE_USER_TEMPLATE.format(requirement_text=effective_text)
+        base_messages = [
+            {"role": "system", "content": GENERATE_SYSTEM_PROMPT},
+            {"role": "user", "content": wrapped_requirement},
+        ]
+        generated_payload = llm.chat_with_messages(base_messages, response_format={"type": "json_object"})
+        generated_tree = _normalize_tree_payload(generated_payload)
+        session.generated_tree_snapshot = _json_dumps(generated_tree)
+        _append_message(db, session_id, "user", requirement_text, "generate")
+        _append_message(db, session_id, "assistant", _json_dumps(generated_tree), "generate", tree_snapshot=generated_tree)
+        _persist_progress(
+            db,
+            session,
+            status=RuleTreeSessionStatus.reviewing,
+            progress_callback=progress_callback,
+        )
+
+        review_messages = base_messages + [
+            {"role": "assistant", "content": _json_dumps(generated_tree)},
+            {"role": "user", "content": REVIEW_USER_PROMPT},
+        ]
+        reviewed_payload = llm.chat_with_messages(review_messages, response_format={"type": "json_object"})
+        reviewed_tree = _normalize_tree_payload(reviewed_payload)
+        session.reviewed_tree_snapshot = _json_dumps(reviewed_tree)
+        _append_message(db, session_id, "user", REVIEW_USER_PROMPT, "review")
+        _append_message(db, session_id, "assistant", _json_dumps(reviewed_tree), "review", tree_snapshot=reviewed_tree)
+        _persist_progress(
+            db,
+            session,
+            status=RuleTreeSessionStatus.saving,
+            progress_callback=progress_callback,
+        )
+        _persist_progress(
+            db,
+            session,
+            status=RuleTreeSessionStatus.completed,
+            progress_callback=progress_callback,
+        )
+    except Exception as exc:
+        db.rollback()
+        session = db.query(RuleTreeSession).filter(RuleTreeSession.id == session_id).first()
+        if session:
+            _persist_progress(
+                db,
+                session,
+                status=RuleTreeSessionStatus.failed,
+                last_error=str(exc),
+                progress_callback=progress_callback,
+            )
+        else:
+            db.close()
+            raise
+    finally:
+        db.close()
 
 
 def _launch_generation_worker(
@@ -428,6 +538,7 @@ def _launch_generation_worker(
             "title": title,
             "image_path": image_path,
             "llm_client": llm_client,
+            "db_session_factory": SessionLocal,
         },
         daemon=True,
     )
