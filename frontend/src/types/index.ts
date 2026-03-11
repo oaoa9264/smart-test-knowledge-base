@@ -115,13 +115,43 @@ export interface DiffRecordRead {
   result: SemanticDiffResult;
 }
 
+export type RuleTreeSessionStatus =
+  | "active"
+  | "generating"
+  | "reviewing"
+  | "saving"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "confirmed"
+  | "archived"
+  | string;
+
+export type RuleTreeProgressStage =
+  | "queued"
+  | "generating"
+  | "reviewing"
+  | "saving"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | string;
+
 export interface RuleTreeSession {
   id: number;
   requirement_id: number;
   title: string;
-  status: "active" | "confirmed" | "archived" | string;
+  status: RuleTreeSessionStatus;
   confirmed_tree_snapshot: string | null;
   requirement_text_snapshot: string | null;
+  progress_stage: RuleTreeProgressStage | null;
+  progress_message: string | null;
+  progress_percent: number | null;
+  last_error: string | null;
+  generated_tree_snapshot: string | null;
+  reviewed_tree_snapshot: string | null;
+  current_task_started_at: string | null;
+  current_task_finished_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -139,6 +169,11 @@ export interface RuleTreeMessage {
 export interface RuleTreeSessionDetail {
   session: RuleTreeSession;
   messages: RuleTreeMessage[];
+}
+
+export interface RuleTreeSessionGenerateAcceptedResult {
+  accepted: boolean;
+  session: RuleTreeSession;
 }
 
 export interface RuleTreeSessionGenerateResult {
