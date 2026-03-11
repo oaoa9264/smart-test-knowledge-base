@@ -46,6 +46,7 @@ import {
   fetchRuleTreeSessionDetail,
   fetchRuleTreeSessions,
   generateRuleTreeSession,
+  isRuleTreeSessionInProgress,
   updateRuleTreeSession,
 } from "../../api/ruleTreeSession";
 import { createRuleNode, deleteRuleNode, fetchRuleTree, updateRuleNode } from "../../api/rules";
@@ -53,6 +54,7 @@ import { deleteDiffRecord, fetchDiffHistory, fetchSemanticDiff } from "../../api
 import { useAppStore } from "../../stores/appStore";
 import type {
   DiffRecordRead,
+  DecisionTreeNode,
   GeneratedTestCase,
   RuleTreeSession,
   RuleTreeSessionDetail,
@@ -62,6 +64,7 @@ import type {
   RiskItem,
   RiskLevel,
   RuleNode,
+  RuleTreeProgressStage,
   SemanticDiffResult,
   TestPlanSession,
   TestPoint,
@@ -86,6 +89,105 @@ const nodeTypeOptions = [
   { label: "动作", value: "action" },
   { label: "异常", value: "exception" },
 ];
+
+const RULE_TREE_PROGRESS_ITEMS: Array<{ key: RuleTreeProgressStage; title: string }> = [
+  { key: "generating", title: "生成规则树" },
+  { key: "reviewing", title: "AI 复核" },
+  { key: "saving", title: "保存结果" },
+  { key: "completed", title: "完成" },
+];
+
+const RULE_TREE_STATUS_META: Record<string, { color: string; label: string }> = {
+  active: { color: "default", label: "待生成" },
+  generating: { color: "processing", label: "生成中" },
+  reviewing: { color: "processing", label: "复核中" },
+  saving: { color: "processing", label: "保存中" },
+  completed: { color: "success", label: "已完成" },
+  failed: { color: "error", label: "失败" },
+  interrupted: { color: "warning", label: "已中断" },
+  confirmed: { color: "blue", label: "已应用" },
+  archived: { color: "default", label: "已归档" },
+};
+
+function parseSessionTreeSnapshot(snapshot: string | null | undefined): { decision_tree: { nodes: DecisionTreeNode[] } } | null {
+  if (!snapshot) return null;
+  try {
+    const parsed = JSON.parse(snapshot) as { decision_tree?: { nodes?: DecisionTreeNode[] } };
+    const nodes = Array.isArray(parsed?.decision_tree?.nodes) ? parsed.decision_tree.nodes : [];
+    return { decision_tree: { nodes } };
+  } catch {
+    return null;
+  }
+}
+
+function buildGeneratedTreeDiffSummary(
+  beforeTree: { decision_tree: { nodes: DecisionTreeNode[] } } | null,
+  afterTree: { decision_tree: { nodes: DecisionTreeNode[] } } | null,
+): { added: number; deleted: number; modified: number; unchanged: number } {
+  const beforeNodes = beforeTree?.decision_tree.nodes || [];
+  const afterNodes = afterTree?.decision_tree.nodes || [];
+  const beforeMap = new Map(beforeNodes.map((node) => [node.id, node]));
+  const afterMap = new Map(afterNodes.map((node) => [node.id, node]));
+  const allIds = new Set([...beforeMap.keys(), ...afterMap.keys()]);
+  const summary = { added: 0, deleted: 0, modified: 0, unchanged: 0 };
+
+  allIds.forEach((nodeId) => {
+    const before = beforeMap.get(nodeId);
+    const after = afterMap.get(nodeId);
+    if (!before && after) {
+      summary.added += 1;
+      return;
+    }
+    if (before && !after) {
+      summary.deleted += 1;
+      return;
+    }
+    if (!before || !after) {
+      return;
+    }
+    if (
+      before.type !== after.type ||
+      before.content !== after.content ||
+      before.parent_id !== after.parent_id ||
+      before.risk_level !== after.risk_level
+    ) {
+      summary.modified += 1;
+      return;
+    }
+    summary.unchanged += 1;
+  });
+
+  return summary;
+}
+
+function buildSessionGenerateResultFromSession(session?: RuleTreeSession | null): RuleTreeSessionGenerateResult | null {
+  if (!session) return null;
+  const generatedTree = parseSessionTreeSnapshot(session.generated_tree_snapshot);
+  const reviewedTree =
+    parseSessionTreeSnapshot(session.reviewed_tree_snapshot) ||
+    parseSessionTreeSnapshot(session.confirmed_tree_snapshot) ||
+    generatedTree;
+
+  if (!generatedTree && !reviewedTree) {
+    return null;
+  }
+
+  const normalizedGeneratedTree = generatedTree || reviewedTree;
+  const normalizedReviewedTree = reviewedTree || generatedTree;
+  if (!normalizedGeneratedTree || !normalizedReviewedTree) {
+    return null;
+  }
+
+  return {
+    session,
+    generated_tree: normalizedGeneratedTree,
+    reviewed_tree: normalizedReviewedTree,
+    diff: {
+      summary: buildGeneratedTreeDiffSummary(normalizedGeneratedTree, normalizedReviewedTree),
+      node_changes: [],
+    },
+  };
+}
 
 type RuleTreeNavNode = {
   key: string;
@@ -341,8 +443,10 @@ export default function RuleTreePage() {
   const mindMapRef = useRef<MindMapWrapperRef | null>(null);
   const canvasSyncTimerRef = useRef<number | null>(null);
   const canvasSyncSuppressTimerRef = useRef<number | null>(null);
+  const sessionPollTimerRef = useRef<number | null>(null);
   const isCanvasSyncingRef = useRef(false);
   const suppressCanvasSyncRef = useRef(false);
+  const previousSessionStatusRef = useRef<string | null>(null);
   const pendingCanvasTreeRef = useRef<MindMapTreeNode | null>(null);
   const domainNodesRef = useRef<RuleNode[]>([]);
   const activeRequirementIdRef = useRef<number | null>(activeRequirementId);
@@ -470,16 +574,76 @@ export default function RuleTreePage() {
     reloadSessions(activeRequirementId).catch((error) => message.error(getErrorMessage(error, "加载会话失败")));
   }, [activeRequirementId, reloadSessions]);
 
+  const loadSessionDetail = useCallback(
+    async (sessionId: number) => {
+      const detail = await fetchRuleTreeSessionDetail(sessionId);
+      setSessionDetail(detail);
+      setSessions((prev) => prev.map((item) => (item.id === detail.session.id ? detail.session : item)));
+      setSessionGenerateResult(buildSessionGenerateResultFromSession(detail.session));
+      const fallbackRequirementText = requirements.find((item) => item.id === detail.session.requirement_id)?.raw_text || "";
+      setSessionRequirementText(detail.session.requirement_text_snapshot || fallbackRequirementText);
+      setSessionTitleInput(detail.session.title);
+      setSessionConfirmed(detail.session.status === "confirmed");
+      return detail;
+    },
+    [requirements],
+  );
+
   useEffect(() => {
     setSessionConfirmed(false);
     if (!selectedSessionId) {
       setSessionDetail(null);
+      setSessionGenerateResult(null);
+      setSessionUpdateResult(null);
+      previousSessionStatusRef.current = null;
       return;
     }
-    fetchRuleTreeSessionDetail(selectedSessionId)
-      .then(setSessionDetail)
+    loadSessionDetail(selectedSessionId)
       .catch((error) => message.error(getErrorMessage(error, "加载会话详情失败")));
-  }, [selectedSessionId]);
+  }, [loadSessionDetail, selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedSessionId || !sessionDetail || sessionDetail.session.id !== selectedSessionId) {
+      return;
+    }
+    if (sessionPollTimerRef.current) {
+      window.clearTimeout(sessionPollTimerRef.current);
+      sessionPollTimerRef.current = null;
+    }
+    if (!isRuleTreeSessionInProgress(sessionDetail.session)) {
+      return;
+    }
+    sessionPollTimerRef.current = window.setTimeout(() => {
+      loadSessionDetail(selectedSessionId).catch((error) => message.error(getErrorMessage(error, "刷新会话状态失败")));
+    }, 1500);
+    return () => {
+      if (sessionPollTimerRef.current) {
+        window.clearTimeout(sessionPollTimerRef.current);
+        sessionPollTimerRef.current = null;
+      }
+    };
+  }, [loadSessionDetail, selectedSessionId, sessionDetail]);
+
+  useEffect(() => {
+    const nextStatus = sessionDetail?.session.status || null;
+    const prevStatus = previousSessionStatusRef.current;
+    previousSessionStatusRef.current = nextStatus;
+
+    if (!prevStatus || !nextStatus || prevStatus === nextStatus) {
+      return;
+    }
+    if (nextStatus === "completed") {
+      message.success("规则树后台生成完成");
+      return;
+    }
+    if (nextStatus === "failed") {
+      message.error(sessionDetail?.session.last_error || "规则树生成失败");
+      return;
+    }
+    if (nextStatus === "interrupted") {
+      message.warning(sessionDetail?.session.last_error || "规则树生成已中断");
+    }
+  }, [sessionDetail]);
 
   useEffect(() => {
     if (canvasSyncTimerRef.current) {
@@ -503,6 +667,9 @@ export default function RuleTreePage() {
       }
       if (canvasSyncSuppressTimerRef.current) {
         window.clearTimeout(canvasSyncSuppressTimerRef.current);
+      }
+      if (sessionPollTimerRef.current) {
+        window.clearTimeout(sessionPollTimerRef.current);
       }
       pendingCanvasTreeRef.current = null;
       suppressCanvasSyncRef.current = false;
@@ -1043,6 +1210,30 @@ export default function RuleTreePage() {
     return 0;
   }, [selectedSessionId, sessionConfirmed, sessionGenerateResult, sessionUpdateResult]);
 
+  const currentRuleTreeSession = useMemo(
+    () => sessionDetail?.session || sessions.find((item) => item.id === selectedSessionId) || null,
+    [selectedSessionId, sessionDetail, sessions],
+  );
+
+  const currentRuleTreeSessionStatusMeta = useMemo(() => {
+    if (!currentRuleTreeSession) return null;
+    return RULE_TREE_STATUS_META[currentRuleTreeSession.status] || { color: "default", label: currentRuleTreeSession.status };
+  }, [currentRuleTreeSession]);
+
+  const currentRuleTreeSessionStageIndex = useMemo(() => {
+    const stage = currentRuleTreeSession?.progress_stage || currentRuleTreeSession?.status;
+    const index = RULE_TREE_PROGRESS_ITEMS.findIndex((item) => item.key === stage);
+    if (currentRuleTreeSession?.status === "confirmed") {
+      return RULE_TREE_PROGRESS_ITEMS.length - 1;
+    }
+    return index >= 0 ? index : 0;
+  }, [currentRuleTreeSession]);
+
+  const currentRuleTreeSessionInProgress = useMemo(
+    () => isRuleTreeSessionInProgress(currentRuleTreeSession),
+    [currentRuleTreeSession],
+  );
+
   const openSessionPanel = () => {
     if (!activeRequirementId) {
       message.warning("请先选择需求");
@@ -1071,17 +1262,21 @@ export default function RuleTreePage() {
     setSessionLoading(true);
     try {
       const rawFile = sessionImageFile[0]?.originFileObj as File | undefined;
-      const result = await generateRuleTreeSession(selectedSessionId, {
+      const accepted = await generateRuleTreeSession(selectedSessionId, {
         requirement_text: sessionRequirementText.trim(),
         title: sessionTitleInput.trim() || undefined,
         image: rawFile,
       });
-      setSessionGenerateResult(result);
+      setSessionDetail((prev) => ({
+        session: accepted.session,
+        messages: prev?.messages || [],
+      }));
+      setSessions((prev) => prev.map((item) => (item.id === accepted.session.id ? accepted.session : item)));
+      setSessionGenerateResult(null);
       setSessionUpdateResult(null);
       setSessionConfirmed(false);
-      const detail = await fetchRuleTreeSessionDetail(selectedSessionId);
-      setSessionDetail(detail);
-      message.success("规则树生成完成");
+      await loadSessionDetail(selectedSessionId);
+      message.success("已开始后台生成规则树");
     } catch (error) {
       message.error(getErrorMessage(error, "会话生成失败"));
     } finally {
@@ -1094,7 +1289,7 @@ export default function RuleTreePage() {
       message.warning("请先选择会话");
       return;
     }
-    const treeJson = sessionUpdateResult?.updated_tree || sessionGenerateResult?.reviewed_tree;
+    const treeJson = sessionUpdateResult?.updated_tree || sessionGenerateResult?.reviewed_tree || sessionGenerateResult?.generated_tree;
     if (!treeJson) {
       message.warning("暂无可确认导入的会话树");
       return;
@@ -1107,8 +1302,7 @@ export default function RuleTreePage() {
         requirement_text: sessionUpdateText.trim() || sessionRequirementText.trim(),
       });
       await reload();
-      const detail = await fetchRuleTreeSessionDetail(selectedSessionId);
-      setSessionDetail(detail);
+      await loadSessionDetail(selectedSessionId);
       message.success(`确认导入成功，写入 ${resp.imported_nodes} 个节点`);
       setSessionConfirmed(true);
     } catch (error) {
@@ -1128,8 +1322,7 @@ export default function RuleTreePage() {
         requirement_text: sessionUpdateText.trim() || sessionRequirementText.trim() || "",
       });
       await reload();
-      const detail = await fetchRuleTreeSessionDetail(selectedSessionId);
-      setSessionDetail(detail);
+      await loadSessionDetail(selectedSessionId);
       message.success(`已从历史记录恢复，写入 ${resp.imported_nodes} 个节点`);
       setSessionConfirmed(true);
     } catch (error) {
@@ -1157,8 +1350,7 @@ export default function RuleTreePage() {
       setSessionUpdateResult(result);
       setSessionConfirmed(false);
       setShowSessionUpdate(false);
-      const detail = await fetchRuleTreeSessionDetail(selectedSessionId);
-      setSessionDetail(detail);
+      await loadSessionDetail(selectedSessionId);
       message.success("需求更新完成");
     } catch (error) {
       message.error(getErrorMessage(error, "会话增量更新失败"));
@@ -1813,7 +2005,7 @@ export default function RuleTreePage() {
               placeholder="选择或新建会话"
               options={sessions.map((item) => ({
                 value: item.id,
-                label: `${item.title} (${item.status})`,
+                label: `${item.title} (${(RULE_TREE_STATUS_META[item.status] || { label: item.status }).label})`,
               }))}
               onChange={(value) => setSelectedSessionId(value)}
             />
@@ -1865,11 +2057,73 @@ export default function RuleTreePage() {
             type="primary"
             onClick={handleGenerateBySession}
             loading={sessionLoading}
-            disabled={!selectedSessionId || !sessionRequirementText.trim()}
+            disabled={!selectedSessionId || !sessionRequirementText.trim() || currentRuleTreeSessionInProgress}
           >
-            开始生成
+            {currentRuleTreeSessionInProgress ? "生成中" : "开始生成"}
           </Button>
         </div>
+
+        {currentRuleTreeSession && currentRuleTreeSessionStatusMeta && (
+          <div style={{ marginBottom: 16, padding: 12, border: "1px solid #eef2f7", borderRadius: 8, background: "#fafcff" }}>
+            <Space style={{ marginBottom: 8, flexWrap: "wrap" }}>
+              <Tag color={currentRuleTreeSessionStatusMeta.color}>{currentRuleTreeSessionStatusMeta.label}</Tag>
+              {currentRuleTreeSession.progress_stage && (
+                <Typography.Text type="secondary">阶段：{currentRuleTreeSession.progress_stage}</Typography.Text>
+              )}
+              {currentRuleTreeSession.current_task_started_at && (
+                <Typography.Text type="secondary">
+                  开始于 {new Date(currentRuleTreeSession.current_task_started_at).toLocaleString()}
+                </Typography.Text>
+              )}
+            </Space>
+
+            {(currentRuleTreeSessionInProgress || currentRuleTreeSession.status === "completed" || currentRuleTreeSession.status === "confirmed") && (
+              <Steps
+                current={currentRuleTreeSessionStageIndex}
+                size="small"
+                style={{ marginBottom: 12 }}
+                items={RULE_TREE_PROGRESS_ITEMS.map((item) => ({ title: item.title }))}
+              />
+            )}
+
+            {currentRuleTreeSessionInProgress && (
+              <Alert
+                type="info"
+                showIcon
+                message={currentRuleTreeSession.progress_message || "后台正在生成规则树"}
+                description="页面会自动轮询最新状态，刷新后重新进入会话也可以恢复当前进度。"
+              />
+            )}
+
+            {currentRuleTreeSession.status === "failed" && (
+              <Alert
+                type="error"
+                showIcon
+                message="规则树生成失败"
+                description={currentRuleTreeSession.last_error || "后台生成失败，请重试"}
+                action={
+                  <Button size="small" danger onClick={handleGenerateBySession} loading={sessionLoading}>
+                    重新生成
+                  </Button>
+                }
+              />
+            )}
+
+            {currentRuleTreeSession.status === "interrupted" && (
+              <Alert
+                type="warning"
+                showIcon
+                message="规则树生成已中断"
+                description={currentRuleTreeSession.last_error || "后端重启后任务中断，请重新发起生成"}
+                action={
+                  <Button size="small" onClick={handleGenerateBySession} loading={sessionLoading}>
+                    重新生成
+                  </Button>
+                }
+              />
+            )}
+          </div>
+        )}
 
         {sessionGenerateResult && (
           <Alert
