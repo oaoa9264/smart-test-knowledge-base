@@ -6,12 +6,12 @@ export async function fetchProjects(): Promise<Project[]> {
   return data;
 }
 
-export async function createProject(payload: { name: string; description?: string }): Promise<Project> {
+export async function createProject(payload: { name: string; description?: string; product_code?: string }): Promise<Project> {
   const { data } = await http.post<Project>("/api/projects", payload);
   return data;
 }
 
-export async function updateProject(projectId: number, payload: { name: string; description?: string }): Promise<Project> {
+export async function updateProject(projectId: number, payload: { name: string; description?: string; product_code?: string }): Promise<Project> {
   const { data } = await http.put<Project>(`/api/projects/${projectId}`, payload);
   return data;
 }

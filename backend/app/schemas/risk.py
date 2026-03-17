@@ -17,6 +17,9 @@ class RiskItemRead(BaseModel):
     decision: str
     decision_reason: Optional[str] = None
     decided_at: Optional[datetime] = None
+    risk_source: str = "rule_tree"
+    clarification_text: Optional[str] = None
+    doc_update_needed: bool = False
     created_at: Optional[datetime] = None
 
     class Config:
@@ -27,6 +30,11 @@ class RiskDecisionRequest(BaseModel):
     decision: Literal["accepted", "ignored"]
     reason: str
     auto_create_node: bool = False
+
+
+class RiskClarifyRequest(BaseModel):
+    clarification_text: str
+    doc_update_needed: bool = False
 
 
 class RiskAnalyzeRequest(BaseModel):

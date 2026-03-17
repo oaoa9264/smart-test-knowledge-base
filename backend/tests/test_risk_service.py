@@ -66,8 +66,8 @@ def test_analyze_risks_merges_overlapping_requests_and_replaces_previous_results
         },
     ]
 
-    def fake_call_llm_for_risks(raw_text, tree_nodes_text, llm_client=None):
-        del raw_text, tree_nodes_text, llm_client
+    def fake_call_llm_for_risks(raw_text, tree_nodes_text, llm_client=None, product_context=None):
+        del raw_text, tree_nodes_text, llm_client, product_context
         with call_count_lock:
             call_count["value"] += 1
             current_count = call_count["value"]

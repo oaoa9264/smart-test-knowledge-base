@@ -7,6 +7,7 @@ export interface Project {
   id: number;
   name: string;
   description?: string;
+  product_code?: string | null;
 }
 
 export interface Requirement {
@@ -339,7 +340,10 @@ export type RiskCategory =
   | "flow_gap"
   | "data_integrity"
   | "boundary"
-  | "security";
+  | "security"
+  | "product_knowledge";
+
+export type RiskSource = "rule_tree" | "product_knowledge";
 
 export type RiskDecisionType = "pending" | "accepted" | "ignored";
 
@@ -354,6 +358,9 @@ export interface RiskItem {
   decision: RiskDecisionType;
   decision_reason: string | null;
   decided_at: string | null;
+  risk_source: RiskSource;
+  clarification_text: string | null;
+  doc_update_needed: boolean;
   created_at: string | null;
 }
 
@@ -368,6 +375,44 @@ export interface RiskListResponse {
 export interface RiskAnalyzeResponse {
   risks: RiskItem[];
   total: number;
+}
+
+export interface ProductDoc {
+  id: number;
+  product_code: string;
+  name: string;
+  description?: string | null;
+  file_path?: string | null;
+  version: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ProductDocChunk {
+  id: number;
+  product_doc_id: number;
+  stage_key: string;
+  title: string;
+  content: string;
+  sort_order: number;
+  keywords?: string | null;
+}
+
+export interface ProductDocDetail extends ProductDoc {
+  chunks: ProductDocChunk[];
+}
+
+export interface ProductDocUpdate {
+  id: number;
+  product_doc_id: number;
+  chunk_id?: number | null;
+  risk_item_id?: string | null;
+  original_content?: string | null;
+  suggested_content?: string | null;
+  status: "pending" | "approved" | "rejected";
+  reviewed_at?: string | null;
+  applied_at?: string | null;
+  created_at?: string | null;
 }
 
 export type RecoMode = "FULL" | "CHANGE";

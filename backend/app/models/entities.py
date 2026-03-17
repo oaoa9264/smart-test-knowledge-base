@@ -2,6 +2,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Enum,
@@ -63,12 +64,24 @@ class RiskCategory(str, enum.Enum):
     data_integrity = "data_integrity"
     boundary = "boundary"
     security = "security"
+    product_knowledge = "product_knowledge"
+
+
+class RiskSource(str, enum.Enum):
+    rule_tree = "rule_tree"
+    product_knowledge = "product_knowledge"
 
 
 class RiskDecision(str, enum.Enum):
     pending = "pending"
     accepted = "accepted"
     ignored = "ignored"
+
+
+class DocUpdateStatus(str, enum.Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
 
 
 class RecoMode(str, enum.Enum):
@@ -118,6 +131,7 @@ class Project(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(120), nullable=False, unique=True)
     description = Column(Text, nullable=True)
+    product_code = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     requirements = relationship("Requirement", back_populates="project", cascade="all, delete-orphan")
@@ -266,6 +280,9 @@ class RiskItem(Base):
     decision = Column(Enum(RiskDecision), default=RiskDecision.pending, nullable=False)
     decision_reason = Column(Text, nullable=True)
     decided_at = Column(DateTime, nullable=True)
+    risk_source = Column(Enum(RiskSource), default=RiskSource.rule_tree, nullable=False)
+    clarification_text = Column(Text, nullable=True)
+    doc_update_needed = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     requirement = relationship("Requirement", back_populates="risk_items")
@@ -346,3 +363,52 @@ class DiffRecord(Base):
     project = relationship("Project")
     base_requirement = relationship("Requirement", foreign_keys=[base_requirement_id])
     compare_requirement = relationship("Requirement", foreign_keys=[compare_requirement_id])
+
+
+class ProductDoc(Base):
+    __tablename__ = "product_docs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_code = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    file_path = Column(String(512), nullable=True)
+    version = Column(Integer, default=1, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    chunks = relationship("ProductDocChunk", back_populates="product_doc", cascade="all, delete-orphan")
+    updates = relationship("ProductDocUpdate", back_populates="product_doc", cascade="all, delete-orphan")
+
+
+class ProductDocChunk(Base):
+    __tablename__ = "product_doc_chunks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_doc_id = Column(Integer, ForeignKey("product_docs.id"), nullable=False, index=True)
+    stage_key = Column(String(64), nullable=False)
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False)
+    keywords = Column(Text, nullable=True)
+
+    product_doc = relationship("ProductDoc", back_populates="chunks")
+
+
+class ProductDocUpdate(Base):
+    __tablename__ = "product_doc_updates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_doc_id = Column(Integer, ForeignKey("product_docs.id"), nullable=False, index=True)
+    chunk_id = Column(Integer, ForeignKey("product_doc_chunks.id"), nullable=True)
+    risk_item_id = Column(String(64), ForeignKey("risk_items.id"), nullable=True)
+    original_content = Column(Text, nullable=True)
+    suggested_content = Column(Text, nullable=True)
+    status = Column(Enum(DocUpdateStatus), default=DocUpdateStatus.pending, nullable=False)
+    reviewed_at = Column(DateTime, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    product_doc = relationship("ProductDoc", back_populates="updates")
+    chunk = relationship("ProductDocChunk")
+    risk_item = relationship("RiskItem")

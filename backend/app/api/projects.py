@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
-    project = Project(name=payload.name, description=payload.description)
+    project = Project(name=payload.name, description=payload.description, product_code=payload.product_code)
     db.add(project)
     db.commit()
     db.refresh(project)
@@ -49,6 +49,7 @@ def update_project(project_id: int, payload: ProjectUpdate, db: Session = Depend
         raise HTTPException(status_code=404, detail="project not found")
     project.name = payload.name
     project.description = payload.description
+    project.product_code = payload.product_code
     db.commit()
     db.refresh(project)
     return project

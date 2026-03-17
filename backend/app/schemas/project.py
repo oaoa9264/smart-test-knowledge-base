@@ -6,11 +6,13 @@ from pydantic import BaseModel
 class ProjectCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    product_code: Optional[str] = None
 
 
 class ProjectUpdate(BaseModel):
     name: str
     description: Optional[str] = None
+    product_code: Optional[str] = None
 
 
 class ProjectRead(ProjectCreate):

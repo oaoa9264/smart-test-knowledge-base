@@ -4,6 +4,7 @@ import { Layout, Menu, Select, Space, Typography, message } from "antd";
 import {
   AppstoreOutlined,
   ClusterOutlined,
+  FileTextOutlined,
   FireOutlined,
   FolderOpenOutlined,
   TableOutlined,
@@ -15,6 +16,7 @@ import RuleTreePage from "./pages/RuleTree";
 import TestCasesPage from "./pages/TestCases";
 import CoveragePage from "./pages/Coverage";
 import RecommendationPage from "./pages/Recommendation";
+import ProductDocsPage from "./pages/ProductDocs";
 
 const { Header, Sider, Content } = Layout;
 
@@ -24,6 +26,7 @@ const menuItems = [
   { key: "/test-cases", label: <Link to="/test-cases">用例管理</Link>, icon: <AppstoreOutlined /> },
   { key: "/coverage", label: <Link to="/coverage">覆盖矩阵</Link>, icon: <TableOutlined /> },
   { key: "/recommendation", label: <Link to="/recommendation">回归推荐</Link>, icon: <FireOutlined /> },
+  { key: "/product-docs", label: <Link to="/product-docs">产品文档</Link>, icon: <FileTextOutlined /> },
 ];
 
 function AppShell() {
@@ -143,6 +146,7 @@ function AppShell() {
             <Route path="/test-cases" element={<TestCasesPage />} />
             <Route path="/coverage" element={<CoveragePage />} />
             <Route path="/recommendation" element={<RecommendationPage />} />
+            <Route path="/product-docs" element={<ProductDocsPage />} />
           </Routes>
         </Content>
       </Layout>

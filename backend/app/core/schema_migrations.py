@@ -61,3 +61,22 @@ def ensure_rule_tree_session_async_columns(engine: Engine) -> None:
             "current_task_finished_at": "current_task_finished_at DATETIME",
         },
     )
+
+
+def ensure_product_knowledge_columns(engine: Engine) -> None:
+    _ensure_additive_columns(
+        engine,
+        "projects",
+        {
+            "product_code": "product_code VARCHAR(64)",
+        },
+    )
+    _ensure_additive_columns(
+        engine,
+        "risk_items",
+        {
+            "risk_source": "risk_source VARCHAR(20) DEFAULT 'rule_tree'",
+            "clarification_text": "clarification_text TEXT",
+            "doc_update_needed": "doc_update_needed BOOLEAN DEFAULT 0",
+        },
+    )

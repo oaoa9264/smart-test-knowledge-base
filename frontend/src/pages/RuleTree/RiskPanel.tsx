@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  Checkbox,
   Collapse,
+  Divider,
   Empty,
   Form,
   Input,
@@ -22,9 +24,11 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   ScanOutlined,
+  BookOutlined,
+  BranchesOutlined,
 } from "@ant-design/icons";
-import type { RiskCategory, RiskDecisionType, RiskItem } from "../../types";
-import { analyzeRisks, decideRisk, deleteRisk, fetchRisks } from "../../api/risks";
+import type { RiskCategory, RiskDecisionType, RiskItem, RiskSource } from "../../types";
+import { analyzeRisks, clarifyRisk, decideRisk, deleteRisk, fetchRisks } from "../../api/risks";
 
 const categoryLabels: Record<RiskCategory, string> = {
   input_validation: "输入校验",
@@ -32,6 +36,7 @@ const categoryLabels: Record<RiskCategory, string> = {
   data_integrity: "数据完整性",
   boundary: "边界条件",
   security: "安全风险",
+  product_knowledge: "产品知识",
 };
 
 const categoryColors: Record<RiskCategory, string> = {
@@ -40,6 +45,7 @@ const categoryColors: Record<RiskCategory, string> = {
   data_integrity: "purple",
   boundary: "blue",
   security: "volcano",
+  product_knowledge: "cyan",
 };
 
 const riskLevelColors: Record<string, string> = {
@@ -62,6 +68,16 @@ const decisionIcons: Record<RiskDecisionType, React.ReactNode> = {
   ignored: <CloseCircleOutlined style={{ color: "#d9d9d9" }} />,
 };
 
+const sourceLabels: Record<RiskSource, string> = {
+  rule_tree: "技术风险",
+  product_knowledge: "产品知识风险",
+};
+
+const sourceIcons: Record<RiskSource, React.ReactNode> = {
+  rule_tree: <BranchesOutlined />,
+  product_knowledge: <BookOutlined />,
+};
+
 type RiskPanelProps = {
   requirementId: number | null;
   onNodeLocate?: (nodeId: string) => void;
@@ -79,6 +95,9 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     type: "accepted" | "ignored";
   } | null>(null);
   const [form] = Form.useForm();
+
+  const [clarifyModal, setClarifyModal] = useState<RiskItem | null>(null);
+  const [clarifyForm] = Form.useForm();
 
   const loadRisks = useCallback(async () => {
     if (!requirementId) {
@@ -109,12 +128,17 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     return { pending, accepted, ignored, total: risks.length };
   }, [risks]);
 
-  const groupedRisks = useMemo(() => {
-    const groups: Record<string, RiskItem[]> = {};
+  const groupedBySource = useMemo(() => {
+    const groups: Record<RiskSource, Record<string, RiskItem[]>> = {
+      rule_tree: {},
+      product_knowledge: {},
+    };
     for (const risk of risks) {
+      const source = risk.risk_source || "rule_tree";
       const cat = risk.category;
-      if (!groups[cat]) groups[cat] = [];
-      groups[cat].push(risk);
+      if (!groups[source]) groups[source] = {};
+      if (!groups[source][cat]) groups[source][cat] = [];
+      groups[source][cat].push(risk);
     }
     return groups;
   }, [risks]);
@@ -122,8 +146,14 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
   const [activeKeys, setActiveKeys] = useState<string[]>([]);
 
   useEffect(() => {
-    setActiveKeys(Object.keys(groupedRisks));
-  }, [groupedRisks]);
+    const keys: string[] = [];
+    for (const source of ["rule_tree", "product_knowledge"] as RiskSource[]) {
+      for (const cat of Object.keys(groupedBySource[source] || {})) {
+        keys.push(`${source}_${cat}`);
+      }
+    }
+    setActiveKeys(keys);
+  }, [groupedBySource]);
 
   const handleAnalyze = async () => {
     if (!requirementId) return;
@@ -167,6 +197,24 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     }
   };
 
+  const handleClarify = async () => {
+    if (!clarifyModal) return;
+    const values = await clarifyForm.validateFields();
+    try {
+      await clarifyRisk(
+        clarifyModal.id,
+        values.clarification_text,
+        values.doc_update_needed ?? false,
+      );
+      message.success("澄清已保存");
+      setClarifyModal(null);
+      const newRisks = await loadRisks();
+      onRisksChange?.(newRisks);
+    } catch {
+      message.error("澄清保存失败");
+    }
+  };
+
   const handleDelete = async (riskId: string) => {
     try {
       await deleteRisk(riskId);
@@ -178,96 +226,127 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     }
   };
 
-  const collapseItems = Object.entries(groupedRisks).map(([category, items]) => ({
-    key: category,
-    label: (
-      <Space>
-        <Tag color={categoryColors[category as RiskCategory]}>
-          {categoryLabels[category as RiskCategory] || category}
+  const renderRiskCard = (risk: RiskItem) => (
+    <div
+      key={risk.id}
+      style={{
+        padding: "10px 12px",
+        borderRadius: 8,
+        border: "1px solid #f0f0f0",
+        background: risk.decision === "pending" ? "#fffbe6" : "#fafafa",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        {decisionIcons[risk.decision]}
+        <Tag
+          color={riskLevelColors[risk.risk_level]}
+          style={{ color: risk.risk_level === "medium" ? "#666" : "#fff" }}
+        >
+          {riskLevelLabels[risk.risk_level] || risk.risk_level}
         </Tag>
-        <Badge count={items.length} style={{ backgroundColor: "#8c8c8c" }} />
-      </Space>
-    ),
-    children: (
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {items.map((risk) => (
-          <div
-            key={risk.id}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 8,
-              border: "1px solid #f0f0f0",
-              background: risk.decision === "pending" ? "#fffbe6" : "#fafafa",
+        {risk.decision !== "pending" && (
+          <Tag>{risk.decision === "accepted" ? "已接受" : "已忽略"}</Tag>
+        )}
+      </div>
+      <Typography.Paragraph
+        style={{ margin: 0, fontSize: 13 }}
+        ellipsis={{ rows: 3, expandable: true }}
+      >
+        {risk.description}
+      </Typography.Paragraph>
+      <Typography.Paragraph
+        type="secondary"
+        style={{ margin: "4px 0 0", fontSize: 12 }}
+        ellipsis={{ rows: 2, expandable: true }}
+      >
+        建议：{risk.suggestion}
+      </Typography.Paragraph>
+      {risk.clarification_text && (
+        <Typography.Paragraph
+          style={{ margin: "4px 0 0", fontSize: 12, color: "#1890ff" }}
+        >
+          澄清：{risk.clarification_text}
+          {risk.doc_update_needed && <Tag color="warning" style={{ marginLeft: 4 }}>需更新文档</Tag>}
+        </Typography.Paragraph>
+      )}
+      <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+        {risk.related_node_id && (
+          <Tooltip title="定位到关联节点">
+            <Button
+              size="small"
+              type="link"
+              onClick={() => onNodeLocate?.(risk.related_node_id!)}
+            >
+              定位节点
+            </Button>
+          </Tooltip>
+        )}
+        {risk.decision === "pending" && (
+          <>
+            <Button size="small" type="primary" onClick={() => openDecisionModal(risk, "accepted")}>
+              接受
+            </Button>
+            <Button size="small" onClick={() => openDecisionModal(risk, "ignored")}>
+              忽略
+            </Button>
+          </>
+        )}
+        {risk.decision === "accepted" && (
+          <Button
+            size="small"
+            type="dashed"
+            onClick={() => {
+              setClarifyModal(risk);
+              clarifyForm.setFieldsValue({
+                clarification_text: risk.clarification_text || "",
+                doc_update_needed: risk.doc_update_needed || false,
+              });
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-              {decisionIcons[risk.decision]}
-              <Tag
-                color={riskLevelColors[risk.risk_level]}
-                style={{ color: risk.risk_level === "medium" ? "#666" : "#fff" }}
-              >
-                {riskLevelLabels[risk.risk_level] || risk.risk_level}
-              </Tag>
-              {risk.decision !== "pending" && (
-                <Tag>{risk.decision === "accepted" ? "已接受" : "已忽略"}</Tag>
-              )}
-            </div>
-            <Typography.Paragraph
-              style={{ margin: 0, fontSize: 13 }}
-              ellipsis={{ rows: 3, expandable: true }}
-            >
-              {risk.description}
-            </Typography.Paragraph>
-            <Typography.Paragraph
-              type="secondary"
-              style={{ margin: "4px 0 0", fontSize: 12 }}
-              ellipsis={{ rows: 2, expandable: true }}
-            >
-              建议：{risk.suggestion}
-            </Typography.Paragraph>
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              {risk.related_node_id && (
-                <Tooltip title="定位到关联节点">
-                  <Button
-                    size="small"
-                    type="link"
-                    onClick={() => onNodeLocate?.(risk.related_node_id!)}
-                  >
-                    定位节点
-                  </Button>
-                </Tooltip>
-              )}
-              {risk.decision === "pending" && (
-                <>
-                  <Button size="small" type="primary" onClick={() => openDecisionModal(risk, "accepted")}>
-                    接受
-                  </Button>
-                  <Button size="small" onClick={() => openDecisionModal(risk, "ignored")}>
-                    忽略
-                  </Button>
-                </>
-              )}
-              <Popconfirm
-                title="确定删除该风险项吗？"
-                onConfirm={() => handleDelete(risk.id)}
-                okText="确定"
-                cancelText="取消"
-              >
-                <Button size="small" danger>
-                  删除
-                </Button>
-              </Popconfirm>
-            </div>
-            {risk.decision_reason && (
-              <Typography.Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: "block" }}>
-                理由：{risk.decision_reason}
-              </Typography.Text>
-            )}
-          </div>
-        ))}
+            澄清
+          </Button>
+        )}
+        <Popconfirm
+          title="确定删除该风险项吗？"
+          onConfirm={() => handleDelete(risk.id)}
+          okText="确定"
+          cancelText="取消"
+        >
+          <Button size="small" danger>
+            删除
+          </Button>
+        </Popconfirm>
       </div>
-    ),
-  }));
+      {risk.decision_reason && (
+        <Typography.Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: "block" }}>
+          理由：{risk.decision_reason}
+        </Typography.Text>
+      )}
+    </div>
+  );
+
+  const buildCollapseItems = (source: RiskSource) => {
+    const cats = groupedBySource[source] || {};
+    return Object.entries(cats).map(([category, items]) => ({
+      key: `${source}_${category}`,
+      label: (
+        <Space>
+          <Tag color={categoryColors[category as RiskCategory]}>
+            {categoryLabels[category as RiskCategory] || category}
+          </Tag>
+          <Badge count={items.length} style={{ backgroundColor: "#8c8c8c" }} />
+        </Space>
+      ),
+      children: (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {items.map(renderRiskCard)}
+        </div>
+      ),
+    }));
+  };
+
+  const ruleTreeItems = buildCollapseItems("rule_tree");
+  const productItems = buildCollapseItems("product_knowledge");
 
   return (
     <div
@@ -322,12 +401,39 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
           ) : risks.length === 0 ? (
             <Empty description="暂无风险项" image={Empty.PRESENTED_IMAGE_SIMPLE} />
           ) : (
-            <Collapse
-              ghost
-              activeKey={activeKeys}
-              onChange={(keys) => setActiveKeys(keys as string[])}
-              items={collapseItems}
-            />
+            <>
+              {ruleTreeItems.length > 0 && (
+                <>
+                  <div style={{ padding: "4px 16px", display: "flex", alignItems: "center", gap: 6 }}>
+                    {sourceIcons.rule_tree}
+                    <Typography.Text strong style={{ fontSize: 13 }}>{sourceLabels.rule_tree}</Typography.Text>
+                    <Badge count={risks.filter(r => (r.risk_source || "rule_tree") === "rule_tree").length} style={{ backgroundColor: "#1890ff" }} />
+                  </div>
+                  <Collapse
+                    ghost
+                    activeKey={activeKeys}
+                    onChange={(keys) => setActiveKeys(keys as string[])}
+                    items={ruleTreeItems}
+                  />
+                </>
+              )}
+              {productItems.length > 0 && (
+                <>
+                  {ruleTreeItems.length > 0 && <Divider style={{ margin: "8px 0" }} />}
+                  <div style={{ padding: "4px 16px", display: "flex", alignItems: "center", gap: 6 }}>
+                    {sourceIcons.product_knowledge}
+                    <Typography.Text strong style={{ fontSize: 13, color: "#13c2c2" }}>{sourceLabels.product_knowledge}</Typography.Text>
+                    <Badge count={risks.filter(r => r.risk_source === "product_knowledge").length} style={{ backgroundColor: "#13c2c2" }} />
+                  </div>
+                  <Collapse
+                    ghost
+                    activeKey={activeKeys}
+                    onChange={(keys) => setActiveKeys(keys as string[])}
+                    items={productItems}
+                  />
+                </>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -348,6 +454,27 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
               <Switch />
             </Form.Item>
           )}
+        </Form>
+      </Modal>
+
+      <Modal
+        title="产品澄清"
+        open={!!clarifyModal}
+        onCancel={() => setClarifyModal(null)}
+        onOk={handleClarify}
+        okText="保存澄清"
+      >
+        <Form layout="vertical" form={clarifyForm}>
+          <Form.Item
+            name="clarification_text"
+            label="澄清说明"
+            rules={[{ required: true, message: "请填写澄清说明" }]}
+          >
+            <Input.TextArea rows={4} placeholder="请说明该风险的澄清情况" />
+          </Form.Item>
+          <Form.Item name="doc_update_needed" valuePropName="checked">
+            <Checkbox>需要更新产品文档</Checkbox>
+          </Form.Item>
         </Form>
       </Modal>
     </div>

@@ -27,8 +27,9 @@ import {
   updateProject,
   updateRequirement,
 } from "../../api/projects";
+import { fetchProductDocs } from "../../api/productDocs";
 import { useAppStore } from "../../stores/appStore";
-import type { Project, Requirement } from "../../types";
+import type { ProductDoc, Project, Requirement } from "../../types";
 import { getSourceTypeLabel } from "../../utils/enumLabels";
 
 export default function ProjectListPage() {
@@ -49,6 +50,7 @@ export default function ProjectListPage() {
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [viewRequirement, setViewRequirement] = useState<Requirement | null>(null);
   const [editingRequirement, setEditingRequirement] = useState<Requirement | null>(null);
+  const [productDocs, setProductDocs] = useState<ProductDoc[]>([]);
   const [projectForm] = Form.useForm();
   const [requirementForm] = Form.useForm();
   const [editProjectForm] = Form.useForm();
@@ -56,7 +58,17 @@ export default function ProjectListPage() {
 
   useEffect(() => {
     reloadProjects();
+    loadProductDocs();
   }, []);
+
+  const loadProductDocs = async () => {
+    try {
+      const docs = await fetchProductDocs();
+      setProductDocs(docs);
+    } catch {
+      // ignore
+    }
+  };
 
   useEffect(() => {
     if (selectedProjectId) {
@@ -128,6 +140,7 @@ export default function ProjectListPage() {
     editProjectForm.setFieldsValue({
       name: project.name,
       description: project.description,
+      product_code: project.product_code || undefined,
     });
   };
 
@@ -269,7 +282,15 @@ export default function ProjectListPage() {
                   </Space>
                 }
               >
-                <List.Item.Meta title={item.name} description={item.description || "无描述"} />
+                <List.Item.Meta
+                  title={
+                    <Space>
+                      {item.name}
+                      {item.product_code && <Tag color="cyan" style={{ fontSize: 11 }}>{item.product_code}</Tag>}
+                    </Space>
+                  }
+                  description={item.description || "无描述"}
+                />
               </List.Item>
             )}
           />
@@ -308,6 +329,13 @@ export default function ProjectListPage() {
           <Form.Item label="项目描述" name="description">
             <Input.TextArea rows={3} />
           </Form.Item>
+          <Form.Item label="所属产品" name="product_code">
+            <Select
+              allowClear
+              placeholder="选择关联的产品文档"
+              options={productDocs.map((d) => ({ label: `${d.name} (${d.product_code})`, value: d.product_code }))}
+            />
+          </Form.Item>
         </Form>
       </Modal>
 
@@ -338,6 +366,7 @@ export default function ProjectListPage() {
           <Descriptions.Item label="ID">{viewProject?.id}</Descriptions.Item>
           <Descriptions.Item label="项目名称">{viewProject?.name}</Descriptions.Item>
           <Descriptions.Item label="项目描述">{viewProject?.description || "-"}</Descriptions.Item>
+          <Descriptions.Item label="所属产品">{viewProject?.product_code || "-"}</Descriptions.Item>
         </Descriptions>
       </Modal>
 
@@ -356,6 +385,13 @@ export default function ProjectListPage() {
           </Form.Item>
           <Form.Item label="项目描述" name="description">
             <Input.TextArea rows={3} />
+          </Form.Item>
+          <Form.Item label="所属产品" name="product_code">
+            <Select
+              allowClear
+              placeholder="选择关联的产品文档"
+              options={productDocs.map((d) => ({ label: `${d.name} (${d.product_code})`, value: d.product_code }))}
+            />
           </Form.Item>
         </Form>
       </Modal>

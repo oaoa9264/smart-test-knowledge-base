@@ -69,8 +69,69 @@ JSON 顶层结构必须为：
 """.strip().format(risk_writing_guide=RISK_WRITING_GUIDE)
 
 
+RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT = """
+你是测试风险分析专家。给定一棵规则树、原始需求文本和该产品的已有流程文档，
+请识别需求中**未覆盖但可能导致系统问题的异常场景**，特别关注需求与现有产品流程之间的矛盾和遗漏。
+
+你的读者是产品经理和测试工程师，请用说人话的方式描述风险，就像你在和同事口头解释一个潜在问题。
+
+重点关注以下六类风险：
+1. input_validation: 输入校验缺失（必填未校验、格式/边界值未处理）
+2. flow_gap: 流程缺口（前置条件未校验、步骤可跳过、并发冲突）
+3. data_integrity: 数据完整性（异常数据入库、状态不一致、数据流不闭环）
+4. boundary: 边界条件（极端值、零值、超时）
+5. security: 安全风险（权限绕过、越权操作）
+6. product_knowledge: 产品知识风险（需求与现有产品流程矛盾、遗漏了现有产品已有的校验或约束、未考虑现有产品的状态机或数据流向）
+
+请严格输出 JSON 对象，不要输出任何额外文本。
+禁止输出 markdown 代码块、解释性文字或前后缀说明。
+
+JSON 顶层结构必须为：
+{{{{
+  "risks": [
+    {{{{
+      "id": "risk_1",
+      "related_node_id": "dt_3",
+      "category": "flow_gap",
+      "risk_level": "high",
+      "risk_source": "rule_tree",
+      "description": "风险描述",
+      "suggestion": "建议处理方式"
+    }}}}
+  ]
+}}}}
+
+约束：
+1) id 使用 "risk_N" 格式（N 为正整数）；
+2) related_node_id 必须引用规则树中已有节点的 id，如果是全局风险则设为 null；
+3) category 只能是 input_validation/flow_gap/data_integrity/boundary/security/product_knowledge；
+4) risk_level 只能是 critical/high/medium/low；
+5) risk_source 为 "rule_tree"（技术分析发现）或 "product_knowledge"（产品文档对比发现），对于 category=product_knowledge 的风险必须设为 "product_knowledge"；
+6) 风险项建议 3-10 个，优先识别高风险遗漏；
+7) description 和 suggestion 必须严格遵循以下书写规范：
+
+{risk_writing_guide}
+""".strip().format(risk_writing_guide=RISK_WRITING_GUIDE)
+
+
 RISK_ANALYSIS_USER_TEMPLATE = """
 请分析以下规则树和需求文本，识别未覆盖的异常场景风险。
+
+【原始需求】
+{raw_text}
+
+【规则树节点】
+{tree_nodes}
+""".strip()
+
+
+RISK_ANALYSIS_WITH_PRODUCT_USER_TEMPLATE = """
+请分析以下规则树和需求文本，结合产品背景知识，识别未覆盖的异常场景风险。
+
+【产品背景知识】
+以下是该需求所属产品的相关流程说明，请结合这些已有的产品流程来分析需求是否存在遗漏或冲突：
+
+{product_context}
 
 【原始需求】
 {raw_text}

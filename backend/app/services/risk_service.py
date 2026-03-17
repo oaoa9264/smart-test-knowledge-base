@@ -12,23 +12,29 @@ from sqlalchemy.orm import Session
 from app.models.entities import (
     NodeStatus,
     NodeType,
+    Project,
     Requirement,
     RiskCategory,
     RiskDecision,
     RiskItem,
     RiskLevel,
+    RiskSource,
     RuleNode,
 )
 from app.services.llm_client import LLMClient
+from app.services.product_doc_service import get_relevant_chunks
 from app.services.prompts.risk_analysis import (
     RISK_ANALYSIS_SYSTEM_PROMPT,
     RISK_ANALYSIS_USER_TEMPLATE,
+    RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT,
+    RISK_ANALYSIS_WITH_PRODUCT_USER_TEMPLATE,
 )
 
 logger = logging.getLogger(__name__)
 
 _VALID_CATEGORIES = {c.value for c in RiskCategory}
 _VALID_RISK_LEVELS = {r.value for r in RiskLevel}
+_VALID_RISK_SOURCES = {s.value for s in RiskSource}
 _ANALYSIS_STATE_GUARD = threading.Lock()
 
 
@@ -92,10 +98,13 @@ def _analyze_risks_once(
         for n in nodes
     )
 
+    product_context = _build_product_context(db, requirement)
+
     raw_risks = _call_llm_for_risks(
         raw_text=requirement.raw_text,
         tree_nodes_text=tree_nodes_text,
         llm_client=llm_client,
+        product_context=product_context,
     )
 
     node_id_set = {n.id for n in nodes}
@@ -106,6 +115,22 @@ def _analyze_risks_once(
         valid_node_ids=node_id_set,
     )
     return risk_items
+
+
+def _build_product_context(db: Session, requirement: Requirement) -> Optional[str]:
+    """Build product context string from associated product doc chunks."""
+    project = db.query(Project).filter(Project.id == requirement.project_id).first()
+    if not project or not project.product_code:
+        return None
+
+    chunks = get_relevant_chunks(db, project.product_code, requirement.raw_text, max_chunks=5)
+    if not chunks:
+        return None
+
+    sections = []
+    for chunk in chunks:
+        sections.append("### {title}\n{content}".format(title=chunk.title, content=chunk.content))
+    return "\n\n".join(sections)
 
 
 def _begin_requirement_analysis(requirement_id: int) -> Tuple[_AnalysisState, bool]:
@@ -194,6 +219,22 @@ def decide_risk(
     return risk
 
 
+def clarify_risk(
+    db: Session,
+    risk_id: str,
+    clarification_text: str,
+    doc_update_needed: bool = False,
+) -> RiskItem:
+    risk = db.query(RiskItem).filter(RiskItem.id == risk_id).first()
+    if not risk:
+        raise ValueError("risk item not found")
+    risk.clarification_text = clarification_text
+    risk.doc_update_needed = doc_update_needed
+    db.commit()
+    db.refresh(risk)
+    return risk
+
+
 def delete_risk(db: Session, risk_id: str) -> None:
     risk = db.query(RiskItem).filter(RiskItem.id == risk_id).first()
     if not risk:
@@ -240,33 +281,45 @@ def _call_llm_for_risks(
     raw_text: str,
     tree_nodes_text: str,
     llm_client: Optional[Any] = None,
+    product_context: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     provider = os.getenv("ANALYZER_PROVIDER", "mock").lower()
     if provider != "llm":
-        return _mock_risk_analysis(tree_nodes_text)
+        return _mock_risk_analysis(tree_nodes_text, has_product_context=bool(product_context))
 
     try:
         llm = llm_client or LLMClient()
-        payload = llm.chat_with_json(
-            system_prompt=RISK_ANALYSIS_SYSTEM_PROMPT,
-            user_prompt=RISK_ANALYSIS_USER_TEMPLATE.format(
+        if product_context:
+            system_prompt = RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT
+            user_prompt = RISK_ANALYSIS_WITH_PRODUCT_USER_TEMPLATE.format(
+                product_context=product_context,
                 raw_text=raw_text,
                 tree_nodes=tree_nodes_text,
-            ),
+            )
+        else:
+            system_prompt = RISK_ANALYSIS_SYSTEM_PROMPT
+            user_prompt = RISK_ANALYSIS_USER_TEMPLATE.format(
+                raw_text=raw_text,
+                tree_nodes=tree_nodes_text,
+            )
+        payload = llm.chat_with_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
         )
         return _extract_risks_from_payload(payload)
     except Exception as exc:
         logger.warning("Risk analysis LLM failed, using mock (%s: %s)", type(exc).__name__, exc)
-        return _mock_risk_analysis(tree_nodes_text)
+        return _mock_risk_analysis(tree_nodes_text, has_product_context=bool(product_context))
 
 
-def _mock_risk_analysis(tree_nodes_text: str) -> List[Dict[str, Any]]:
-    return [
+def _mock_risk_analysis(tree_nodes_text: str, has_product_context: bool = False) -> List[Dict[str, Any]]:
+    risks = [
         {
             "id": "risk_1",
             "related_node_id": None,
             "category": "input_validation",
             "risk_level": "medium",
+            "risk_source": "rule_tree",
             "description": "未明确输入为空时的处理逻辑",
             "suggestion": "建议增加空值校验，给出友好提示",
         },
@@ -275,10 +328,22 @@ def _mock_risk_analysis(tree_nodes_text: str) -> List[Dict[str, Any]]:
             "related_node_id": None,
             "category": "flow_gap",
             "risk_level": "high",
+            "risk_source": "rule_tree",
             "description": "流程中未覆盖前置条件不满足时的回退路径",
             "suggestion": "建议补充前置条件校验和异常流程处理",
         },
     ]
+    if has_product_context:
+        risks.append({
+            "id": "risk_3",
+            "related_node_id": None,
+            "category": "product_knowledge",
+            "risk_level": "high",
+            "risk_source": "product_knowledge",
+            "description": "需求未提及现有产品流程中已有的状态校验约束，可能与现有产品逻辑冲突",
+            "suggestion": "核对现有产品文档中的状态流转规则，确认需求是否需要适配",
+        })
+    return risks
 
 
 def _extract_risks_from_payload(payload: Any) -> List[Dict[str, Any]]:
@@ -308,11 +373,16 @@ def _extract_risks_from_payload(payload: Any) -> List[Dict[str, Any]]:
         if not description:
             continue
 
+        risk_source = str(item.get("risk_source", "rule_tree"))
+        if risk_source not in _VALID_RISK_SOURCES:
+            risk_source = "product_knowledge" if category == "product_knowledge" else "rule_tree"
+
         risks.append({
             "id": risk_id,
             "related_node_id": related_node_id,
             "category": category,
             "risk_level": risk_level,
+            "risk_source": risk_source,
             "description": description,
             "suggestion": suggestion,
         })
@@ -342,12 +412,17 @@ def _save_risks(
         if level_str not in _VALID_RISK_LEVELS:
             level_str = "medium"
 
+        source_str = risk_data.get("risk_source", "rule_tree")
+        if source_str not in _VALID_RISK_SOURCES:
+            source_str = "product_knowledge" if category_str == "product_knowledge" else "rule_tree"
+
         risk_item = RiskItem(
             id=str(uuid.uuid4()),
             requirement_id=requirement_id,
             related_node_id=related_node_id,
             category=RiskCategory(category_str),
             risk_level=RiskLevel(level_str),
+            risk_source=RiskSource(source_str),
             description=risk_data.get("description", ""),
             suggestion=risk_data.get("suggestion", ""),
         )

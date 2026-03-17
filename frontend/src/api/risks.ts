@@ -33,6 +33,18 @@ export async function decideRisk(
   return data;
 }
 
+export async function clarifyRisk(
+  riskId: string,
+  clarificationText: string,
+  docUpdateNeeded = false,
+): Promise<RiskItem> {
+  const { data } = await http.put<RiskItem>(`/api/rules/risks/${riskId}/clarify`, {
+    clarification_text: clarificationText,
+    doc_update_needed: docUpdateNeeded,
+  });
+  return data;
+}
+
 export async function deleteRisk(riskId: string): Promise<void> {
   await http.delete(`/api/rules/risks/${riskId}`);
 }

@@ -8,12 +8,14 @@ from app.models.entities import RiskDecision, RiskItem
 from app.schemas.risk import (
     RiskAnalyzeRequest,
     RiskAnalyzeResponse,
+    RiskClarifyRequest,
     RiskDecisionRequest,
     RiskItemRead,
     RiskListResponse,
 )
 from app.services.risk_service import (
     analyze_risks,
+    clarify_risk,
     decide_risk,
     delete_risk,
     get_risks_for_requirement,
@@ -90,3 +92,17 @@ def convert_risk_to_node(risk_id: str, db: Session = Depends(get_db)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return RuleNodeRead.from_orm(node)
+
+
+@router.put("/api/rules/risks/{risk_id}/clarify", response_model=RiskItemRead)
+def clarify_risk_endpoint(risk_id: str, payload: RiskClarifyRequest, db: Session = Depends(get_db)):
+    try:
+        risk = clarify_risk(
+            db=db,
+            risk_id=risk_id,
+            clarification_text=payload.clarification_text,
+            doc_update_needed=payload.doc_update_needed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return RiskItemRead.from_orm(risk)
