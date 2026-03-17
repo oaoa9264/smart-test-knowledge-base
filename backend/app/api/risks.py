@@ -70,9 +70,11 @@ def make_risk_decision(risk_id: str, payload: RiskDecisionRequest, db: Session =
 
     if payload.decision == "accepted" and payload.auto_create_node:
         try:
-            risk_to_node(db=db, risk_id=risk_id)
-        except ValueError:
-            pass
+            node = risk_to_node(db=db, risk_id=risk_id)
+            from app.api.rules import _regenerate_paths
+            _regenerate_paths(db, node.requirement_id)
+        except ValueError as e:
+            logger.warning("risk_to_node failed for risk %s: %s", risk_id, e)
 
     return RiskItemRead.from_orm(risk)
 

@@ -29,6 +29,8 @@ import {
 } from "@ant-design/icons";
 import type { RiskCategory, RiskDecisionType, RiskItem, RiskSource } from "../../types";
 import { analyzeRisks, clarifyRisk, decideRisk, deleteRisk, fetchRisks } from "../../api/risks";
+import { fetchProductDocs, suggestDocUpdate } from "../../api/productDocs";
+import { useAppStore } from "../../stores/appStore";
 
 const categoryLabels: Record<RiskCategory, string> = {
   input_validation: "输入校验",
@@ -86,9 +88,11 @@ type RiskPanelProps = {
 };
 
 export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted, onRisksChange }: RiskPanelProps) {
+  const { selectedProjectId, projects } = useAppStore();
   const [risks, setRisks] = useState<RiskItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [autoCreateNode, setAutoCreateNode] = useState(true);
 
   const [decisionModal, setDecisionModal] = useState<{
     risk: RiskItem;
@@ -183,13 +187,13 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
         decisionModal.risk.id,
         decisionModal.type,
         values.reason,
-        values.auto_create_node ?? false,
+        autoCreateNode,
       );
       message.success(decisionModal.type === "accepted" ? "已接受" : "已忽略");
       setDecisionModal(null);
       const newRisks = await loadRisks();
       onRisksChange?.(newRisks);
-      if (decisionModal.type === "accepted" && values.auto_create_node) {
+      if (decisionModal.type === "accepted" && autoCreateNode) {
         onRiskConverted?.();
       }
     } catch {
@@ -207,6 +211,32 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
         values.doc_update_needed ?? false,
       );
       message.success("澄清已保存");
+
+      if (values.doc_update_needed) {
+        try {
+          const project = projects.find((p) => p.id === selectedProjectId);
+          const productCode = project?.product_code;
+          if (!productCode) {
+            message.warning("当前项目未关联产品文档，无法自动生成更新建议");
+          } else {
+            const docs = await fetchProductDocs();
+            const doc = docs.find((d) => d.product_code === productCode);
+            if (!doc) {
+              message.warning("未找到匹配的产品文档，无法自动生成更新建议");
+            } else {
+              await suggestDocUpdate({
+                product_doc_id: doc.id,
+                risk_item_id: clarifyModal.id,
+                clarification_text: values.clarification_text,
+              });
+              message.success("文档更新建议已生成");
+            }
+          }
+        } catch {
+          message.error("生成文档更新建议失败，但澄清已保存");
+        }
+      }
+
       setClarifyModal(null);
       const newRisks = await loadRisks();
       onRisksChange?.(newRisks);
@@ -390,6 +420,14 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
             已忽略 <strong>{stats.ignored}</strong>
           </span>
         </Space>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
+          <Switch size="small" checked={autoCreateNode} onChange={setAutoCreateNode} />
+          <Tooltip title="开启后，接受风险时自动在规则树上创建对应的异常节点">
+            <Typography.Text type="secondary" style={{ fontSize: 12, cursor: "help" }}>
+              接受时自动创建节点
+            </Typography.Text>
+          </Tooltip>
+        </div>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
@@ -449,11 +487,6 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
           <Form.Item name="reason" label="决策理由" rules={[{ required: true, message: "请填写理由" }]}>
             <Input.TextArea rows={3} placeholder="请说明原因" />
           </Form.Item>
-          {decisionModal?.type === "accepted" && (
-            <Form.Item name="auto_create_node" label="自动创建异常节点" valuePropName="checked">
-              <Switch />
-            </Form.Item>
-          )}
         </Form>
       </Modal>
 
