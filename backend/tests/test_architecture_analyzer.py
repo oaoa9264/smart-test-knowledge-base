@@ -3,7 +3,9 @@ import os
 
 from fastapi.testclient import TestClient
 
+from app.core.database import SessionLocal
 from app.main import app
+from app.models.entities import InputType, RequirementInput
 from app.services.architecture_analyzer import LLMAnalyzerProvider, MockAnalyzerProvider
 
 
@@ -461,3 +463,131 @@ def test_architecture_api_analyze_get_import_flow(monkeypatch):
     tree_resp = client.get(f"/api/rules/requirements/{import_data['requirement_id']}/tree")
     assert tree_resp.status_code == 200
     assert len(tree_resp.json()["nodes"]) > 0
+
+
+def test_architecture_api_rejects_invalid_requirement_id(monkeypatch):
+    monkeypatch.setenv("ANALYZER_PROVIDER", "mock")
+    project_resp = client.post("/api/projects", json={"name": "arch-p-invalid-reqid", "description": "architecture"})
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    analyze_resp = client.post(
+        "/api/ai/architecture/analyze",
+        data={
+            "project_id": str(project_id),
+            "requirement_id": "bad",
+            "title": "无效需求ID",
+            "description_text": "用户提交提现申请。",
+        },
+    )
+    assert analyze_resp.status_code == 400
+    assert "requirement_id" in analyze_resp.json()["detail"]
+
+
+def test_architecture_api_rejects_requirement_from_other_project(monkeypatch):
+    monkeypatch.setenv("ANALYZER_PROVIDER", "mock")
+    project_a = client.post("/api/projects", json={"name": "arch-p-owner-a", "description": "architecture"})
+    project_b = client.post("/api/projects", json={"name": "arch-p-owner-b", "description": "architecture"})
+    assert project_a.status_code == 201
+    assert project_b.status_code == 201
+    project_a_id = project_a.json()["id"]
+    project_b_id = project_b.json()["id"]
+
+    requirement_resp = client.post(
+        f"/api/projects/{project_b_id}/requirements",
+        json={"title": "B需求", "raw_text": "demo", "source_type": "prd"},
+    )
+    assert requirement_resp.status_code == 201
+    requirement_id = requirement_resp.json()["id"]
+
+    analyze_resp = client.post(
+        "/api/ai/architecture/analyze",
+        data={
+            "project_id": str(project_a_id),
+            "requirement_id": str(requirement_id),
+            "title": "跨项目需求引用",
+            "description_text": "用户提交提现申请。",
+        },
+    )
+    assert analyze_resp.status_code == 400
+    assert "project" in analyze_resp.json()["detail"].lower()
+
+
+def test_architecture_import_registers_raw_requirement_input(monkeypatch):
+    monkeypatch.setenv("ANALYZER_PROVIDER", "mock")
+    project_resp = client.post("/api/projects", json={"name": "arch-p2", "description": "architecture"})
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    description_text = "用户发起退款申请，系统校验订单状态并决定是否进入退款流程。"
+    analyze_resp = client.post(
+        "/api/ai/architecture/analyze",
+        data={
+            "project_id": str(project_id),
+            "title": "退款需求拆解",
+            "description_text": description_text,
+        },
+    )
+    assert analyze_resp.status_code == 201
+    analysis_id = analyze_resp.json()["id"]
+
+    import_resp = client.post(
+        f"/api/ai/architecture/{analysis_id}/import",
+        json={"import_decision_tree": False},
+    )
+    assert import_resp.status_code == 200
+    requirement_id = import_resp.json()["requirement_id"]
+
+    db = SessionLocal()
+    try:
+        inputs = (
+            db.query(RequirementInput)
+            .filter(RequirementInput.requirement_id == requirement_id)
+            .all()
+        )
+        assert len(inputs) == 1
+        assert inputs[0].input_type == InputType.raw_requirement
+        assert inputs[0].content == description_text
+    finally:
+        db.close()
+
+
+def test_architecture_import_is_idempotent_for_same_analysis(monkeypatch):
+    monkeypatch.setenv("ANALYZER_PROVIDER", "mock")
+    project_resp = client.post("/api/projects", json={"name": "arch-p3", "description": "architecture"})
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    analyze_resp = client.post(
+        "/api/ai/architecture/analyze",
+        data={
+            "project_id": str(project_id),
+            "title": "重复导入拆解",
+            "description_text": "用户提交提现申请。如果未实名认证则拒绝。",
+        },
+    )
+    assert analyze_resp.status_code == 201
+    analysis_id = analyze_resp.json()["id"]
+
+    first_import = client.post(
+        f"/api/ai/architecture/{analysis_id}/import",
+        json={"import_decision_tree": True},
+    )
+    assert first_import.status_code == 200
+    requirement_id = first_import.json()["requirement_id"]
+
+    first_tree = client.get(f"/api/rules/requirements/{requirement_id}/tree")
+    assert first_tree.status_code == 200
+    first_node_count = len(first_tree.json()["nodes"])
+    assert first_node_count > 0
+
+    second_import = client.post(
+        f"/api/ai/architecture/{analysis_id}/import",
+        json={"import_decision_tree": True},
+    )
+    assert second_import.status_code == 200
+    assert second_import.json()["imported_rule_nodes"] == 0
+
+    second_tree = client.get(f"/api/rules/requirements/{requirement_id}/tree")
+    assert second_tree.status_code == 200
+    assert len(second_tree.json()["nodes"]) == first_node_count

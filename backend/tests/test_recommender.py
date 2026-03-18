@@ -127,3 +127,61 @@ def test_recommendation_api_flow_smoke():
     detail = run_detail_resp.json()
     assert detail["run"]["id"] == reco_body["run_id"]
     assert len(detail["results"]) >= 1
+
+
+def test_recommendation_api_rejects_empty_rule_tree():
+    project_resp = client.post(
+        "/api/projects",
+        json={"name": f"reco-empty-{uuid.uuid4().hex[:8]}", "description": "reco"},
+    )
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    requirement_resp = client.post(
+        f"/api/projects/{project_id}/requirements",
+        json={"title": "空规则树推荐", "raw_text": "推荐用例", "source_type": "prd"},
+    )
+    assert requirement_resp.status_code == 201
+    requirement_id = requirement_resp.json()["id"]
+
+    reco_resp = client.post(
+        "/api/reco/regression",
+        json={"requirement_id": requirement_id, "mode": "FULL", "k": 2},
+    )
+    assert reco_resp.status_code == 400
+    assert "rule tree is empty" in reco_resp.json()["detail"].lower()
+
+
+def test_recommendation_api_rejects_invalid_changed_node_ids():
+    project_resp = client.post(
+        "/api/projects",
+        json={"name": f"reco-change-{uuid.uuid4().hex[:8]}", "description": "reco"},
+    )
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    requirement_resp = client.post(
+        f"/api/projects/{project_id}/requirements",
+        json={"title": "变更推荐", "raw_text": "推荐用例", "source_type": "prd"},
+    )
+    assert requirement_resp.status_code == 201
+    requirement_id = requirement_resp.json()["id"]
+
+    root_resp = client.post(
+        "/api/rules/nodes",
+        json={
+            "requirement_id": requirement_id,
+            "parent_id": None,
+            "node_type": "root",
+            "content": "根节点",
+            "risk_level": "critical",
+        },
+    )
+    assert root_resp.status_code == 201
+
+    reco_resp = client.post(
+        "/api/reco/regression",
+        json={"requirement_id": requirement_id, "mode": "CHANGE", "k": 2, "changed_node_ids": ["bad-node-id"]},
+    )
+    assert reco_resp.status_code == 400
+    assert "changed_node_ids" in reco_resp.json()["detail"].lower()

@@ -1,7 +1,10 @@
+import io
+import os
 from datetime import datetime
 
 from fastapi.testclient import TestClient
 
+from app.api.rule_tree_session import UPLOAD_DIR
 from app.core.database import SessionLocal
 from app.main import app, recover_interrupted_rule_tree_sessions
 from app.models.entities import Project, Requirement, RuleTreeSession, RuleTreeSessionStatus, SourceType
@@ -202,6 +205,25 @@ def test_duplicate_generate_returns_conflict():
 
     assert response.status_code == 409
     assert response.json()["detail"] == "当前会话生成中，请稍后再试"
+
+
+def test_duplicate_generate_does_not_leave_uploaded_file():
+    with TestClient(app) as client:
+        session = _create_requirement_and_session(RuleTreeSessionStatus.generating)
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        before = set(os.listdir(UPLOAD_DIR))
+
+        response = client.post(
+            "/api/rules/sessions/{0}/generate".format(session.id),
+            data={"requirement_text": "重复提交的需求文本"},
+            files={"image": ("flow.png", io.BytesIO(b"fakepng"), "image/png")},
+        )
+
+        after = set(os.listdir(UPLOAD_DIR))
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "当前会话生成中，请稍后再试"
+    assert after == before
 
 
 def test_worker_success_persists_snapshots_and_terminal_state():
