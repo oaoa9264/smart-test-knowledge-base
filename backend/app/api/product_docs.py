@@ -112,6 +112,7 @@ def create_suggest_update(payload: SuggestUpdateRequest, db: Session = Depends(g
             product_doc_id=payload.product_doc_id,
             risk_item_id=payload.risk_item_id,
             clarification_text=payload.clarification_text,
+            supplement_text=payload.supplement_text,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -243,20 +243,38 @@ def get_relevant_chunks(
 def suggest_doc_update(
     db: Session,
     product_doc_id: int,
-    risk_item_id: str,
+    risk_item_id: Optional[str],
     clarification_text: str,
+    supplement_text: Optional[str] = None,
     llm_client: Optional[Any] = None,
 ) -> ProductDocUpdate:
     """Generate an AI-suggested document update based on risk clarification."""
-    risk = db.query(RiskItem).filter(RiskItem.id == risk_item_id).first()
-    if not risk:
-        raise ValueError("risk item not found")
-
     doc = db.query(ProductDoc).filter(ProductDoc.id == product_doc_id).first()
     if not doc:
         raise ValueError("product doc not found")
 
-    chunks = get_relevant_chunks(db, doc.product_code, risk.description, max_chunks=2)
+    risk: Optional[RiskItem] = None
+    query_text = ""
+
+    if risk_item_id:
+        risk = db.query(RiskItem).filter(RiskItem.id == risk_item_id).first()
+        if not risk:
+            raise ValueError("risk item not found")
+        query_text = risk.description
+    elif supplement_text and supplement_text.strip():
+        query_text = supplement_text.strip()
+    else:
+        raise ValueError("either risk_item_id or supplement_text is required")
+
+    chunks = get_relevant_chunks(db, doc.product_code, query_text, max_chunks=2)
+    if not chunks:
+        chunks = (
+            db.query(ProductDocChunk)
+            .filter(ProductDocChunk.product_doc_id == doc.id)
+            .order_by(ProductDocChunk.sort_order.asc(), ProductDocChunk.id.asc())
+            .limit(2)
+            .all()
+        )
     chunk = chunks[0] if chunks else None
     original_content = chunk.content if chunk else ""
 
@@ -275,7 +293,7 @@ def suggest_doc_update(
                 "【原始文档段落】\n{original}\n\n"
                 "请生成更新后的文档段落："
             ).format(
-                risk_desc=risk.description,
+                risk_desc=query_text,
                 clarification=clarification_text,
                 original=original_content,
             )

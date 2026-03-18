@@ -64,5 +64,6 @@ class ProductDocUpdateRead(BaseModel):
 
 class SuggestUpdateRequest(BaseModel):
     product_doc_id: int
-    risk_item_id: str
+    risk_item_id: Optional[str] = None
     clarification_text: str
+    supplement_text: Optional[str] = None

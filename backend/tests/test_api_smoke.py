@@ -340,3 +340,55 @@ def test_update_node_allows_parent_id_to_become_null():
     assert tree_resp.status_code == 200
     nodes = {node["id"]: node for node in tree_resp.json()["nodes"]}
     assert nodes[child_id]["parent_id"] is None
+
+
+def test_suggest_update_without_risk_item_uses_supplement_text():
+    import_resp = client.post(
+        "/api/product-docs/import",
+        json={
+            "product_code": "DOC-{0}".format(uuid4().hex[:8]),
+            "name": "手工补录文档",
+            "description": "doc import",
+            "content": "## 登录\n系统支持用户名密码登录。\n\n## 风控\n登录失败达到阈值需要限制。",
+        },
+    )
+    assert import_resp.status_code == 201
+    product_doc_id = import_resp.json()["id"]
+
+    suggest_resp = client.post(
+        "/api/product-docs/suggest-update",
+        json={
+            "product_doc_id": product_doc_id,
+            "clarification_text": "需要补充验证码触发条件。",
+            "supplement_text": "登录失败达到5次后触发验证码校验。",
+        },
+    )
+
+    assert suggest_resp.status_code == 201
+    body = suggest_resp.json()
+    assert body["risk_item_id"] is None
+    assert body["chunk_id"] is not None
+
+
+def test_suggest_update_rejects_missing_risk_item_and_supplement_text():
+    import_resp = client.post(
+        "/api/product-docs/import",
+        json={
+            "product_code": "DOC-{0}".format(uuid4().hex[:8]),
+            "name": "缺少查询条件文档",
+            "description": "doc import",
+            "content": "## 登录\n系统支持用户名密码登录。",
+        },
+    )
+    assert import_resp.status_code == 201
+    product_doc_id = import_resp.json()["id"]
+
+    suggest_resp = client.post(
+        "/api/product-docs/suggest-update",
+        json={
+            "product_doc_id": product_doc_id,
+            "clarification_text": "只有澄清，没有检索条件。",
+        },
+    )
+
+    assert suggest_resp.status_code == 400
