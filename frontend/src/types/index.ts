@@ -346,6 +346,8 @@ export type RiskCategory =
 export type RiskSource = "rule_tree" | "product_knowledge";
 
 export type RiskDecisionType = "pending" | "accepted" | "ignored";
+export type RiskValidity = "active" | "superseded" | "reopened" | "resolved";
+export type AnalysisStage = "review" | "pre_dev" | "pre_release";
 
 export interface RiskItem {
   id: string;
@@ -361,6 +363,11 @@ export interface RiskItem {
   risk_source: RiskSource;
   clarification_text: string | null;
   doc_update_needed: boolean;
+  analysis_stage: AnalysisStage | null;
+  validity: RiskValidity | null;
+  origin_snapshot_id: number | null;
+  last_seen_snapshot_id: number | null;
+  last_analysis_at: string | null;
   created_at: string | null;
 }
 
@@ -370,11 +377,109 @@ export interface RiskListResponse {
   pending: number;
   accepted: number;
   ignored: number;
+  active: number;
+  superseded: number;
+  reopened: number;
+  resolved: number;
 }
 
 export interface RiskAnalyzeResponse {
   risks: RiskItem[];
   total: number;
+}
+
+export interface RequirementInput {
+  id: number;
+  requirement_id: number;
+  input_type: string;
+  content: string;
+  source_label: string | null;
+  created_by: string | null;
+  created_at: string | null;
+}
+
+export interface EffectiveField {
+  id: number;
+  snapshot_id: number;
+  field_key: string;
+  value: string | null;
+  derivation: string | null;
+  confidence: number | null;
+  source_refs: string | null;
+  notes: string | null;
+  sort_order: number;
+}
+
+export interface EffectiveSnapshot {
+  id: number;
+  requirement_id: number;
+  stage: AnalysisStage;
+  status: string;
+  based_on_input_ids: string | null;
+  summary: string | null;
+  base_snapshot_id: number | null;
+  created_at: string | null;
+  fields: EffectiveField[];
+}
+
+export interface RiskItemCompact {
+  id: string;
+  category: string;
+  risk_level: string;
+  description: string;
+  suggestion: string;
+  validity: RiskValidity | null;
+  analysis_stage: AnalysisStage | null;
+}
+
+export interface ConflictItem {
+  conflict_type: string;
+  description: string;
+  source_a: string;
+  source_b: string;
+}
+
+export interface MatchedEvidence {
+  evidence_statement: string;
+  related_field_key: string;
+  match_type: string;
+}
+
+export interface BlockingRisk {
+  risk_id: string;
+  reason: string;
+  severity: string;
+}
+
+export interface ReopenedRisk {
+  risk_id: string;
+  reason: string;
+}
+
+export interface ResolvedRisk {
+  risk_id: string;
+  reason: string;
+}
+
+export interface ReviewSnapshotResponse {
+  snapshot: EffectiveSnapshot;
+  risks: RiskItemCompact[];
+  clarification_hints: string[];
+}
+
+export interface PredevAnalysisResponse {
+  snapshot: EffectiveSnapshot;
+  risks: RiskItemCompact[];
+  conflicts: ConflictItem[];
+  matched_evidence: MatchedEvidence[];
+}
+
+export interface PrereleaseAuditResponse {
+  closure_summary: string;
+  blocking_risks: BlockingRisk[];
+  reopened_risks: ReopenedRisk[];
+  resolved_risks: ResolvedRisk[];
+  audit_notes: string[];
 }
 
 export interface ProductDoc {

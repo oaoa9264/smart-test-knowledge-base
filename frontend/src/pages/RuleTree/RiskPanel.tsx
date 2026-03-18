@@ -29,6 +29,14 @@ import {
 } from "@ant-design/icons";
 import type { RiskCategory, RiskDecisionType, RiskItem, RiskSource } from "../../types";
 import { analyzeRisks, clarifyRisk, decideRisk, deleteRisk, fetchRisks } from "../../api/risks";
+import {
+  addRequirementInput,
+  createReviewSnapshot,
+  getLatestSnapshot,
+  listRequirementInputs,
+  runPredevAnalysis,
+  runPrereleaseAudit,
+} from "../../api/effectiveRequirements";
 import { fetchProductDocs, suggestDocUpdate } from "../../api/productDocs";
 import { useAppStore } from "../../stores/appStore";
 
