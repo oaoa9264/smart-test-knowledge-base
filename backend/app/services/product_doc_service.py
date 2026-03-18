@@ -2,12 +2,14 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
 from app.models.entities import (
     DocUpdateStatus,
+    EvidenceBlock,
+    EvidenceStatus,
     ProductDoc,
     ProductDocChunk,
     ProductDocUpdate,
@@ -43,47 +45,119 @@ def _extract_keywords_from_text(text: str) -> List[str]:
     return keywords[:50]
 
 
+_CHUNK_MAX_CHARS = 3000
+
+
 def _parse_markdown_into_chunks(content: str) -> List[Dict[str, Any]]:
-    """Split markdown content by ## and ### headings into chunks."""
+    """Split markdown by ## sections, keeping ### subsections together.
+
+    Strategy:
+    - A ``##`` heading opens a new primary section; all ``###`` blocks
+      underneath it are collected into the same chunk.
+    - If a primary section exceeds ``_CHUNK_MAX_CHARS`` it is split at
+      ``###`` boundaries, with each sub-chunk retaining ``parent_title``.
+    - Content before the first ``##`` heading is emitted as its own chunk.
+    """
     lines = content.split("\n")
-    chunks: List[Dict[str, Any]] = []
-    current_title = ""
+
+    sections: List[Dict[str, Any]] = []
+    current_h2_title = ""
     current_lines: List[str] = []
-    chunk_index = 0
+
+    def _flush_section() -> None:
+        if not current_lines:
+            return
+        text = "\n".join(current_lines).strip()
+        if text:
+            sections.append({
+                "title": current_h2_title,
+                "content": text,
+                "heading_level": 2 if current_h2_title else None,
+            })
 
     for line in lines:
-        heading_match = re.match(r"^(#{2,3})\s+(.+)", line)
-        if heading_match:
-            if current_title and current_lines:
-                chunk_text = "\n".join(current_lines).strip()
-                if chunk_text:
-                    stage_key = "stage_{0}".format(chunk_index)
-                    keywords = _extract_keywords_from_text(current_title + " " + chunk_text)
-                    chunks.append({
-                        "stage_key": stage_key,
-                        "title": current_title,
-                        "content": chunk_text,
-                        "sort_order": chunk_index,
-                        "keywords": ",".join(keywords),
-                    })
-                    chunk_index += 1
-            current_title = heading_match.group(2).strip()
+        h2_match = re.match(r"^##\s+(.+)", line)
+        if h2_match and not line.startswith("###"):
+            _flush_section()
+            current_h2_title = h2_match.group(1).strip()
             current_lines = [line]
-        else:
-            current_lines.append(line)
+            continue
 
-    if current_title and current_lines:
-        chunk_text = "\n".join(current_lines).strip()
-        if chunk_text:
-            stage_key = "stage_{0}".format(chunk_index)
-            keywords = _extract_keywords_from_text(current_title + " " + chunk_text)
+        current_lines.append(line)
+
+    _flush_section()
+
+    chunks: List[Dict[str, Any]] = []
+    chunk_index = 0
+
+    for section in sections:
+        title = section["title"]
+        text = section["content"]
+        heading_level = section["heading_level"]
+
+        if len(text) <= _CHUNK_MAX_CHARS:
+            keywords = _extract_keywords_from_text(title + " " + text)
             chunks.append({
-                "stage_key": stage_key,
-                "title": current_title,
-                "content": chunk_text,
+                "stage_key": "stage_{0}".format(chunk_index),
+                "title": title or "(intro)",
+                "content": text,
                 "sort_order": chunk_index,
                 "keywords": ",".join(keywords),
+                "parent_title": None,
+                "heading_level": heading_level,
             })
+            chunk_index += 1
+            continue
+
+        sub_sections = re.split(r"(?=^###\s+)", text, flags=re.MULTILINE)
+        buf: List[str] = []
+        buf_len = 0
+        sub_title = title
+
+        for part in sub_sections:
+            part_stripped = part.strip()
+            if not part_stripped:
+                continue
+
+            h3_match = re.match(r"^###\s+(.+)", part_stripped.split("\n", 1)[0])
+            if h3_match:
+                sub_title = h3_match.group(1).strip()
+
+            if buf and buf_len + len(part_stripped) > _CHUNK_MAX_CHARS:
+                merged = "\n\n".join(buf).strip()
+                keywords = _extract_keywords_from_text(title + " " + merged)
+                chunks.append({
+                    "stage_key": "stage_{0}".format(chunk_index),
+                    "title": title or "(intro)",
+                    "content": merged,
+                    "sort_order": chunk_index,
+                    "keywords": ",".join(keywords),
+                    "parent_title": title if title else None,
+                    "heading_level": 3,
+                })
+                chunk_index += 1
+                buf = []
+                buf_len = 0
+
+            buf.append(part_stripped)
+            buf_len += len(part_stripped)
+
+        if buf:
+            merged = "\n\n".join(buf).strip()
+            keywords = _extract_keywords_from_text(title + " " + merged)
+            is_sub = chunk_index > 0 and any(
+                c["parent_title"] == title for c in chunks
+            )
+            chunks.append({
+                "stage_key": "stage_{0}".format(chunk_index),
+                "title": title or "(intro)",
+                "content": merged,
+                "sort_order": chunk_index,
+                "keywords": ",".join(keywords),
+                "parent_title": title if is_sub else None,
+                "heading_level": 3 if is_sub else heading_level,
+            })
+            chunk_index += 1
 
     return chunks
 
@@ -104,7 +178,6 @@ def import_product_doc(
 
     existing = db.query(ProductDoc).filter(ProductDoc.product_code == product_code).first()
     if existing:
-        db.query(ProductDocChunk).filter(ProductDocChunk.product_doc_id == existing.id).delete()
         existing.name = name
         existing.description = description
         existing.file_path = file_path
@@ -123,16 +196,7 @@ def import_product_doc(
     db.flush()
 
     raw_chunks = _parse_markdown_into_chunks(content)
-    for chunk_data in raw_chunks:
-        chunk = ProductDocChunk(
-            product_doc_id=doc.id,
-            stage_key=chunk_data["stage_key"],
-            title=chunk_data["title"],
-            content=chunk_data["content"],
-            sort_order=chunk_data["sort_order"],
-            keywords=chunk_data["keywords"],
-        )
-        db.add(chunk)
+    _sync_product_doc_chunks(db, doc.id, raw_chunks)
 
     db.commit()
     db.refresh(doc)
@@ -150,7 +214,6 @@ def import_product_doc_from_text(
     """Import from raw text content instead of a file path."""
     existing = db.query(ProductDoc).filter(ProductDoc.product_code == product_code).first()
     if existing:
-        db.query(ProductDocChunk).filter(ProductDocChunk.product_doc_id == existing.id).delete()
         existing.name = name
         existing.description = description
         existing.file_path = file_path
@@ -169,16 +232,7 @@ def import_product_doc_from_text(
     db.flush()
 
     raw_chunks = _parse_markdown_into_chunks(content)
-    for chunk_data in raw_chunks:
-        chunk = ProductDocChunk(
-            product_doc_id=doc.id,
-            stage_key=chunk_data["stage_key"],
-            title=chunk_data["title"],
-            content=chunk_data["content"],
-            sort_order=chunk_data["sort_order"],
-            keywords=chunk_data["keywords"],
-        )
-        db.add(chunk)
+    _sync_product_doc_chunks(db, doc.id, raw_chunks)
 
     db.commit()
     db.refresh(doc)
@@ -190,8 +244,18 @@ def get_relevant_chunks(
     product_code: str,
     requirement_text: str,
     max_chunks: int = 5,
+    matched_modules: Optional[List[str]] = None,
+    related_modules: Optional[List[str]] = None,
+    use_evidence: bool = True,
 ) -> List[ProductDocChunk]:
-    """Match relevant document chunks to a requirement using keyword overlap scoring."""
+    """Hybrid retrieval: evidence-first + module-directed + keyword-overlap.
+
+    When *use_evidence* is True (default), evidence blocks are queried
+    first.  Chunks that host matching evidence receive a large boost so
+    that evidence-backed knowledge is surfaced preferentially.  When no
+    evidence is available or insufficient, the original module + keyword
+    scoring acts as fallback.
+    """
     doc = db.query(ProductDoc).filter(ProductDoc.product_code == product_code).first()
     if not doc:
         return []
@@ -205,39 +269,188 @@ def get_relevant_chunks(
     if not chunks:
         return []
 
-    req_keywords = set(kw.lower() for kw in _extract_keywords_from_text(requirement_text))
-    if not req_keywords:
-        return chunks[:max_chunks]
+    evidence_chunk_ids: Dict[int, float] = {}
+    if use_evidence:
+        evidence_chunk_ids = _score_chunks_by_evidence(
+            db, doc.id, requirement_text, matched_modules,
+        )
 
-    base_chunks = []
+    req_keywords = set(kw.lower() for kw in _extract_keywords_from_text(requirement_text))
+
+    matched_set = {t.lower() for t in (matched_modules or [])}
+    related_set = {t.lower() for t in (related_modules or [])}
+
+    base_chunks: List[ProductDocChunk] = []
     scored_chunks: List[Tuple[float, ProductDocChunk]] = []
 
     for chunk in chunks:
         title_lower = chunk.title.lower()
+
         is_base = any(kw in title_lower for kw in ("术语", "口径", "总览", "概述", "简介", "背景"))
         if is_base:
             base_chunks.append(chunk)
             continue
 
-        chunk_kw_str = (chunk.keywords or "") + "," + chunk.title
-        chunk_keywords = set(kw.lower().strip() for kw in chunk_kw_str.split(",") if kw.strip())
-        overlap = len(req_keywords & chunk_keywords)
+        evidence_score = evidence_chunk_ids.get(chunk.id, 0.0)
 
-        title_words = set(re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z_]\w{2,}", chunk.title.lower()))
-        title_overlap = len(req_keywords & title_words)
-        score = overlap + title_overlap * 2.0
+        module_score = 0.0
+        effective_title = title_lower
+        parent_lower = (chunk.parent_title or "").lower()
+        if effective_title in matched_set or parent_lower in matched_set:
+            module_score = 100.0
+        elif effective_title in related_set or parent_lower in related_set:
+            module_score = 50.0
 
-        if score > 0:
-            scored_chunks.append((score, chunk))
+        kw_score = 0.0
+        if req_keywords:
+            chunk_kw_str = (chunk.keywords or "") + "," + chunk.title
+            chunk_keywords = set(kw.lower().strip() for kw in chunk_kw_str.split(",") if kw.strip())
+            overlap = len(req_keywords & chunk_keywords)
+            title_words = set(re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z_]\w{2,}", title_lower))
+            title_overlap = len(req_keywords & title_words)
+            kw_score = overlap + title_overlap * 2.0
+
+        total_score = evidence_score + module_score + kw_score
+        if total_score > 0:
+            scored_chunks.append((total_score, chunk))
 
     scored_chunks.sort(key=lambda x: x[0], reverse=True)
 
-    remaining_slots = max(0, max_chunks - len(base_chunks))
-    top_chunks = [c for _, c in scored_chunks[:remaining_slots]]
+    top_chunks = [c for _, c in scored_chunks[:max_chunks]]
+    remaining_slots = max(0, max_chunks - len(top_chunks))
 
-    result = base_chunks + top_chunks
-    result.sort(key=lambda c: c.sort_order)
+    seen_ids = set()
+    result: List[ProductDocChunk] = []
+    for c in top_chunks + base_chunks[:remaining_slots]:
+        if c.id not in seen_ids:
+            seen_ids.add(c.id)
+            result.append(c)
+    if result:
+        return result
+
+    # Cold-start fallback: preserve previous behavior when nothing scores yet.
+    for chunk in chunks[:max_chunks]:
+        if chunk.id not in seen_ids:
+            seen_ids.add(chunk.id)
+            result.append(chunk)
     return result
+
+
+def _sync_product_doc_chunks(
+    db: Session,
+    product_doc_id: int,
+    raw_chunks: List[Dict[str, Any]],
+) -> None:
+    existing_chunks = (
+        db.query(ProductDocChunk)
+        .filter(ProductDocChunk.product_doc_id == product_doc_id)
+        .order_by(ProductDocChunk.sort_order.asc(), ProductDocChunk.id.asc())
+        .all()
+    )
+
+    remaining_by_id = {chunk.id: chunk for chunk in existing_chunks}
+    assigned_chunks: List[Optional[ProductDocChunk]] = [None] * len(raw_chunks)
+
+    for index, chunk_data in enumerate(raw_chunks):
+        title = chunk_data["title"]
+        parent_title = chunk_data.get("parent_title")
+        for chunk in existing_chunks:
+            if chunk.id not in remaining_by_id:
+                continue
+            if chunk.title == title and chunk.parent_title == parent_title:
+                assigned_chunks[index] = chunk
+                remaining_by_id.pop(chunk.id, None)
+                break
+
+    for index, chunk_data in enumerate(raw_chunks):
+        if assigned_chunks[index] is not None:
+            continue
+        stage_key = chunk_data["stage_key"]
+        for chunk in existing_chunks:
+            if chunk.id not in remaining_by_id:
+                continue
+            if chunk.stage_key == stage_key:
+                assigned_chunks[index] = chunk
+                remaining_by_id.pop(chunk.id, None)
+                break
+
+    for chunk_data, chunk in zip(raw_chunks, assigned_chunks):
+        if chunk is None:
+            chunk = ProductDocChunk(product_doc_id=product_doc_id)
+            db.add(chunk)
+
+        chunk.stage_key = chunk_data["stage_key"]
+        chunk.title = chunk_data["title"]
+        chunk.content = chunk_data["content"]
+        chunk.sort_order = chunk_data["sort_order"]
+        chunk.keywords = chunk_data["keywords"]
+        chunk.parent_title = chunk_data.get("parent_title")
+        chunk.heading_level = chunk_data.get("heading_level")
+
+    stale_chunk_ids = list(remaining_by_id.keys())
+    if stale_chunk_ids:
+        (
+            db.query(EvidenceBlock)
+            .filter(
+                EvidenceBlock.product_doc_id == product_doc_id,
+                EvidenceBlock.chunk_id.in_(stale_chunk_ids),
+            )
+            .update({"chunk_id": None}, synchronize_session=False)
+        )
+
+        for chunk in existing_chunks:
+            if chunk.id in stale_chunk_ids:
+                db.delete(chunk)
+
+
+def _score_chunks_by_evidence(
+    db: Session,
+    product_doc_id: int,
+    requirement_text: str,
+    module_names: Optional[List[str]] = None,
+) -> Dict[int, float]:
+    """Score chunk IDs based on their associated evidence blocks.
+
+    Returns a dict of ``{chunk_id: bonus_score}`` where chunks hosting
+    relevant evidence receive a significant boost.
+    """
+    from app.models.entities import EvidenceBlock, EvidenceStatus
+
+    blocks = (
+        db.query(EvidenceBlock)
+        .filter(
+            EvidenceBlock.product_doc_id == product_doc_id,
+            EvidenceBlock.status != EvidenceStatus.rejected,
+            EvidenceBlock.chunk_id.isnot(None),
+        )
+        .all()
+    )
+    if not blocks:
+        return {}
+
+    req_keywords = set(kw.lower() for kw in _extract_keywords_from_text(requirement_text))
+    module_set = {m.lower() for m in (module_names or [])}
+
+    chunk_scores: Dict[int, float] = {}
+    for block in blocks:
+        score = 0.0
+
+        if block.status == EvidenceStatus.verified:
+            score += 20.0
+
+        if module_set and block.module_name and block.module_name.lower() in module_set:
+            score += 80.0
+
+        if req_keywords:
+            stmt_kw = set(kw.lower() for kw in _extract_keywords_from_text(block.statement))
+            mod_kw = set(kw.lower() for kw in _extract_keywords_from_text(block.module_name or ""))
+            overlap = len(req_keywords & (stmt_kw | mod_kw))
+            score += overlap * 3.0
+
+        if score > 0 and block.chunk_id is not None:
+            chunk_scores[block.chunk_id] = chunk_scores.get(block.chunk_id, 0.0) + score
+
+    return chunk_scores
 
 
 def suggest_doc_update(
@@ -327,6 +540,18 @@ def suggest_doc_update(
     return update
 
 
+def invalidate_chunk_evidence(db: Session, chunk_id: int) -> None:
+    """Reject evidence extracted from a chunk whose content has changed."""
+    (
+        db.query(EvidenceBlock)
+        .filter(
+            EvidenceBlock.chunk_id == chunk_id,
+            EvidenceBlock.status != EvidenceStatus.rejected,
+        )
+        .update({"status": EvidenceStatus.rejected}, synchronize_session=False)
+    )
+
+
 def apply_doc_update(db: Session, update_id: int) -> ProductDocUpdate:
     """Apply a pending doc update: update chunk content, bump version, refresh keywords."""
     update = db.query(ProductDocUpdate).filter(ProductDocUpdate.id == update_id).first()
@@ -340,6 +565,7 @@ def apply_doc_update(db: Session, update_id: int) -> ProductDocUpdate:
     if update.chunk_id and update.suggested_content:
         chunk = db.query(ProductDocChunk).filter(ProductDocChunk.id == update.chunk_id).first()
         if chunk:
+            invalidate_chunk_evidence(db=db, chunk_id=chunk.id)
             chunk.content = update.suggested_content
             chunk.keywords = ",".join(_extract_keywords_from_text(chunk.title + " " + chunk.content))
 

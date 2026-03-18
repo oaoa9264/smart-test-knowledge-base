@@ -96,6 +96,8 @@ def recommend_regression(payload: RecoRequest, db: Session = Depends(get_db)):
         )
         .all()
     )
+    if not nodes:
+        raise HTTPException(status_code=400, detail="rule tree is empty")
     paths = db.query(RulePath).filter(RulePath.requirement_id == payload.requirement_id).all()
 
     case_query = (
@@ -137,7 +139,12 @@ def recommend_regression(payload: RecoRequest, db: Session = Depends(get_db)):
 
     universe = {node.id for node in nodes}
     if mode_value == RecoMode.change.value:
+        valid_node_ids = {node.id for node in nodes}
+        if not any(node_id in valid_node_ids for node_id in (payload.changed_node_ids or [])):
+            raise HTTPException(status_code=400, detail="invalid changed_node_ids")
         impacted = compute_impact_domain(payload.changed_node_ids or [], nodes)
+        if not impacted:
+            raise HTTPException(status_code=400, detail="invalid changed_node_ids")
         universe = impacted
         for node_id in impacted:
             risk_weights[node_id] = float(risk_weights.get(node_id, 0.0)) * 1.5

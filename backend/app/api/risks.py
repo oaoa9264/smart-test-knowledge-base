@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.entities import RiskDecision, RiskItem
+from app.models.entities import RiskDecision, RiskItem, RiskValidity
 from app.schemas.risk import (
+    ClarificationQuestionsRequest,
+    ClarificationQuestionsResponse,
     RiskAnalyzeRequest,
     RiskAnalyzeResponse,
     RiskClarifyRequest,
@@ -18,6 +20,7 @@ from app.services.risk_service import (
     clarify_risk,
     decide_risk,
     delete_risk,
+    generate_clarification_questions,
     get_risks_for_requirement,
     risk_to_node,
 )
@@ -47,12 +50,20 @@ def list_requirement_risks(requirement_id: int, db: Session = Depends(get_db)):
     pending = sum(1 for r in risks if r.decision == RiskDecision.pending)
     accepted = sum(1 for r in risks if r.decision == RiskDecision.accepted)
     ignored = sum(1 for r in risks if r.decision == RiskDecision.ignored)
+    v_active = sum(1 for r in risks if r.validity == RiskValidity.active)
+    v_superseded = sum(1 for r in risks if r.validity == RiskValidity.superseded)
+    v_reopened = sum(1 for r in risks if r.validity == RiskValidity.reopened)
+    v_resolved = sum(1 for r in risks if r.validity == RiskValidity.resolved)
     return RiskListResponse(
         risks=risk_reads,
         total=len(risks),
         pending=pending,
         accepted=accepted,
         ignored=ignored,
+        active=v_active,
+        superseded=v_superseded,
+        reopened=v_reopened,
+        resolved=v_resolved,
     )
 
 
@@ -108,3 +119,22 @@ def clarify_risk_endpoint(risk_id: str, payload: RiskClarifyRequest, db: Session
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return RiskItemRead.from_orm(risk)
+
+
+@router.post(
+    "/api/ai/risks/clarification-questions",
+    response_model=ClarificationQuestionsResponse,
+    status_code=status.HTTP_200_OK,
+)
+def get_clarification_questions(
+    payload: ClarificationQuestionsRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        questions = generate_clarification_questions(
+            db=db,
+            requirement_id=payload.requirement_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return ClarificationQuestionsResponse(questions=questions, total=len(questions))

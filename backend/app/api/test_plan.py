@@ -125,6 +125,21 @@ def _archive_active_sessions(db: Session, requirement_id: int):
     )
 
 
+def _get_session_for_requirement(
+    db: Session,
+    session_id: Optional[int],
+    requirement_id: int,
+) -> Optional[TestPlanSession]:
+    if not session_id:
+        return None
+    session = db.query(TestPlanSession).filter(TestPlanSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="session not found")
+    if session.requirement_id != requirement_id:
+        raise HTTPException(status_code=400, detail="session requirement mismatch")
+    return session
+
+
 # ===================== Session endpoints =====================
 
 
@@ -226,17 +241,26 @@ def api_generate_test_plan(
 ):
     _, nodes, paths = _load_nodes_and_paths(db, payload.requirement_id)
 
-    session: Optional[TestPlanSession] = None
-    if payload.session_id:
-        session = db.query(TestPlanSession).filter(TestPlanSession.id == payload.session_id).first()
-        if session:
-            session.status = TestPlanSessionStatus.plan_generating
-            db.commit()
+    session = _get_session_for_requirement(db, payload.session_id, payload.requirement_id)
+    previous_status = session.status if session else None
+    if session:
+        session.status = TestPlanSessionStatus.plan_generating
+        db.commit()
 
     try:
         result = generate_test_plan(nodes=nodes, paths=paths)
     except Exception as e:
         logger.exception("Failed to generate test plan")
+        if session:
+            if (
+                previous_status == TestPlanSessionStatus.plan_generating
+                and not session.plan_markdown
+                and not session.test_points_json
+            ):
+                session.status = TestPlanSessionStatus.archived
+            else:
+                session.status = previous_status or TestPlanSessionStatus.archived
+            db.commit()
         raise HTTPException(status_code=500, detail="生成测试方案失败: {0}".format(str(e)))
 
     test_points = [
@@ -275,12 +299,10 @@ def api_generate_test_cases(
 ):
     _, nodes, paths = _load_nodes_and_paths(db, payload.requirement_id)
 
-    session: Optional[TestPlanSession] = None
-    if payload.session_id:
-        session = db.query(TestPlanSession).filter(TestPlanSession.id == payload.session_id).first()
-        if session:
-            session.status = TestPlanSessionStatus.cases_generating
-            db.commit()
+    session = _get_session_for_requirement(db, payload.session_id, payload.requirement_id)
+    if session:
+        session.status = TestPlanSessionStatus.cases_generating
+        db.commit()
 
     test_points_dicts = [tp.dict() for tp in payload.test_points]
 
@@ -337,6 +359,26 @@ def api_confirm_test_cases(
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
 
+    session: Optional[TestPlanSession] = None
+    if payload.session_id:
+        session = db.query(TestPlanSession).filter(TestPlanSession.id == payload.session_id).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="session not found")
+        if session.requirement_id != payload.requirement_id:
+            raise HTTPException(status_code=400, detail="session requirement mismatch")
+        if (
+            session.status == TestPlanSessionStatus.confirmed
+            and session.confirmed_case_ids_json
+        ):
+            try:
+                existing_ids = json.loads(session.confirmed_case_ids_json)
+            except Exception:
+                existing_ids = []
+            return TestCaseConfirmResponse(
+                created_count=len(existing_ids),
+                created_case_ids=existing_ids,
+            )
+
     created_ids: List[int] = []
     for tc in payload.test_cases:
         case = TestCase(
@@ -350,23 +392,28 @@ def api_confirm_test_cases(
         )
 
         if tc.related_node_ids:
+            requested_ids = {node_id for node_id in tc.related_node_ids if node_id}
             nodes = (
                 db.query(RuleNode)
-                .filter(RuleNode.id.in_(tc.related_node_ids))
+                .filter(
+                    RuleNode.id.in_(requested_ids),
+                    RuleNode.requirement_id == payload.requirement_id,
+                    RuleNode.status != NodeStatus.deleted,
+                )
                 .all()
             )
+            if len(nodes) != len(requested_ids):
+                raise HTTPException(status_code=400, detail="invalid related_node_ids")
             case.bound_rule_nodes = nodes
 
         db.add(case)
         db.flush()
         created_ids.append(case.id)
 
-    if payload.session_id:
-        session = db.query(TestPlanSession).filter(TestPlanSession.id == payload.session_id).first()
-        if session:
-            session.confirmed_case_ids_json = json.dumps(created_ids)
-            session.status = TestPlanSessionStatus.confirmed
-            db.flush()
+    if session:
+        session.confirmed_case_ids_json = json.dumps(created_ids)
+        session.status = TestPlanSessionStatus.confirmed
+        db.flush()
 
     db.commit()
 

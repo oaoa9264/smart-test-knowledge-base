@@ -42,6 +42,16 @@ def _save_session_image(upload_file: Optional[UploadFile]) -> Optional[str]:
         fp.write(upload_file.file.read())
     return abs_path
 
+
+def _cleanup_session_image(image_path: Optional[str]) -> None:
+    if not image_path:
+        return
+    try:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+    except OSError:
+        pass
+
 router = APIRouter(prefix="/api/rules/sessions", tags=["rule-tree-sessions"])
 
 
@@ -75,6 +85,7 @@ async def generate_rule_tree(
     image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
 ):
+    image_path: Optional[str] = None
     try:
         image_path = _save_session_image(image)
         return start_generation(
@@ -85,8 +96,10 @@ async def generate_rule_tree(
             image_path=image_path,
         )
     except RuleTreeSessionConflictError as exc:
+        _cleanup_session_image(image_path)
         raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
+        _cleanup_session_image(image_path)
         raise HTTPException(status_code=400, detail=str(exc))
 
 

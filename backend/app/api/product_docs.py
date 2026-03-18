@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.entities import ProductDoc, ProductDocChunk, ProductDocUpdate
+from app.models.entities import EvidenceBlock, ProductDoc, ProductDocChunk, ProductDocUpdate
 from app.schemas.product_doc import (
     ProductDocChunkRead,
     ProductDocChunkUpdateRequest,
@@ -18,6 +18,7 @@ from app.schemas.product_doc import (
 from app.services.product_doc_service import (
     apply_doc_update,
     import_product_doc_from_text,
+    invalidate_chunk_evidence,
     reject_doc_update,
     suggest_doc_update,
     _extract_keywords_from_text,
@@ -88,6 +89,7 @@ def update_chunk(
     ).first()
     if not chunk:
         raise HTTPException(status_code=404, detail="chunk not found")
+    invalidate_chunk_evidence(db=db, chunk_id=chunk.id)
     chunk.content = payload.content
     chunk.keywords = ",".join(_extract_keywords_from_text(chunk.title + " " + payload.content))
     db.commit()
@@ -100,6 +102,11 @@ def delete_doc(product_code: str, db: Session = Depends(get_db)):
     doc = db.query(ProductDoc).filter(ProductDoc.product_code == product_code).first()
     if not doc:
         raise HTTPException(status_code=404, detail="product doc not found")
+    (
+        db.query(EvidenceBlock)
+        .filter(EvidenceBlock.product_doc_id == doc.id)
+        .delete(synchronize_session=False)
+    )
     db.delete(doc)
     db.commit()
 

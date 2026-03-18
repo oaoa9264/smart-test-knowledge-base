@@ -53,9 +53,12 @@ from fastapi.staticfiles import StaticFiles
 from app.api.architecture import BACKEND_DIR, router as architecture_router
 from app.api.ai_parse import router as ai_router
 from app.api.coverage import router as coverage_router
+from app.api.effective_requirements import router as effective_requirements_router
+from app.api.evidence_blocks import router as evidence_blocks_router
 from app.api.product_docs import router as product_doc_router
 from app.api.projects import router as project_router
 from app.api.recommendation import router as recommendation_router
+from app.api.requirement_inputs import router as requirement_inputs_router
 from app.api.risks import router as risk_router
 from app.api.test_plan import router as test_plan_router
 from app.api.rule_tree_session import router as rule_tree_session_router
@@ -65,8 +68,10 @@ from app.api.testcases import router as testcase_router
 from app.api.tree_diff import router as tree_diff_router
 from app.core.database import SessionLocal, engine
 from app.core.schema_migrations import (
+    ensure_requirement_source_type_values,
     ensure_product_knowledge_columns,
     ensure_requirements_versioning_columns,
+    ensure_risk_convergence_columns,
     ensure_rule_tree_session_async_columns,
     ensure_test_cases_precondition_column,
 )
@@ -74,9 +79,11 @@ from app.models.entities import Base, RuleTreeSession, RuleTreeSessionStatus
 
 Base.metadata.create_all(bind=engine)
 ensure_requirements_versioning_columns(engine)
+ensure_requirement_source_type_values(engine)
 ensure_test_cases_precondition_column(engine)
 ensure_rule_tree_session_async_columns(engine)
 ensure_product_knowledge_columns(engine)
+ensure_risk_convergence_columns(engine)
 
 app = FastAPI(title="Test Knowledge Base MVP", version="0.1.0")
 
@@ -144,3 +151,6 @@ app.include_router(architecture_router)
 app.include_router(risk_router)
 app.include_router(test_plan_router)
 app.include_router(product_doc_router)
+app.include_router(requirement_inputs_router)
+app.include_router(evidence_blocks_router)
+app.include_router(effective_requirements_router)

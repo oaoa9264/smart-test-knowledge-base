@@ -127,6 +127,7 @@ RISK_ANALYSIS_USER_TEMPLATE = """
 
 RISK_ANALYSIS_WITH_PRODUCT_USER_TEMPLATE = """
 请分析以下规则树和需求文本，结合产品背景知识，识别未覆盖的异常场景风险。
+{module_context}
 
 【产品背景知识】
 以下是该需求所属产品的相关流程说明，请结合这些已有的产品流程来分析需求是否存在遗漏或冲突：

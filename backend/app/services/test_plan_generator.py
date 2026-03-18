@@ -88,6 +88,71 @@ def _ensure_coverage(
     return test_points
 
 
+def _fallback_test_plan(nodes: List[Dict[str, Any]], paths: List[List[str]]) -> Dict[str, Any]:
+    node_map = {n["id"]: n for n in nodes}
+    coverable_ids = [n["id"] for n in nodes if n.get("node_type") in COVERABLE_TYPES]
+    fallback_ids = coverable_ids or [n["id"] for n in nodes]
+    lines = ["# 测试方案", "", "## 覆盖范围"]
+    if paths:
+        for idx, path in enumerate(paths, start=1):
+            contents = [node_map[nid].get("content", nid) for nid in path if nid in node_map]
+            if contents:
+                lines.append("{0}. {1}".format(idx, " -> ".join(contents)))
+    else:
+        for idx, node_id in enumerate(fallback_ids, start=1):
+            lines.append("{0}. {1}".format(idx, node_map.get(node_id, {}).get("content", node_id)))
+    if len(lines) == 3:
+        lines.append("1. 通用规则回归与关键流程检查")
+
+    test_points = []
+    for idx, node_id in enumerate(fallback_ids, start=1):
+        node = node_map.get(node_id, {})
+        test_points.append(
+            {
+                "id": "tp_fallback_{0}".format(idx),
+                "name": "覆盖-{0}".format(node.get("content", node_id)),
+                "description": "兜底生成：覆盖节点 {0}".format(node.get("content", node_id)),
+                "type": "normal",
+                "related_node_ids": [node_id],
+                "priority": "medium",
+            }
+        )
+    if not test_points:
+        test_points.append(
+            {
+                "id": "tp_fallback_general",
+                "name": "通用回归检查",
+                "description": "兜底生成：覆盖需求关键流程与异常处理",
+                "type": "normal",
+                "related_node_ids": [],
+                "priority": "medium",
+            }
+        )
+    return {"markdown": "\n".join(lines), "test_points": test_points}
+
+
+def _fallback_test_cases(
+    test_points: List[Dict[str, Any]],
+    nodes: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    node_map = {n["id"]: n for n in nodes}
+    fallback_cases = []
+    for idx, point in enumerate(test_points, start=1):
+        related_ids = [nid for nid in point.get("related_node_ids", []) if nid in node_map]
+        title_suffix = point.get("name") or "测试点{0}".format(idx)
+        fallback_cases.append(
+            {
+                "title": "兜底用例-{0}".format(title_suffix),
+                "preconditions": ["系统已准备好执行该测试点"],
+                "steps": ["执行测试点：{0}".format(title_suffix)],
+                "expected_result": ["相关规则按预期生效"],
+                "risk_level": "medium",
+                "related_node_ids": related_ids,
+            }
+        )
+    return fallback_cases
+
+
 def generate_test_plan(
     nodes: List[Dict[str, Any]],
     paths: List[List[str]],
@@ -106,11 +171,19 @@ def generate_test_plan(
         paths_json=paths_json,
     )
 
-    llm = llm_client or LLMClient()
-    result = llm.chat_with_json(
-        system_prompt=TEST_PLAN_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
-    )
+    try:
+        llm = llm_client or LLMClient()
+        result = llm.chat_with_json(
+            system_prompt=TEST_PLAN_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Test plan generation failed (%s: %s), using fallback",
+            type(exc).__name__,
+            exc,
+        )
+        result = _fallback_test_plan(nodes=nodes, paths=paths)
 
     markdown = result.get("markdown", "")
     test_points = result.get("test_points", [])
@@ -146,11 +219,19 @@ def generate_test_cases(
         paths_json=paths_json,
     )
 
-    llm = llm_client or LLMClient()
-    result = llm.chat_with_json(
-        system_prompt=TEST_CASE_GEN_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
-    )
+    try:
+        llm = llm_client or LLMClient()
+        result = llm.chat_with_json(
+            system_prompt=TEST_CASE_GEN_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Test case generation failed (%s: %s), using fallback",
+            type(exc).__name__,
+            exc,
+        )
+        result = {"test_cases": _fallback_test_cases(test_points=test_points, nodes=nodes)}
 
     test_cases = result.get("test_cases", [])
     if not isinstance(test_cases, list):

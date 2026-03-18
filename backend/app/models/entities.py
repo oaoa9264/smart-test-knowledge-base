@@ -84,6 +84,60 @@ class DocUpdateStatus(str, enum.Enum):
     rejected = "rejected"
 
 
+class InputType(str, enum.Enum):
+    raw_requirement = "raw_requirement"
+    pm_addendum = "pm_addendum"
+    test_clarification = "test_clarification"
+    review_note = "review_note"
+
+
+class AnalysisStage(str, enum.Enum):
+    review = "review"
+    pre_dev = "pre_dev"
+    pre_release = "pre_release"
+
+
+class SnapshotStatus(str, enum.Enum):
+    draft = "draft"
+    confirmed = "confirmed"
+    superseded = "superseded"
+
+
+class Derivation(str, enum.Enum):
+    explicit = "explicit"
+    inferred = "inferred"
+    missing = "missing"
+    contradicted = "contradicted"
+
+
+class EvidenceType(str, enum.Enum):
+    precondition = "precondition"
+    state_rule = "state_rule"
+    field_rule = "field_rule"
+    permission_rule = "permission_rule"
+    exception_rule = "exception_rule"
+    terminology = "terminology"
+
+
+class EvidenceStatus(str, enum.Enum):
+    draft = "draft"
+    verified = "verified"
+    rejected = "rejected"
+
+
+class EvidenceCreatedFrom(str, enum.Enum):
+    ai_bootstrap = "ai_bootstrap"
+    risk_clarification = "risk_clarification"
+    manual_edit = "manual_edit"
+
+
+class RiskValidity(str, enum.Enum):
+    active = "active"
+    superseded = "superseded"
+    reopened = "reopened"
+    resolved = "resolved"
+
+
 class RecoMode(str, enum.Enum):
     full = "FULL"
     change = "CHANGE"
@@ -163,6 +217,16 @@ class Requirement(Base):
     risk_items = relationship("RiskItem", back_populates="requirement", cascade="all, delete-orphan")
     rule_tree_sessions = relationship("RuleTreeSession", back_populates="requirement", cascade="all, delete-orphan")
     test_plan_sessions = relationship("TestPlanSession", back_populates="requirement", cascade="all, delete-orphan")
+    requirement_inputs = relationship(
+        "RequirementInput",
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+    )
+    effective_requirement_snapshots = relationship(
+        "EffectiveRequirementSnapshot",
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+    )
 
 
 class RuleNode(Base):
@@ -283,10 +347,18 @@ class RiskItem(Base):
     risk_source = Column(Enum(RiskSource), default=RiskSource.rule_tree, nullable=False)
     clarification_text = Column(Text, nullable=True)
     doc_update_needed = Column(Boolean, default=False, nullable=False)
+    analysis_stage = Column(Enum(AnalysisStage), nullable=True)
+    validity = Column(Enum(RiskValidity), default=RiskValidity.active, nullable=True)
+    origin_snapshot_id = Column(Integer, ForeignKey("effective_requirement_snapshots.id"), nullable=True)
+    last_seen_snapshot_id = Column(Integer, ForeignKey("effective_requirement_snapshots.id"), nullable=True)
+    last_analysis_at = Column(DateTime, nullable=True)
+    converted_node_id = Column(String(64), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     requirement = relationship("Requirement", back_populates="risk_items")
     related_node = relationship("RuleNode", foreign_keys=[related_node_id])
+    origin_snapshot = relationship("EffectiveRequirementSnapshot", foreign_keys=[origin_snapshot_id])
+    last_seen_snapshot = relationship("EffectiveRequirementSnapshot", foreign_keys=[last_seen_snapshot_id])
 
 
 class RuleTreeSession(Base):
@@ -365,6 +437,72 @@ class DiffRecord(Base):
     compare_requirement = relationship("Requirement", foreign_keys=[compare_requirement_id])
 
 
+class RequirementInput(Base):
+    __tablename__ = "requirement_inputs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False, index=True)
+    input_type = Column(Enum(InputType), nullable=False)
+    content = Column(Text, nullable=False)
+    source_label = Column(String(255), nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    requirement = relationship("Requirement", back_populates="requirement_inputs")
+
+
+class EffectiveRequirementSnapshot(Base):
+    __tablename__ = "effective_requirement_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False, index=True)
+    stage = Column(Enum(AnalysisStage), nullable=False)
+    status = Column(Enum(SnapshotStatus), default=SnapshotStatus.draft, nullable=False)
+    based_on_input_ids = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+    base_snapshot_id = Column(Integer, ForeignKey("effective_requirement_snapshots.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    requirement = relationship("Requirement", back_populates="effective_requirement_snapshots")
+    base_snapshot = relationship("EffectiveRequirementSnapshot", remote_side=[id])
+    fields = relationship("EffectiveRequirementField", back_populates="snapshot", cascade="all, delete-orphan")
+
+
+class EffectiveRequirementField(Base):
+    __tablename__ = "effective_requirement_fields"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_id = Column(Integer, ForeignKey("effective_requirement_snapshots.id"), nullable=False, index=True)
+    field_key = Column(String(64), nullable=False)
+    value = Column(Text, nullable=True)
+    derivation = Column(Enum(Derivation), nullable=True)
+    confidence = Column(Float, nullable=True)
+    source_refs = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    sort_order = Column(Integer, default=0, nullable=False)
+
+    snapshot = relationship("EffectiveRequirementSnapshot", back_populates="fields")
+
+
+class EvidenceBlock(Base):
+    __tablename__ = "evidence_blocks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_doc_id = Column(Integer, ForeignKey("product_docs.id"), nullable=False, index=True)
+    chunk_id = Column(Integer, ForeignKey("product_doc_chunks.id"), nullable=True, index=True)
+    evidence_type = Column(Enum(EvidenceType), nullable=False)
+    module_name = Column(String(255), nullable=True)
+    statement = Column(Text, nullable=False)
+    status = Column(Enum(EvidenceStatus), default=EvidenceStatus.draft, nullable=False)
+    source_span = Column(Text, nullable=True)
+    chunk_content_hash = Column(String(64), nullable=True)
+    created_from = Column(Enum(EvidenceCreatedFrom), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    product_doc = relationship("ProductDoc")
+    chunk = relationship("ProductDocChunk")
+
+
 class ProductDoc(Base):
     __tablename__ = "product_docs"
 
@@ -391,6 +529,8 @@ class ProductDocChunk(Base):
     content = Column(Text, nullable=False)
     sort_order = Column(Integer, default=0, nullable=False)
     keywords = Column(Text, nullable=True)
+    parent_title = Column(String(255), nullable=True)
+    heading_level = Column(Integer, nullable=True)
 
     product_doc = relationship("ProductDoc", back_populates="chunks")
 

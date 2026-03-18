@@ -189,12 +189,16 @@ function buildSessionGenerateResultFromSession(session?: RuleTreeSession | null)
     return null;
   }
 
+  const baseTree = parseSessionTreeSnapshot(session.confirmed_tree_snapshot) || {
+    decision_tree: { nodes: [] },
+  };
+
   return {
     session,
     generated_tree: normalizedGeneratedTree,
     reviewed_tree: normalizedReviewedTree,
     diff: {
-      summary: buildGeneratedTreeDiffSummary(normalizedGeneratedTree, normalizedReviewedTree),
+      summary: buildGeneratedTreeDiffSummary(baseTree, normalizedReviewedTree),
       node_changes: [],
     },
   };

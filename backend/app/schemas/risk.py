@@ -20,6 +20,11 @@ class RiskItemRead(BaseModel):
     risk_source: str = "rule_tree"
     clarification_text: Optional[str] = None
     doc_update_needed: bool = False
+    analysis_stage: Optional[str] = None
+    validity: Optional[str] = "active"
+    origin_snapshot_id: Optional[int] = None
+    last_seen_snapshot_id: Optional[int] = None
+    last_analysis_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
 
     class Config:
@@ -52,3 +57,22 @@ class RiskListResponse(BaseModel):
     pending: int
     accepted: int
     ignored: int
+    active: int = 0
+    superseded: int = 0
+    reopened: int = 0
+    resolved: int = 0
+
+
+class ClarificationQuestion(BaseModel):
+    module: str
+    question: str
+    context: str
+
+
+class ClarificationQuestionsRequest(BaseModel):
+    requirement_id: int
+
+
+class ClarificationQuestionsResponse(BaseModel):
+    questions: List[ClarificationQuestion]
+    total: int

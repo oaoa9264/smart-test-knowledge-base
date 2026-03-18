@@ -15,7 +15,6 @@ from app.models.entities import (
     RiskItem,
     RiskLevel,
     RuleNode,
-    RulePath,
     RuleTreeMessage,
     RuleTreeSession,
     RuleTreeSessionStatus,
@@ -31,7 +30,7 @@ from app.services.prompts.rule_tree_session import (
     INCREMENTAL_UPDATE_USER_TEMPLATE,
     REVIEW_USER_PROMPT,
 )
-from app.services.rule_engine import derive_rule_paths
+from app.services.rule_path_service import sync_rule_paths
 
 _NODE_TYPE_ALIASES = {
     "root": "root",
@@ -251,25 +250,7 @@ def compute_requirement_diff(old_text: str, new_text: str) -> str:
 
 
 def _regenerate_paths(db: Session, requirement_id: int) -> None:
-    db.query(RulePath).filter(RulePath.requirement_id == requirement_id).delete()
-    nodes = (
-        db.query(RuleNode)
-        .filter(
-            RuleNode.requirement_id == requirement_id,
-            RuleNode.status != NodeStatus.deleted,
-        )
-        .all()
-    )
-    node_dicts = [{"id": item.id, "parent_id": item.parent_id} for item in nodes]
-    paths = derive_rule_paths(node_dicts)
-    for seq in paths:
-        db.add(
-            RulePath(
-                id=str(uuid.uuid4()),
-                requirement_id=requirement_id,
-                node_sequence=",".join(seq),
-            )
-        )
+    sync_rule_paths(db, requirement_id)
 
 
 def _import_tree_to_requirement(db: Session, requirement_id: int, tree_json: Dict[str, Any]) -> int:

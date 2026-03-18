@@ -10,13 +10,14 @@ from app.core.database import get_db
 from app.models.entities import (
     AnalysisStatus,
     ArchitectureAnalysis,
+    InputType,
     NodeStatus,
     NodeType,
     Project,
     Requirement,
+    RequirementInput,
     RiskLevel,
     RuleNode,
-    RulePath,
     SourceType,
 )
 from app.schemas.architecture import (
@@ -26,7 +27,7 @@ from app.schemas.architecture import (
     ArchitectureImportResult,
 )
 from app.services.architecture_analyzer import get_analyzer_provider
-from app.services.rule_engine import derive_rule_paths
+from app.services.rule_path_service import sync_rule_paths
 
 router = APIRouter(prefix="/api/ai/architecture", tags=["architecture"])
 
@@ -103,25 +104,7 @@ def _to_risk_level(value: str) -> RiskLevel:
 
 
 def _regenerate_paths(db: Session, requirement_id: int):
-    db.query(RulePath).filter(RulePath.requirement_id == requirement_id).delete()
-
-    nodes = (
-        db.query(RuleNode)
-        .filter(RuleNode.requirement_id == requirement_id, RuleNode.status != NodeStatus.deleted)
-        .all()
-    )
-    node_dicts = [{"id": n.id, "parent_id": n.parent_id} for n in nodes]
-
-    paths = derive_rule_paths(node_dicts)
-    for seq in paths:
-        db.add(
-            RulePath(
-                id=str(uuid.uuid4()),
-                requirement_id=requirement_id,
-                node_sequence=",".join(seq),
-            )
-        )
-    db.commit()
+    sync_rule_paths(db, requirement_id)
 
 
 @router.post("/analyze", response_model=ArchitectureAnalyzeResponse, status_code=status.HTTP_201_CREATED)
@@ -141,7 +124,17 @@ async def analyze_architecture(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="project not found")
 
     requirement_id_raw = form.get("requirement_id")
-    requirement_id = int(requirement_id_raw) if requirement_id_raw else None
+    requirement_id = None
+    if requirement_id_raw:
+        try:
+            requirement_id = int(requirement_id_raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="requirement_id must be integer")
+        requirement = db.query(Requirement).filter(Requirement.id == requirement_id).first()
+        if not requirement:
+            raise HTTPException(status_code=404, detail="requirement not found")
+        if requirement.project_id != project_id:
+            raise HTTPException(status_code=400, detail="invalid project_requirement relation")
     title = str(form.get("title") or "需求拆解")
     description_text = str(form.get("description_text") or "").strip()
 
@@ -212,6 +205,15 @@ def import_analysis(
             source_type=SourceType.flowchart,
         )
         db.add(requirement)
+        db.flush()
+        db.add(
+            RequirementInput(
+                requirement_id=requirement.id,
+                input_type=InputType.raw_requirement,
+                content=requirement.raw_text,
+                source_label="requirement.raw_text",
+            )
+        )
         db.commit()
         db.refresh(requirement)
         analysis.requirement_id = requirement.id
@@ -222,37 +224,46 @@ def import_analysis(
     id_map = {}
 
     if payload.import_decision_tree:
-        pending_nodes = generated_nodes[:]
-        while pending_nodes:
-            progress = False
-            next_round = []
-            for item in pending_nodes:
-                source_parent_id = item.get("parent_id")
-                if source_parent_id and source_parent_id not in id_map:
-                    next_round.append(item)
-                    continue
+        existing_node_count = (
+            db.query(RuleNode)
+            .filter(
+                RuleNode.requirement_id == requirement.id,
+                RuleNode.status != NodeStatus.deleted,
+            )
+            .count()
+        )
+        if existing_node_count == 0:
+            pending_nodes = generated_nodes[:]
+            while pending_nodes:
+                progress = False
+                next_round = []
+                for item in pending_nodes:
+                    source_parent_id = item.get("parent_id")
+                    if source_parent_id and source_parent_id not in id_map:
+                        next_round.append(item)
+                        continue
 
-                node = RuleNode(
-                    id=str(uuid.uuid4()),
-                    requirement_id=requirement.id,
-                    parent_id=id_map.get(source_parent_id),
-                    node_type=_to_node_type(item.get("type", "branch")),
-                    content=item.get("content", ""),
-                    risk_level=_to_risk_level(item.get("risk_level", "medium")),
-                    status=NodeStatus.active,
-                )
-                db.add(node)
-                db.flush()
-                id_map[item["id"]] = node.id
-                imported_rule_nodes += 1
-                progress = True
+                    node = RuleNode(
+                        id=str(uuid.uuid4()),
+                        requirement_id=requirement.id,
+                        parent_id=id_map.get(source_parent_id),
+                        node_type=_to_node_type(item.get("type", "branch")),
+                        content=item.get("content", ""),
+                        risk_level=_to_risk_level(item.get("risk_level", "medium")),
+                        status=NodeStatus.active,
+                    )
+                    db.add(node)
+                    db.flush()
+                    id_map[item["id"]] = node.id
+                    imported_rule_nodes += 1
+                    progress = True
 
-            if not progress:
-                break
-            pending_nodes = next_round
+                if not progress:
+                    break
+                pending_nodes = next_round
 
-        db.commit()
-        _regenerate_paths(db, requirement.id)
+            db.commit()
+            _regenerate_paths(db, requirement.id)
 
     analysis.status = AnalysisStatus.imported
     db.commit()

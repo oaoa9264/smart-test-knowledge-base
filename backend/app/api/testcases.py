@@ -5,7 +5,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.entities import Project, Requirement, RuleNode, RulePath, TestCase
+from app.models.entities import NodeStatus, Project, Requirement, RuleNode, RulePath, TestCase
 from app.schemas.testcase import TestCaseCreate, TestCaseRead, TestCaseUpdate
 
 router = APIRouter(prefix="/api/testcases", tags=["testcases"])
@@ -28,6 +28,51 @@ def _to_read_model(case: TestCase) -> TestCaseRead:
     )
 
 
+def _resolve_case_bindings(
+    db: Session,
+    project_id: int,
+    bound_rule_node_ids: List[str],
+    bound_path_ids: List[str],
+):
+    requested_node_ids = list(dict.fromkeys(bound_rule_node_ids or []))
+    requested_path_ids = list(dict.fromkeys(bound_path_ids or []))
+
+    nodes = []
+    if requested_node_ids:
+        node_rows = (
+            db.query(RuleNode)
+            .join(Requirement, RuleNode.requirement_id == Requirement.id)
+            .filter(
+                RuleNode.id.in_(requested_node_ids),
+                RuleNode.status != NodeStatus.deleted,
+                Requirement.project_id == project_id,
+            )
+            .all()
+        )
+        node_map = {node.id: node for node in node_rows}
+        if len(node_map) != len(requested_node_ids):
+            raise HTTPException(status_code=400, detail="invalid bound_rule_node_ids")
+        nodes = [node_map[node_id] for node_id in requested_node_ids]
+
+    paths = []
+    if requested_path_ids:
+        path_rows = (
+            db.query(RulePath)
+            .join(Requirement, RulePath.requirement_id == Requirement.id)
+            .filter(
+                RulePath.id.in_(requested_path_ids),
+                Requirement.project_id == project_id,
+            )
+            .all()
+        )
+        path_map = {path.id: path for path in path_rows}
+        if len(path_map) != len(requested_path_ids):
+            raise HTTPException(status_code=400, detail="invalid bound_path_ids")
+        paths = [path_map[path_id] for path_id in requested_path_ids]
+
+    return nodes, paths
+
+
 @router.post("", response_model=TestCaseRead, status_code=status.HTTP_201_CREATED)
 def create_testcase(payload: TestCaseCreate, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == payload.project_id).first()
@@ -44,12 +89,14 @@ def create_testcase(payload: TestCaseCreate, db: Session = Depends(get_db)):
         status=payload.status,
     )
 
-    if payload.bound_rule_node_ids:
-        nodes = db.query(RuleNode).filter(RuleNode.id.in_(payload.bound_rule_node_ids)).all()
-        case.bound_rule_nodes = nodes
-    if payload.bound_path_ids:
-        paths = db.query(RulePath).filter(RulePath.id.in_(payload.bound_path_ids)).all()
-        case.bound_paths = paths
+    nodes, paths = _resolve_case_bindings(
+        db=db,
+        project_id=payload.project_id,
+        bound_rule_node_ids=payload.bound_rule_node_ids,
+        bound_path_ids=payload.bound_path_ids,
+    )
+    case.bound_rule_nodes = nodes
+    case.bound_paths = paths
 
     db.add(case)
     db.commit()
@@ -107,14 +154,13 @@ def update_testcase(case_id: int, payload: TestCaseUpdate, db: Session = Depends
     case.risk_level = payload.risk_level
     case.status = payload.status
 
-    nodes = db.query(RuleNode).filter(RuleNode.id.in_(payload.bound_rule_node_ids)).all() if payload.bound_rule_node_ids else []
-    if len(nodes) != len(set(payload.bound_rule_node_ids)):
-        raise HTTPException(status_code=400, detail="invalid bound_rule_node_ids")
+    nodes, paths = _resolve_case_bindings(
+        db=db,
+        project_id=case.project_id,
+        bound_rule_node_ids=payload.bound_rule_node_ids,
+        bound_path_ids=payload.bound_path_ids,
+    )
     case.bound_rule_nodes = nodes
-
-    paths = db.query(RulePath).filter(RulePath.id.in_(payload.bound_path_ids)).all() if payload.bound_path_ids else []
-    if len(paths) != len(set(payload.bound_path_ids)):
-        raise HTTPException(status_code=400, detail="invalid bound_path_ids")
     case.bound_paths = paths
 
     db.commit()

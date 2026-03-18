@@ -2,6 +2,10 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 
+_VALID_REQUIREMENT_SOURCE_TYPES = ("prd", "flowchart", "api_doc")
+_DEFAULT_REQUIREMENT_SOURCE_TYPE = "prd"
+
+
 def _ensure_additive_columns(engine: Engine, table_name: str, column_definitions: dict) -> None:
     with engine.begin() as conn:
         inspector = inspect(conn)
@@ -35,6 +39,27 @@ def ensure_requirements_versioning_columns(engine: Engine) -> None:
         )
 
 
+def ensure_requirement_source_type_values(engine: Engine) -> None:
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "requirements" not in inspector.get_table_names():
+            return
+
+        columns = {item["name"] for item in inspector.get_columns("requirements")}
+        if "source_type" not in columns:
+            return
+
+        valid_values_sql = ", ".join(f"'{value}'" for value in _VALID_REQUIREMENT_SOURCE_TYPES)
+        conn.execute(
+            text(
+                "UPDATE requirements "
+                "SET source_type = :default_source_type "
+                f"WHERE source_type NOT IN ({valid_values_sql})"
+            ),
+            {"default_source_type": _DEFAULT_REQUIREMENT_SOURCE_TYPE},
+        )
+
+
 def ensure_test_cases_precondition_column(engine: Engine) -> None:
     with engine.begin() as conn:
         inspector = inspect(conn)
@@ -63,6 +88,39 @@ def ensure_rule_tree_session_async_columns(engine: Engine) -> None:
     )
 
 
+def ensure_product_doc_chunk_hierarchy_columns(engine: Engine) -> None:
+    _ensure_additive_columns(
+        engine,
+        "product_doc_chunks",
+        {
+            "parent_title": "parent_title VARCHAR(255)",
+            "heading_level": "heading_level INTEGER",
+        },
+    )
+
+
+def ensure_risk_convergence_columns(engine: Engine) -> None:
+    _ensure_additive_columns(
+        engine,
+        "risk_items",
+        {
+            "analysis_stage": "analysis_stage VARCHAR(20)",
+            "validity": "validity VARCHAR(20) DEFAULT 'active'",
+            "origin_snapshot_id": "origin_snapshot_id INTEGER",
+            "last_seen_snapshot_id": "last_seen_snapshot_id INTEGER",
+            "last_analysis_at": "last_analysis_at DATETIME",
+            "converted_node_id": "converted_node_id VARCHAR(64)",
+        },
+    )
+    _ensure_additive_columns(
+        engine,
+        "evidence_blocks",
+        {
+            "chunk_content_hash": "chunk_content_hash VARCHAR(64)",
+        },
+    )
+
+
 def ensure_product_knowledge_columns(engine: Engine) -> None:
     _ensure_additive_columns(
         engine,
@@ -78,5 +136,13 @@ def ensure_product_knowledge_columns(engine: Engine) -> None:
             "risk_source": "risk_source VARCHAR(20) DEFAULT 'rule_tree'",
             "clarification_text": "clarification_text TEXT",
             "doc_update_needed": "doc_update_needed BOOLEAN DEFAULT 0",
+        },
+    )
+    _ensure_additive_columns(
+        engine,
+        "product_doc_chunks",
+        {
+            "parent_title": "parent_title VARCHAR(255)",
+            "heading_level": "heading_level INTEGER",
         },
     )

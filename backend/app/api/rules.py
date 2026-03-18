@@ -7,7 +7,7 @@ from app.core.database import get_db
 from app.models.entities import NodeStatus, Requirement, RiskItem, RuleNode, RulePath, TestCase, TestCaseStatus
 from app.schemas.rule import RuleNodeCreate, RuleNodeRead, RuleNodeUpdate, RulePathRead, RuleTreeRead
 from app.services.impact import analyze_impact
-from app.services.rule_engine import derive_rule_paths
+from app.services.rule_path_service import sync_rule_paths
 
 router = APIRouter(prefix="/api/rules", tags=["rules"])
 
@@ -55,27 +55,7 @@ def _assert_parent_chain_no_cycle(
 
 
 def _regenerate_paths(db: Session, requirement_id: int):
-    db.query(RulePath).filter(RulePath.requirement_id == requirement_id).delete()
-
-    nodes = (
-        db.query(RuleNode)
-        .filter(RuleNode.requirement_id == requirement_id, RuleNode.status != NodeStatus.deleted)
-        .all()
-    )
-    node_dicts = [{"id": n.id, "parent_id": n.parent_id} for n in nodes]
-
-    paths = derive_rule_paths(node_dicts)
-    path_rows = []
-    for seq in paths:
-        path = RulePath(
-            id=str(uuid.uuid4()),
-            requirement_id=requirement_id,
-            node_sequence=",".join(seq),
-        )
-        db.add(path)
-        path_rows.append(path)
-    db.commit()
-    return path_rows
+    return sync_rule_paths(db, requirement_id)
 
 
 def _mark_impacted_cases(db: Session, changed_node_ids, requirement_id: int):
