@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.core.database import get_db
-from app.models.entities import NodeStatus, Project, Requirement, RuleNode
+from app.models.entities import InputType, NodeStatus, Project, Requirement, RequirementInput, RuleNode, SourceType
 from app.schemas.project import (
     ProjectCreate,
     ProjectRead,
@@ -18,6 +18,8 @@ from app.schemas.project import (
 )
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+_VALID_SOURCE_TYPES = {source_type.value for source_type in SourceType}
 
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
@@ -74,14 +76,28 @@ def create_requirement(project_id: int, payload: RequirementCreate, db: Session 
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
+    if payload.source_type not in _VALID_SOURCE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid source_type, must be one of: {0}".format(", ".join(sorted(_VALID_SOURCE_TYPES))),
+        )
 
     requirement = Requirement(
         project_id=project_id,
         title=payload.title,
         raw_text=payload.raw_text,
-        source_type=payload.source_type,
+        source_type=SourceType(payload.source_type),
     )
     db.add(requirement)
+    db.flush()
+    db.add(
+        RequirementInput(
+            requirement_id=requirement.id,
+            input_type=InputType.raw_requirement,
+            content=payload.raw_text,
+            source_label="requirement.raw_text",
+        )
+    )
     db.commit()
     db.refresh(requirement)
     return requirement
@@ -123,9 +139,34 @@ def update_requirement(
     )
     if not requirement:
         raise HTTPException(status_code=404, detail="requirement not found")
+    if payload.source_type not in _VALID_SOURCE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid source_type, must be one of: {0}".format(", ".join(sorted(_VALID_SOURCE_TYPES))),
+        )
     requirement.title = payload.title
     requirement.raw_text = payload.raw_text
-    requirement.source_type = payload.source_type
+    requirement.source_type = SourceType(payload.source_type)
+    raw_input = (
+        db.query(RequirementInput)
+        .filter(
+            RequirementInput.requirement_id == requirement_id,
+            RequirementInput.input_type == InputType.raw_requirement,
+        )
+        .order_by(RequirementInput.created_at.asc(), RequirementInput.id.asc())
+        .first()
+    )
+    if raw_input is None:
+        db.add(
+            RequirementInput(
+                requirement_id=requirement_id,
+                input_type=InputType.raw_requirement,
+                content=payload.raw_text,
+                source_label="requirement.raw_text",
+            )
+        )
+    else:
+        raw_input.content = payload.raw_text
     db.commit()
     db.refresh(requirement)
     return requirement
@@ -179,6 +220,15 @@ def create_new_version(project_id: int, requirement_id: int, db: Session = Depen
         requirement_group_id=group_id,
     )
     db.add(new_requirement)
+    db.flush()
+    db.add(
+        RequirementInput(
+            requirement_id=new_requirement.id,
+            input_type=InputType.raw_requirement,
+            content=new_requirement.raw_text,
+            source_label="requirement.raw_text",
+        )
+    )
     db.commit()
     db.refresh(new_requirement)
     return new_requirement

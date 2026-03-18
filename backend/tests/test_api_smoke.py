@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
+from sqlalchemy import inspect
 from uuid import uuid4
 
+from app.core.database import engine
 from app.main import app
 
 
@@ -11,6 +13,82 @@ def test_health():
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_risk_convergence_tables_exist():
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+
+    assert "requirement_inputs" in table_names
+    assert "effective_requirement_snapshots" in table_names
+    assert "effective_requirement_fields" in table_names
+    assert "evidence_blocks" in table_names
+
+
+def test_risk_convergence_columns_exist():
+    inspector = inspect(engine)
+    risk_item_columns = {column["name"] for column in inspector.get_columns("risk_items")}
+
+    assert "analysis_stage" in risk_item_columns
+    assert "validity" in risk_item_columns
+    assert "origin_snapshot_id" in risk_item_columns
+    assert "last_seen_snapshot_id" in risk_item_columns
+    assert "last_analysis_at" in risk_item_columns
+
+
+def test_requirement_input_crud():
+    project_resp = client.post(
+        "/api/projects",
+        json={"name": "P-INPUT-{0}".format(uuid4().hex[:8]), "description": "input crud"},
+    )
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    requirement_resp = client.post(
+        f"/api/projects/{project_id}/requirements",
+        json={"title": "输入需求", "raw_text": "系统支持手工补充输入。", "source_type": "prd"},
+    )
+    assert requirement_resp.status_code == 201
+    requirement_id = requirement_resp.json()["id"]
+
+    create_resp = client.post(
+        f"/api/requirements/{requirement_id}/inputs",
+        json={
+            "input_type": "pm_addendum",
+            "content": "PM 补充：登录失败 5 次后触发验证码。",
+            "source_label": "manual",
+        },
+    )
+    assert create_resp.status_code == 201
+    assert create_resp.json()["input_type"] == "pm_addendum"
+
+    list_resp = client.get(f"/api/requirements/{requirement_id}/inputs")
+    assert list_resp.status_code == 200
+    assert any(item["content"] == "PM 补充：登录失败 5 次后触发验证码。" for item in list_resp.json())
+
+
+def test_review_snapshot_creation():
+    project_resp = client.post(
+        "/api/projects",
+        json={"name": "P-SNAPSHOT-{0}".format(uuid4().hex[:8]), "description": "snapshot smoke"},
+    )
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    requirement_resp = client.post(
+        f"/api/projects/{project_id}/requirements",
+        json={"title": "评审快照需求", "raw_text": "用户提交表单时需要校验手机号格式。", "source_type": "prd"},
+    )
+    assert requirement_resp.status_code == 201
+    requirement_id = requirement_resp.json()["id"]
+
+    review_resp = client.post(f"/api/requirements/{requirement_id}/snapshots/review")
+    assert review_resp.status_code == 200
+    body = review_resp.json()
+    assert body["snapshot"]["requirement_id"] == requirement_id
+    assert body["snapshot"]["stage"] == "review"
+    assert isinstance(body["risks"], list)
+    assert isinstance(body["clarification_hints"], list)
 
 
 def test_project_rule_case_coverage_flow():
