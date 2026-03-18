@@ -39,8 +39,9 @@ export async function deleteProductDoc(productCode: string): Promise<void> {
 
 export async function suggestDocUpdate(payload: {
   product_doc_id: number;
-  risk_item_id: string;
+  risk_item_id?: string;
   clarification_text: string;
+  supplement_text?: string;
 }): Promise<ProductDocUpdate> {
   const { data } = await http.post<ProductDocUpdate>("/api/product-docs/suggest-update", payload);
   return data;

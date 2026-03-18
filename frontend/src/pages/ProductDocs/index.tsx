@@ -35,6 +35,7 @@ import {
   fetchProductDocs,
   importProductDoc,
   rejectDocUpdate,
+  suggestDocUpdate,
   updateChunk,
 } from "../../api/productDocs";
 
@@ -55,6 +56,8 @@ export default function ProductDocsPage() {
   const [updatesLoading, setUpdatesLoading] = useState(false);
   const [editChunkModal, setEditChunkModal] = useState<{ chunkId: number; content: string } | null>(null);
   const [editChunkForm] = Form.useForm();
+  const [manualBackfillOpen, setManualBackfillOpen] = useState(false);
+  const [manualBackfillForm] = Form.useForm();
 
   useEffect(() => {
     loadDocs();
@@ -158,6 +161,27 @@ export default function ProductDocsPage() {
       loadDocDetail(selectedDoc.product_code);
     } catch {
       message.error("更新失败");
+    }
+  };
+
+  const handleManualBackfill = async () => {
+    if (!selectedDoc) {
+      message.warning("请先选择产品文档");
+      return;
+    }
+    const values = await manualBackfillForm.validateFields();
+    try {
+      await suggestDocUpdate({
+        product_doc_id: selectedDoc.id,
+        clarification_text: values.clarification_text,
+        supplement_text: values.supplement_text,
+      });
+      message.success("知识补录建议已生成");
+      setManualBackfillOpen(false);
+      manualBackfillForm.resetFields();
+      loadUpdates(selectedDoc.id);
+    } catch {
+      message.error("知识补录失败");
     }
   };
 
@@ -287,7 +311,15 @@ export default function ProductDocsPage() {
           <Card><Spin /></Card>
         ) : selectedDoc ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <Card title={`${selectedDoc.name} (v${selectedDoc.version})`} size="small">
+            <Card
+              title={`${selectedDoc.name} (v${selectedDoc.version})`}
+              size="small"
+              extra={
+                <Button onClick={() => setManualBackfillOpen(true)}>
+                  手工补录知识
+                </Button>
+              }
+            >
               <Descriptions size="small" column={2}>
                 <Descriptions.Item label="产品标识">{selectedDoc.product_code}</Descriptions.Item>
                 <Descriptions.Item label="版本">{selectedDoc.version}</Descriptions.Item>
@@ -388,6 +420,32 @@ export default function ProductDocsPage() {
         <Form layout="vertical" form={editChunkForm}>
           <Form.Item label="段落内容" name="content" rules={[{ required: true, message: "请输入内容" }]}>
             <Input.TextArea rows={12} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="手工补录知识"
+        open={manualBackfillOpen}
+        onCancel={() => setManualBackfillOpen(false)}
+        onOk={handleManualBackfill}
+        width={700}
+        okText="生成建议"
+      >
+        <Form layout="vertical" form={manualBackfillForm}>
+          <Form.Item
+            label="补充知识"
+            name="supplement_text"
+            rules={[{ required: true, message: "请输入补充知识内容" }]}
+          >
+            <Input.TextArea rows={6} placeholder="请输入需要补录到产品文档中的自由文本知识" />
+          </Form.Item>
+          <Form.Item
+            label="补录说明"
+            name="clarification_text"
+            rules={[{ required: true, message: "请输入补录说明" }]}
+          >
+            <Input.TextArea rows={4} placeholder="说明为什么需要补录这段知识" />
           </Form.Item>
         </Form>
       </Modal>
