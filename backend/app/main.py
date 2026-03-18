@@ -58,6 +58,7 @@ from app.api.evidence_blocks import router as evidence_blocks_router
 from app.api.product_docs import router as product_doc_router
 from app.api.projects import router as project_router
 from app.api.recommendation import router as recommendation_router
+from app.api.risk_analysis_tasks import router as risk_analysis_task_router
 from app.api.requirement_inputs import router as requirement_inputs_router
 from app.api.risks import router as risk_router
 from app.api.test_plan import router as test_plan_router
@@ -70,18 +71,26 @@ from app.core.database import SessionLocal, engine
 from app.core.schema_migrations import (
     ensure_requirement_source_type_values,
     ensure_product_knowledge_columns,
+    ensure_risk_analysis_task_columns,
     ensure_requirements_versioning_columns,
     ensure_risk_convergence_columns,
     ensure_rule_tree_session_async_columns,
     ensure_test_cases_precondition_column,
 )
-from app.models.entities import Base, RuleTreeSession, RuleTreeSessionStatus
+from app.models.entities import (
+    Base,
+    RiskAnalysisTask,
+    RiskAnalysisTaskStatus,
+    RuleTreeSession,
+    RuleTreeSessionStatus,
+)
 
 Base.metadata.create_all(bind=engine)
 ensure_requirements_versioning_columns(engine)
 ensure_requirement_source_type_values(engine)
 ensure_test_cases_precondition_column(engine)
 ensure_rule_tree_session_async_columns(engine)
+ensure_risk_analysis_task_columns(engine)
 ensure_product_knowledge_columns(engine)
 ensure_risk_convergence_columns(engine)
 
@@ -125,9 +134,37 @@ def recover_interrupted_rule_tree_sessions() -> int:
         db.close()
 
 
+def recover_interrupted_risk_analysis_tasks() -> int:
+    db = SessionLocal()
+    try:
+        tasks = (
+            db.query(RiskAnalysisTask)
+            .filter(
+                RiskAnalysisTask.status.in_(
+                    [
+                        RiskAnalysisTaskStatus.queued,
+                        RiskAnalysisTaskStatus.running,
+                    ]
+                )
+            )
+            .all()
+        )
+        interrupted_at = datetime.utcnow()
+        for task in tasks:
+            task.status = RiskAnalysisTaskStatus.interrupted
+            task.progress_message = "服务重启导致任务中断，请重新发起分析"
+            task.last_error = "服务重启导致任务中断，请重新发起分析"
+            task.current_task_finished_at = interrupted_at
+        db.commit()
+        return len(tasks)
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def _recover_rule_tree_sessions_on_startup() -> None:
     recover_interrupted_rule_tree_sessions()
+    recover_interrupted_risk_analysis_tasks()
 
 
 @app.get("/health")
@@ -151,6 +188,7 @@ app.include_router(architecture_router)
 app.include_router(risk_router)
 app.include_router(test_plan_router)
 app.include_router(product_doc_router)
+app.include_router(risk_analysis_task_router)
 app.include_router(requirement_inputs_router)
 app.include_router(evidence_blocks_router)
 app.include_router(effective_requirements_router)

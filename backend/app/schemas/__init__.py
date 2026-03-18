@@ -13,6 +13,11 @@ from .recommendation import (
     RecoRunDetailRead,
     RecoRunRead,
 )
+from .risk_analysis_task import (
+    RiskAnalysisTaskRead,
+    RiskAnalysisTaskStartResponse,
+    RiskAnalysisTaskSummaryRead,
+)
 from .rule import RuleNodeCreate, RuleNodeRead, RuleNodeUpdate, RulePathRead
 from .testcase import TestCaseCreate, TestCaseRead, TestCaseUpdateStatus
 
@@ -29,6 +34,9 @@ __all__ = [
     "RecoResultRead",
     "RecoRunDetailRead",
     "RecoRunRead",
+    "RiskAnalysisTaskRead",
+    "RiskAnalysisTaskStartResponse",
+    "RiskAnalysisTaskSummaryRead",
     "RequirementCreate",
     "RequirementRead",
     "RuleNodeCreate",

@@ -31,7 +31,7 @@ import type {
   RuleNode,
   TestCaseStatus,
 } from "../../types";
-import { getTestCaseStatusLabel } from "../../utils/enumLabels";
+import { getRecoModeLabel, getTestCaseStatusLabel } from "../../utils/enumLabels";
 
 interface RecoFormValues {
   mode: RecoMode;
@@ -41,8 +41,8 @@ interface RecoFormValues {
 }
 
 const modeOptions = [
-  { label: "全量回归 (FULL)", value: "FULL" as RecoMode },
-  { label: "变更回归 (CHANGE)", value: "CHANGE" as RecoMode },
+  { label: getRecoModeLabel("FULL"), value: "FULL" as RecoMode },
+  { label: getRecoModeLabel("CHANGE"), value: "CHANGE" as RecoMode },
 ];
 
 const statusOptions = [
@@ -185,7 +185,7 @@ export default function RecommendationPage() {
 
     const values = await form.validateFields();
     if (values.mode === "CHANGE" && (!values.changed_node_ids || values.changed_node_ids.length === 0)) {
-      message.warning("CHANGE 模式请至少选择一个变更节点");
+      message.warning("变更回归模式请至少选择一个变更节点");
       return;
     }
 
@@ -338,7 +338,7 @@ export default function RecommendationPage() {
               title: "模式",
               dataIndex: "mode",
               width: 110,
-              render: (value: RecoMode) => <Tag color={value === "CHANGE" ? "gold" : "blue"}>{value}</Tag>,
+              render: (value: RecoMode) => <Tag color={value === "CHANGE" ? "gold" : "blue"}>{getRecoModeLabel(value)}</Tag>,
             },
             { title: "K", dataIndex: "k", width: 80 },
             {
@@ -369,7 +369,7 @@ export default function RecommendationPage() {
       {runDetail ? (
         <Card title={`运行详情 #${runDetail.run.id}`} style={{ marginTop: 16 }} loading={loadingRunDetail}>
           <Descriptions size="small" column={4}>
-            <Descriptions.Item label="模式">{runDetail.run.mode}</Descriptions.Item>
+            <Descriptions.Item label="模式">{getRecoModeLabel(runDetail.run.mode)}</Descriptions.Item>
             <Descriptions.Item label="回归K">{runDetail.run.k}</Descriptions.Item>
             <Descriptions.Item label="覆盖风险">{runDetail.run.covered_risk.toFixed(2)}</Descriptions.Item>
             <Descriptions.Item label="风险覆盖率">

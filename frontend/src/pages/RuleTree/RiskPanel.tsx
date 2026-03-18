@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Badge,
@@ -28,6 +28,7 @@ import {
   BookOutlined,
   BranchesOutlined,
 } from "@ant-design/icons";
+import { getErrorMessage } from "../../api/client";
 import type {
   AnalysisStage,
   EffectiveSnapshot,
@@ -35,6 +36,8 @@ import type {
   PredevAnalysisResponse,
   RequirementInput,
   ReviewSnapshotResponse,
+  RiskAnalysisTask,
+  RiskAnalysisTaskSummary,
   RiskCategory,
   RiskDecisionType,
   RiskItem,
@@ -44,14 +47,13 @@ import type {
 import { analyzeRisks, clarifyRisk, decideRisk, deleteRisk, fetchRisks } from "../../api/risks";
 import {
   addRequirementInput,
-  createReviewSnapshot,
   getLatestSnapshot,
   listRequirementInputs,
-  runPredevAnalysis,
-  runPrereleaseAudit,
 } from "../../api/effectiveRequirements";
+import { fetchRiskAnalysisTask, fetchRiskAnalysisTaskSummary, startRiskAnalysisTask } from "../../api/riskAnalysisTasks";
 import { fetchProductDocs, suggestDocUpdate } from "../../api/productDocs";
 import { useAppStore } from "../../stores/appStore";
+import { getRequirementInputTypeLabel, getRiskAnalysisTaskStatusLabel } from "../../utils/enumLabels";
 
 const categoryLabels: Record<RiskCategory, string> = {
   input_validation: "输入校验",
@@ -121,12 +123,54 @@ const stageLabels: Record<AnalysisStage, string> = {
   pre_release: "提测前",
 };
 
+const snapshotFieldLabels: Record<string, string> = {
+  goal: "需求目标",
+  main_flow: "主流程",
+  preconditions: "前置条件",
+  state_changes: "状态变更",
+  exceptions: "异常流程",
+  constraints: "约束条件",
+  performance: "性能要求",
+  compatibility: "兼容性要求",
+  integration: "集成/联动要求",
+  rollout_strategy: "上线策略",
+  other: "其他",
+};
+
+const derivationLabels: Record<string, string> = {
+  explicit: "明确给出",
+  inferred: "推断得到",
+  missing: "缺失待补充",
+  contradicted: "存在矛盾",
+};
+
 const requirementInputTypeOptions = [
-  { label: "原始需求", value: "raw_requirement" },
-  { label: "PM 补充", value: "pm_addendum" },
-  { label: "测试澄清", value: "test_clarification" },
-  { label: "评审备注", value: "review_note" },
+  { label: getRequirementInputTypeLabel("raw_requirement"), value: "raw_requirement" },
+  { label: getRequirementInputTypeLabel("pm_addendum"), value: "pm_addendum" },
+  { label: getRequirementInputTypeLabel("test_clarification"), value: "test_clarification" },
+  { label: getRequirementInputTypeLabel("review_note"), value: "review_note" },
 ];
+
+const STAGE_ORDER: AnalysisStage[] = ["review", "pre_dev", "pre_release"];
+
+const EMPTY_TASK_SUMMARY: RiskAnalysisTaskSummary = {
+  review: null,
+  pre_dev: null,
+  pre_release: null,
+};
+
+function isRiskAnalysisTaskInProgress(task?: RiskAnalysisTask | null): boolean {
+  return task?.status === "queued" || task?.status === "running";
+}
+
+function parseRiskAnalysisTaskResult<T>(task?: RiskAnalysisTask | null): T | null {
+  if (!task?.result_json) return null;
+  try {
+    return JSON.parse(task.result_json) as T;
+  } catch {
+    return null;
+  }
+}
 
 type RiskPanelProps = {
   requirementId: number | null;
@@ -161,6 +205,8 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
   const [reviewResult, setReviewResult] = useState<ReviewSnapshotResponse | null>(null);
   const [predevResult, setPredevResult] = useState<PredevAnalysisResponse | null>(null);
   const [auditResult, setAuditResult] = useState<PrereleaseAuditResponse | null>(null);
+  const [stageTasks, setStageTasks] = useState<RiskAnalysisTaskSummary>(EMPTY_TASK_SUMMARY);
+  const [activeStage, setActiveStage] = useState<AnalysisStage | null>(null);
 
   const [decisionModal, setDecisionModal] = useState<{
     risk: RiskItem;
@@ -171,6 +217,13 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
   const [clarifyModal, setClarifyModal] = useState<RiskItem | null>(null);
   const [clarifyForm] = Form.useForm();
   const [inputForm] = Form.useForm();
+  const stagePollTimerRef = useRef<number | null>(null);
+  const stagePollDelayRef = useRef(2000);
+  const previousTaskStatusRef = useRef<Record<AnalysisStage, string | null>>({
+    review: null,
+    pre_dev: null,
+    pre_release: null,
+  });
 
   const loadRisks = useCallback(async () => {
     if (!requirementId) {
@@ -246,6 +299,74 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     }
   }, [requirementId]);
 
+  const hydrateStageTaskResult = useCallback((stage: AnalysisStage, task: RiskAnalysisTask | null) => {
+    if (!task?.result_json) return;
+
+    if (stage === "review") {
+      const parsed = parseRiskAnalysisTaskResult<ReviewSnapshotResponse>(task);
+      if (!parsed) return;
+      setReviewResult(parsed);
+      if (parsed.snapshot) setLatestSnapshot(parsed.snapshot);
+      return;
+    }
+
+    if (stage === "pre_dev") {
+      const parsed = parseRiskAnalysisTaskResult<PredevAnalysisResponse>(task);
+      if (!parsed) return;
+      setPredevResult(parsed);
+      if (parsed.snapshot) setLatestSnapshot(parsed.snapshot);
+      return;
+    }
+
+    const parsed = parseRiskAnalysisTaskResult<PrereleaseAuditResponse>(task);
+    if (!parsed) return;
+    setAuditResult(parsed);
+  }, []);
+
+  const getPreferredActiveStage = useCallback(
+    (summary: RiskAnalysisTaskSummary, preferred: AnalysisStage | null) => {
+      if (preferred && isRiskAnalysisTaskInProgress(summary[preferred])) {
+        return preferred;
+      }
+      for (const stage of STAGE_ORDER) {
+        if (isRiskAnalysisTaskInProgress(summary[stage])) {
+          return stage;
+        }
+      }
+      return preferred;
+    },
+    [],
+  );
+
+  const loadTaskSummary = useCallback(async () => {
+    if (!requirementId) {
+      setStageTasks(EMPTY_TASK_SUMMARY);
+      setActiveStage(null);
+      return EMPTY_TASK_SUMMARY;
+    }
+    try {
+      const summary = await fetchRiskAnalysisTaskSummary(requirementId);
+      setStageTasks(summary);
+      STAGE_ORDER.forEach((stage) => hydrateStageTaskResult(stage, summary[stage]));
+      setActiveStage((prev) => getPreferredActiveStage(summary, prev));
+      return summary;
+    } catch (error) {
+      message.error(getErrorMessage(error, "加载阶段任务失败"));
+      return EMPTY_TASK_SUMMARY;
+    }
+  }, [getPreferredActiveStage, hydrateStageTaskResult, requirementId]);
+
+  const refreshStageTask = useCallback(
+    async (stage: AnalysisStage) => {
+      if (!requirementId) return null;
+      const task = await fetchRiskAnalysisTask(requirementId, stage);
+      setStageTasks((prev) => ({ ...prev, [stage]: task }));
+      hydrateStageTaskResult(stage, task);
+      return task;
+    },
+    [hydrateStageTaskResult, requirementId],
+  );
+
   useEffect(() => {
     loadRisks();
   }, [loadRisks]);
@@ -253,12 +374,21 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
   useEffect(() => {
     void loadLatestSnapshot();
     void loadRequirementInputs();
+    void loadTaskSummary();
     setReviewResult(null);
     setPredevResult(null);
     setAuditResult(null);
+    setStageTasks(EMPTY_TASK_SUMMARY);
+    setActiveStage(null);
+    stagePollDelayRef.current = 2000;
+    previousTaskStatusRef.current = {
+      review: null,
+      pre_dev: null,
+      pre_release: null,
+    };
     setValidityFilter("all");
     setAnalysisStageFilter("all");
-  }, [loadLatestSnapshot, loadRequirementInputs]);
+  }, [loadLatestSnapshot, loadRequirementInputs, loadTaskSummary]);
 
   const filteredRisks = useMemo(() => {
     return risks.filter((risk) => {
@@ -313,31 +443,110 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
   const handleStageAction = async (stage: AnalysisStage) => {
     if (!requirementId) return;
     setStageActionLoading(stage);
+    setActiveStage(stage);
     try {
-      if (stage === "review") {
-        const result = await createReviewSnapshot(requirementId);
-        setReviewResult(result);
-        setLatestSnapshot(result.snapshot);
-        message.success("评审分析完成");
-      } else if (stage === "pre_dev") {
-        const result = await runPredevAnalysis(requirementId);
-        setPredevResult(result);
-        setLatestSnapshot(result.snapshot);
-        message.success("开发前分析完成");
-      } else {
-        const result = await runPrereleaseAudit(requirementId);
-        setAuditResult(result);
-        message.success("提测前审计完成");
-      }
-      const newRisks = await loadRisks();
-      onRisksChange?.(newRisks);
-      await loadRequirementInputs();
-    } catch {
-      message.error(stage === "review" ? "评审分析失败" : stage === "pre_dev" ? "开发前分析失败" : "提测前审计失败");
+      const accepted = await startRiskAnalysisTask(requirementId, stage);
+      setStageTasks((prev) => ({ ...prev, [stage]: accepted.task }));
+      hydrateStageTaskResult(stage, accepted.task);
+      message.success(
+        stage === "review"
+          ? "已开始后台评审分析"
+          : stage === "pre_dev"
+            ? "已开始后台开发前分析"
+            : "已开始后台提测前审计",
+      );
+    } catch (error) {
+      void refreshStageTask(stage).catch(() => null);
+      message.error(getErrorMessage(error, stage === "review" ? "评审分析失败" : stage === "pre_dev" ? "开发前分析失败" : "提测前审计失败"));
     } finally {
       setStageActionLoading(null);
     }
   };
+
+  useEffect(() => {
+    setActiveStage((prev) => getPreferredActiveStage(stageTasks, prev));
+  }, [getPreferredActiveStage, stageTasks]);
+
+  useEffect(() => {
+    if (stagePollTimerRef.current) {
+      window.clearTimeout(stagePollTimerRef.current);
+      stagePollTimerRef.current = null;
+    }
+    if (!requirementId || !activeStage) {
+      stagePollDelayRef.current = 2000;
+      return;
+    }
+
+    const task = stageTasks[activeStage];
+    if (!isRiskAnalysisTaskInProgress(task)) {
+      stagePollDelayRef.current = 2000;
+      return;
+    }
+
+    const delay = stagePollDelayRef.current;
+    stagePollTimerRef.current = window.setTimeout(() => {
+      refreshStageTask(activeStage)
+        .then((nextTask) => {
+          if (nextTask && isRiskAnalysisTaskInProgress(nextTask)) {
+            stagePollDelayRef.current = Math.min(stagePollDelayRef.current + 1000, 5000);
+            return;
+          }
+          stagePollDelayRef.current = 2000;
+        })
+        .catch((error) => {
+          stagePollDelayRef.current = Math.min(stagePollDelayRef.current + 1000, 5000);
+          message.error(getErrorMessage(error, "刷新阶段任务失败"));
+        });
+    }, delay);
+
+    return () => {
+      if (stagePollTimerRef.current) {
+        window.clearTimeout(stagePollTimerRef.current);
+        stagePollTimerRef.current = null;
+      }
+    };
+  }, [activeStage, refreshStageTask, requirementId, stageTasks]);
+
+  useEffect(() => {
+    STAGE_ORDER.forEach((stage) => {
+      const nextStatus = stageTasks[stage]?.status || null;
+      const prevStatus = previousTaskStatusRef.current[stage];
+      previousTaskStatusRef.current[stage] = nextStatus;
+
+      if (!prevStatus || prevStatus === nextStatus) {
+        return;
+      }
+
+      const task = stageTasks[stage];
+      if (nextStatus === "completed") {
+        message.success(
+          stage === "review"
+            ? "评审分析完成"
+            : stage === "pre_dev"
+              ? "开发前分析完成"
+              : "提测前审计完成",
+        );
+        void (async () => {
+          const newRisks = await loadRisks();
+          onRisksChange?.(newRisks);
+          await loadRequirementInputs();
+          if (stage !== "pre_release") {
+            await loadLatestSnapshot();
+          }
+        })();
+        return;
+      }
+
+      if (nextStatus === "failed") {
+        message.error(task?.last_error || "阶段任务执行失败");
+        return;
+      }
+
+      if (nextStatus === "interrupted") {
+        message.warning(task?.last_error || "阶段任务已中断");
+      }
+    });
+  }, [loadLatestSnapshot, loadRequirementInputs, loadRisks, onRisksChange, stageTasks]);
 
   const handleAddRequirementInput = async () => {
     if (!requirementId) return;
@@ -421,6 +630,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       setClarifyModal(null);
       const newRisks = await loadRisks();
       onRisksChange?.(newRisks);
+      await loadRequirementInputs();
     } catch {
       message.error("澄清保存失败");
     }
@@ -568,6 +778,34 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     : predevResult?.conflicts?.length
       ? "开发前分析发现冲突项"
       : null;
+  const stageTaskAlerts = STAGE_ORDER.map((stage) => {
+    const task = stageTasks[stage];
+    if (!task) return null;
+
+    const retainedResultHint =
+      isRiskAnalysisTaskInProgress(task) && task.result_json ? "后台重新分析中，当前仍展示上次结果。" : null;
+
+    let type: "info" | "success" | "warning" | "error" = "info";
+    if (task.status === "completed") type = "success";
+    if (task.status === "interrupted") type = "warning";
+    if (task.status === "failed") type = "error";
+
+    return (
+      <Alert
+        key={stage}
+        type={type}
+        showIcon
+        message={`${stageLabels[stage]}：${getRiskAnalysisTaskStatusLabel(task.status)}`}
+        description={
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div>{task.progress_message || "暂无状态说明"}</div>
+            {retainedResultHint && <div>{retainedResultHint}</div>}
+            {task.last_error && task.status !== "completed" && <div>{task.last_error}</div>}
+          </div>
+        }
+      />
+    );
+  }).filter(Boolean);
 
   return (
     <div
@@ -633,7 +871,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
             size="small"
             onClick={() => void handleStageAction("review")}
             loading={stageActionLoading === "review"}
-            disabled={!requirementId}
+            disabled={!requirementId || isRiskAnalysisTaskInProgress(stageTasks.review)}
           >
             评审分析
           </Button>
@@ -641,7 +879,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
             size="small"
             onClick={() => void handleStageAction("pre_dev")}
             loading={stageActionLoading === "pre_dev"}
-            disabled={!requirementId}
+            disabled={!requirementId || isRiskAnalysisTaskInProgress(stageTasks.pre_dev)}
           >
             开发前分析
           </Button>
@@ -649,11 +887,16 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
             size="small"
             onClick={() => void handleStageAction("pre_release")}
             loading={stageActionLoading === "pre_release"}
-            disabled={!requirementId}
+            disabled={!requirementId || isRiskAnalysisTaskInProgress(stageTasks.pre_release)}
           >
             提测前审计
           </Button>
         </Space>
+        {stageTaskAlerts.length > 0 && (
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+            {stageTaskAlerts}
+          </div>
+        )}
         <Space wrap style={{ marginTop: 8 }}>
           <Select
             size="small"
@@ -728,8 +971,10 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
                         latestSnapshotFields.map((field) => (
                           <div key={field.id} style={{ border: "1px solid #f0f0f0", borderRadius: 8, padding: 10 }}>
                             <Space wrap>
-                              <Tag>{field.field_key}</Tag>
-                              {field.derivation && <Tag color="blue">{field.derivation}</Tag>}
+                              <Tag>{snapshotFieldLabels[field.field_key] || field.field_key}</Tag>
+                              {field.derivation && (
+                                <Tag color="blue">{derivationLabels[field.derivation] || field.derivation}</Tag>
+                              )}
                               {field.confidence != null && <Tag color="gold">置信度 {field.confidence}</Tag>}
                             </Space>
                             <Typography.Paragraph style={{ margin: "8px 0 0", whiteSpace: "pre-wrap" }}>
@@ -781,7 +1026,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
                           {requirementInputs.map((item) => (
                             <div key={item.id} style={{ border: "1px solid #f0f0f0", borderRadius: 8, padding: 10 }}>
                               <Space wrap>
-                                <Tag>{item.input_type}</Tag>
+                                <Tag>{getRequirementInputTypeLabel(item.input_type)}</Tag>
                                 {item.created_at && <Typography.Text type="secondary">{item.created_at}</Typography.Text>}
                               </Space>
                               <Typography.Paragraph style={{ margin: "8px 0 0", whiteSpace: "pre-wrap" }}>

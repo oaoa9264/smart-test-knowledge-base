@@ -155,6 +155,14 @@ class RuleTreeSessionStatus(str, enum.Enum):
     archived = "archived"
 
 
+class RiskAnalysisTaskStatus(str, enum.Enum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    interrupted = "interrupted"
+
+
 class TestPlanSessionStatus(str, enum.Enum):
     plan_generating = "plan_generating"
     plan_generated = "plan_generated"
@@ -216,6 +224,7 @@ class Requirement(Base):
     reco_runs = relationship("RecoRun", back_populates="requirement", cascade="all, delete-orphan")
     risk_items = relationship("RiskItem", back_populates="requirement", cascade="all, delete-orphan")
     rule_tree_sessions = relationship("RuleTreeSession", back_populates="requirement", cascade="all, delete-orphan")
+    risk_analysis_tasks = relationship("RiskAnalysisTask", back_populates="requirement", cascade="all, delete-orphan")
     test_plan_sessions = relationship("TestPlanSession", back_populates="requirement", cascade="all, delete-orphan")
     requirement_inputs = relationship(
         "RequirementInput",
@@ -383,6 +392,28 @@ class RuleTreeSession(Base):
 
     requirement = relationship("Requirement", back_populates="rule_tree_sessions")
     messages = relationship("RuleTreeMessage", back_populates="session", cascade="all, delete-orphan")
+
+
+class RiskAnalysisTask(Base):
+    __tablename__ = "risk_analysis_tasks"
+    __table_args__ = (UniqueConstraint("requirement_id", "stage", name="uq_risk_analysis_task_requirement_stage"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False, index=True)
+    stage = Column(Enum(AnalysisStage), nullable=False)
+    status = Column(Enum(RiskAnalysisTaskStatus), default=RiskAnalysisTaskStatus.queued, nullable=False)
+    progress_message = Column(Text, nullable=True)
+    progress_percent = Column(Integer, nullable=True)
+    last_error = Column(Text, nullable=True)
+    snapshot_id = Column(Integer, ForeignKey("effective_requirement_snapshots.id"), nullable=True)
+    result_json = Column(Text, nullable=True)
+    current_task_started_at = Column(DateTime, nullable=True)
+    current_task_finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    requirement = relationship("Requirement", back_populates="risk_analysis_tasks")
+    snapshot = relationship("EffectiveRequirementSnapshot")
 
 
 class RuleTreeMessage(Base):

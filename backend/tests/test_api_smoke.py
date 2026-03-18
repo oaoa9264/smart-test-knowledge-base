@@ -91,6 +91,30 @@ def test_review_snapshot_creation():
     assert isinstance(body["clarification_hints"], list)
 
 
+def test_review_task_flow_smoke():
+    project_resp = client.post(
+        "/api/projects",
+        json={"name": "P-ASYNC-{0}".format(uuid4().hex[:8]), "description": "async smoke"},
+    )
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    requirement_resp = client.post(
+        f"/api/projects/{project_id}/requirements",
+        json={"title": "异步评审需求", "raw_text": "用户提交表单时需要校验手机号格式。", "source_type": "prd"},
+    )
+    assert requirement_resp.status_code == 201
+    requirement_id = requirement_resp.json()["id"]
+
+    start_resp = client.post(f"/api/requirements/{requirement_id}/analysis-tasks/review")
+    assert start_resp.status_code == 200
+    assert start_resp.json()["accepted"] is True
+
+    detail_resp = client.get(f"/api/requirements/{requirement_id}/analysis-tasks/review")
+    assert detail_resp.status_code == 200
+    assert detail_resp.json()["status"] in {"queued", "running", "completed"}
+
+
 def test_project_rule_case_coverage_flow():
     project_resp = client.post(
         "/api/projects",

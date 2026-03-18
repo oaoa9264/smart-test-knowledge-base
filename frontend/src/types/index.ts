@@ -482,6 +482,35 @@ export interface PrereleaseAuditResponse {
   audit_notes: string[];
 }
 
+export type RiskAnalysisTaskStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
+
+export interface RiskAnalysisTask {
+  id: number;
+  requirement_id: number;
+  stage: AnalysisStage;
+  status: RiskAnalysisTaskStatus;
+  progress_message: string | null;
+  progress_percent: number | null;
+  last_error: string | null;
+  snapshot_id: number | null;
+  result_json: string | null;
+  current_task_started_at: string | null;
+  current_task_finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RiskAnalysisTaskSummary {
+  review: RiskAnalysisTask | null;
+  pre_dev: RiskAnalysisTask | null;
+  pre_release: RiskAnalysisTask | null;
+}
+
+export interface RiskAnalysisTaskStartResponse {
+  accepted: boolean;
+  task: RiskAnalysisTask;
+}
+
 export interface ProductDoc {
   id: number;
   product_code: string;

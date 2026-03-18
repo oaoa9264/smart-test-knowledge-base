@@ -24,21 +24,22 @@ import type {
   DecisionTreeNode,
   RuleNode,
 } from "../../types";
+import { getArchitectureAnalysisModeLabel } from "../../utils/enumLabels";
 import MindMapWrapper, { type MindMapWrapperRef } from "../RuleTree/MindMapWrapper";
 import { ruleNodesToMindMapData } from "../RuleTree/dataAdapter";
 import { RULE_TREE_THEME } from "../RuleTree/mindMapTheme";
 
 const analysisModeMeta: Record<string, { label: string; color: string; hint?: string }> = {
   llm: {
-    label: "LLM",
+    label: getArchitectureAnalysisModeLabel("llm"),
     color: "blue",
   },
   mock: {
-    label: "Mock",
+    label: getArchitectureAnalysisModeLabel("mock"),
     color: "default",
   },
   mock_fallback: {
-    label: "Mock（LLM降级）",
+    label: getArchitectureAnalysisModeLabel("mock_fallback"),
     color: "orange",
     hint: "LLM 调用失败，已自动降级到规则模板分析",
   },

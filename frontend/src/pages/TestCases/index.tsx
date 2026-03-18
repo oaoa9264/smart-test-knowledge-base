@@ -44,6 +44,7 @@ import type {
   TestCase,
 } from "../../types";
 import {
+  getImportAnalysisModeLabel,
   getRiskLevelLabel,
   getTestCaseStatusLabel,
   riskLevelLabels,
@@ -94,18 +95,18 @@ const importSteps = [
 
 function formatImportAnalysisLabel(mode: ImportAnalysisMode, provider?: string | null): string {
   if (mode !== "llm") {
-    return "关键词兜底";
+    return getImportAnalysisModeLabel(mode);
   }
   if (!provider) {
-    return "LLM";
+    return getImportAnalysisModeLabel(mode);
   }
   if (provider === "openai") {
-    return "LLM（OpenAI）";
+    return `${getImportAnalysisModeLabel(mode)}（OpenAI）`;
   }
   if (provider === "zhipu") {
-    return "LLM（GLM/智谱）";
+    return `${getImportAnalysisModeLabel(mode)}（GLM/智谱）`;
   }
-  return `LLM（${provider}）`;
+  return `${getImportAnalysisModeLabel(mode)}（${provider}）`;
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {

@@ -88,6 +88,24 @@ def ensure_rule_tree_session_async_columns(engine: Engine) -> None:
     )
 
 
+def ensure_risk_analysis_task_columns(engine: Engine) -> None:
+    _ensure_additive_columns(
+        engine,
+        "risk_analysis_tasks",
+        {
+            "progress_message": "progress_message TEXT",
+            "progress_percent": "progress_percent INTEGER",
+            "last_error": "last_error TEXT",
+            "snapshot_id": "snapshot_id INTEGER",
+            "result_json": "result_json TEXT",
+            "current_task_started_at": "current_task_started_at DATETIME",
+            "current_task_finished_at": "current_task_finished_at DATETIME",
+            "created_at": "created_at DATETIME",
+            "updated_at": "updated_at DATETIME",
+        },
+    )
+
+
 def ensure_product_doc_chunk_hierarchy_columns(engine: Engine) -> None:
     _ensure_additive_columns(
         engine,

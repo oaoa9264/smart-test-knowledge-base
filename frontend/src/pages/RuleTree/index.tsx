@@ -74,6 +74,7 @@ import { buildNodeRiskMap, mindMapDataToRuleNodes, normalizeRuleNodeContent, rul
 import MindMapWrapper, { type MindMapExportType, type MindMapWrapperRef } from "./MindMapWrapper";
 import { RULE_TREE_THEME } from "./mindMapTheme";
 import RiskPanel from "./RiskPanel";
+import { getRiskLevelLabel, getTestPointTypeLabel } from "../../utils/enumLabels";
 
 const riskOptions: { label: string; value: RiskLevel }[] = [
   { label: "严重", value: "critical" },
@@ -2325,7 +2326,7 @@ export default function RuleTreePage() {
                   <span>
                     可测试节点：
                     {domainNodes.filter((n) => n.node_type === "action" || n.node_type === "branch" || n.node_type === "exception").length}
-                    （action / branch / exception）
+                    （动作 / 分支 / 异常）
                   </span>
                 </Space>
               }
@@ -2528,7 +2529,7 @@ export default function RuleTreePage() {
                         width: 80,
                         render: (type: string) => {
                           const colors: Record<string, string> = { normal: "blue", exception: "red", boundary: "orange" };
-                          return <Tag color={colors[type] || "default"}>{type}</Tag>;
+                          return <Tag color={colors[type] || "default"}>{getTestPointTypeLabel(type)}</Tag>;
                         },
                       },
                       {
@@ -2537,7 +2538,7 @@ export default function RuleTreePage() {
                         width: 80,
                         render: (p: string) => {
                           const colors: Record<string, string> = { high: "red", medium: "orange", low: "blue" };
-                          return <Tag color={colors[p] || "default"}>{p}</Tag>;
+                          return <Tag color={colors[p] || "default"}>{getRiskLevelLabel(p)}</Tag>;
                         },
                       },
                       {
@@ -2777,18 +2778,18 @@ export default function RuleTreePage() {
             <Form.Item name="type" label="类型" rules={[{ required: true }]}>
               <Select
                 options={[
-                  { label: "normal", value: "normal" },
-                  { label: "exception", value: "exception" },
-                  { label: "boundary", value: "boundary" },
+                  { label: getTestPointTypeLabel("normal"), value: "normal" },
+                  { label: getTestPointTypeLabel("exception"), value: "exception" },
+                  { label: getTestPointTypeLabel("boundary"), value: "boundary" },
                 ]}
               />
             </Form.Item>
             <Form.Item name="priority" label="优先级" rules={[{ required: true }]}>
               <Select
                 options={[
-                  { label: "high", value: "high" },
-                  { label: "medium", value: "medium" },
-                  { label: "low", value: "low" },
+                  { label: getRiskLevelLabel("high"), value: "high" },
+                  { label: getRiskLevelLabel("medium"), value: "medium" },
+                  { label: getRiskLevelLabel("low"), value: "low" },
                 ]}
               />
             </Form.Item>
