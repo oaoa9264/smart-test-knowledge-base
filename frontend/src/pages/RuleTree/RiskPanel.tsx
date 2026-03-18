@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   Badge,
   Button,
   Checkbox,
@@ -27,7 +28,19 @@ import {
   BookOutlined,
   BranchesOutlined,
 } from "@ant-design/icons";
-import type { RiskCategory, RiskDecisionType, RiskItem, RiskSource } from "../../types";
+import type {
+  AnalysisStage,
+  EffectiveSnapshot,
+  PrereleaseAuditResponse,
+  PredevAnalysisResponse,
+  RequirementInput,
+  ReviewSnapshotResponse,
+  RiskCategory,
+  RiskDecisionType,
+  RiskItem,
+  RiskSource,
+  RiskValidity,
+} from "../../types";
 import { analyzeRisks, clarifyRisk, decideRisk, deleteRisk, fetchRisks } from "../../api/risks";
 import {
   addRequirementInput,
@@ -88,6 +101,33 @@ const sourceIcons: Record<RiskSource, React.ReactNode> = {
   product_knowledge: <BookOutlined />,
 };
 
+const validityLabels: Record<RiskValidity, string> = {
+  active: "有效",
+  superseded: "已过时",
+  reopened: "重新打开",
+  resolved: "已解决",
+};
+
+const validityTagColors: Record<RiskValidity, string> = {
+  active: "green",
+  superseded: "default",
+  reopened: "orange",
+  resolved: "blue",
+};
+
+const stageLabels: Record<AnalysisStage, string> = {
+  review: "评审",
+  pre_dev: "开发前",
+  pre_release: "提测前",
+};
+
+const requirementInputTypeOptions = [
+  { label: "原始需求", value: "raw_requirement" },
+  { label: "PM 补充", value: "pm_addendum" },
+  { label: "测试澄清", value: "test_clarification" },
+  { label: "评审备注", value: "review_note" },
+];
+
 type RiskPanelProps = {
   requirementId: number | null;
   onNodeLocate?: (nodeId: string) => void;
@@ -98,9 +138,29 @@ type RiskPanelProps = {
 export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted, onRisksChange }: RiskPanelProps) {
   const { selectedProjectId, projects } = useAppStore();
   const [risks, setRisks] = useState<RiskItem[]>([]);
+  const [riskSummary, setRiskSummary] = useState({
+    total: 0,
+    pending: 0,
+    accepted: 0,
+    ignored: 0,
+    active: 0,
+    superseded: 0,
+    reopened: 0,
+    resolved: 0,
+  });
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [autoCreateNode, setAutoCreateNode] = useState(true);
+  const [stageActionLoading, setStageActionLoading] = useState<AnalysisStage | null>(null);
+  const [latestSnapshot, setLatestSnapshot] = useState<EffectiveSnapshot | null>(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [requirementInputs, setRequirementInputs] = useState<RequirementInput[]>([]);
+  const [inputsLoading, setInputsLoading] = useState(false);
+  const [validityFilter, setValidityFilter] = useState<RiskValidity | "all">("all");
+  const [analysisStageFilter, setAnalysisStageFilter] = useState<AnalysisStage | "all">("all");
+  const [reviewResult, setReviewResult] = useState<ReviewSnapshotResponse | null>(null);
+  const [predevResult, setPredevResult] = useState<PredevAnalysisResponse | null>(null);
+  const [auditResult, setAuditResult] = useState<PrereleaseAuditResponse | null>(null);
 
   const [decisionModal, setDecisionModal] = useState<{
     risk: RiskItem;
@@ -110,16 +170,37 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
 
   const [clarifyModal, setClarifyModal] = useState<RiskItem | null>(null);
   const [clarifyForm] = Form.useForm();
+  const [inputForm] = Form.useForm();
 
   const loadRisks = useCallback(async () => {
     if (!requirementId) {
       setRisks([]);
+      setRiskSummary({
+        total: 0,
+        pending: 0,
+        accepted: 0,
+        ignored: 0,
+        active: 0,
+        superseded: 0,
+        reopened: 0,
+        resolved: 0,
+      });
       return [];
     }
     setLoading(true);
     try {
       const resp = await fetchRisks(requirementId);
       setRisks(resp.risks);
+      setRiskSummary({
+        total: resp.total,
+        pending: resp.pending,
+        accepted: resp.accepted,
+        ignored: resp.ignored,
+        active: resp.active,
+        superseded: resp.superseded,
+        reopened: resp.reopened,
+        resolved: resp.resolved,
+      });
       return resp.risks;
     } catch {
       message.error("加载风险项失败");
@@ -129,23 +210,70 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     }
   }, [requirementId]);
 
+  const loadLatestSnapshot = useCallback(async () => {
+    if (!requirementId) {
+      setLatestSnapshot(null);
+      return null;
+    }
+    setSnapshotLoading(true);
+    try {
+      const snapshot = await getLatestSnapshot(requirementId);
+      setLatestSnapshot(snapshot);
+      return snapshot;
+    } catch {
+      message.error("加载最新快照失败");
+      return null;
+    } finally {
+      setSnapshotLoading(false);
+    }
+  }, [requirementId]);
+
+  const loadRequirementInputs = useCallback(async () => {
+    if (!requirementId) {
+      setRequirementInputs([]);
+      return [];
+    }
+    setInputsLoading(true);
+    try {
+      const items = await listRequirementInputs(requirementId);
+      setRequirementInputs(items);
+      return items;
+    } catch {
+      message.error("加载需求输入失败");
+      return [];
+    } finally {
+      setInputsLoading(false);
+    }
+  }, [requirementId]);
+
   useEffect(() => {
     loadRisks();
   }, [loadRisks]);
 
-  const stats = useMemo(() => {
-    const pending = risks.filter((r) => r.decision === "pending").length;
-    const accepted = risks.filter((r) => r.decision === "accepted").length;
-    const ignored = risks.filter((r) => r.decision === "ignored").length;
-    return { pending, accepted, ignored, total: risks.length };
-  }, [risks]);
+  useEffect(() => {
+    void loadLatestSnapshot();
+    void loadRequirementInputs();
+    setReviewResult(null);
+    setPredevResult(null);
+    setAuditResult(null);
+    setValidityFilter("all");
+    setAnalysisStageFilter("all");
+  }, [loadLatestSnapshot, loadRequirementInputs]);
+
+  const filteredRisks = useMemo(() => {
+    return risks.filter((risk) => {
+      const validityMatches = validityFilter === "all" || (risk.validity || "active") === validityFilter;
+      const stageMatches = analysisStageFilter === "all" || risk.analysis_stage === analysisStageFilter;
+      return validityMatches && stageMatches;
+    });
+  }, [analysisStageFilter, risks, validityFilter]);
 
   const groupedBySource = useMemo(() => {
     const groups: Record<RiskSource, Record<string, RiskItem[]>> = {
       rule_tree: {},
       product_knowledge: {},
     };
-    for (const risk of risks) {
+    for (const risk of filteredRisks) {
       const source = risk.risk_source || "rule_tree";
       const cat = risk.category;
       if (!groups[source]) groups[source] = {};
@@ -153,7 +281,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       groups[source][cat].push(risk);
     }
     return groups;
-  }, [risks]);
+  }, [filteredRisks]);
 
   const [activeKeys, setActiveKeys] = useState<string[]>([]);
 
@@ -179,6 +307,51 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       message.error("风险分析失败");
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  const handleStageAction = async (stage: AnalysisStage) => {
+    if (!requirementId) return;
+    setStageActionLoading(stage);
+    try {
+      if (stage === "review") {
+        const result = await createReviewSnapshot(requirementId);
+        setReviewResult(result);
+        setLatestSnapshot(result.snapshot);
+        message.success("评审分析完成");
+      } else if (stage === "pre_dev") {
+        const result = await runPredevAnalysis(requirementId);
+        setPredevResult(result);
+        setLatestSnapshot(result.snapshot);
+        message.success("开发前分析完成");
+      } else {
+        const result = await runPrereleaseAudit(requirementId);
+        setAuditResult(result);
+        message.success("提测前审计完成");
+      }
+      const newRisks = await loadRisks();
+      onRisksChange?.(newRisks);
+      await loadRequirementInputs();
+    } catch {
+      message.error(stage === "review" ? "评审分析失败" : stage === "pre_dev" ? "开发前分析失败" : "提测前审计失败");
+    } finally {
+      setStageActionLoading(null);
+    }
+  };
+
+  const handleAddRequirementInput = async () => {
+    if (!requirementId) return;
+    const values = await inputForm.validateFields();
+    try {
+      await addRequirementInput(requirementId, {
+        input_type: values.input_type,
+        content: values.content,
+      });
+      message.success("需求输入已添加");
+      inputForm.resetFields();
+      await loadRequirementInputs();
+    } catch {
+      message.error("添加需求输入失败");
     }
   };
 
@@ -285,6 +458,10 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
         {risk.decision !== "pending" && (
           <Tag>{risk.decision === "accepted" ? "已接受" : "已忽略"}</Tag>
         )}
+        <Tag color={validityTagColors[risk.validity || "active"]}>
+          {validityLabels[risk.validity || "active"]}
+        </Tag>
+        {risk.analysis_stage && <Tag>{stageLabels[risk.analysis_stage]}</Tag>}
       </div>
       <Typography.Paragraph
         style={{ margin: 0, fontSize: 13 }}
@@ -385,6 +562,12 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
 
   const ruleTreeItems = buildCollapseItems("rule_tree");
   const productItems = buildCollapseItems("product_knowledge");
+  const latestSnapshotFields = latestSnapshot?.fields || [];
+  const stageNotice = reviewResult?.clarification_hints?.length
+    ? "评审分析已生成澄清提示"
+    : predevResult?.conflicts?.length
+      ? "开发前分析发现冲突项"
+      : null;
 
   return (
     <div
@@ -399,7 +582,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #f0f0f0" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
           <Typography.Text strong>风险识别</Typography.Text>
-          <Tooltip title={stats.pending > 0 ? "请先处理所有待处理风险项" : undefined}>
+          <Tooltip title={riskSummary.pending > 0 ? "请先处理所有待处理风险项" : undefined}>
             <span>
               <Button
                 size="small"
@@ -407,7 +590,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
                 icon={<ScanOutlined />}
                 loading={analyzing}
                 onClick={handleAnalyze}
-                disabled={!requirementId || stats.pending > 0}
+                disabled={!requirementId || riskSummary.pending > 0}
               >
                 分析
               </Button>
@@ -416,17 +599,26 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
         </div>
         <Space size={12} wrap>
           <span>
+            可见风险 <strong>{filteredRisks.length}</strong>
+          </span>
+          <span>
             <Badge status="warning" />
-            待处理 <strong>{stats.pending}</strong>
+            待处理 <strong>{riskSummary.pending}</strong>
           </span>
           <span>
             <Badge status="success" />
-            已接受 <strong>{stats.accepted}</strong>
+            已接受 <strong>{riskSummary.accepted}</strong>
           </span>
           <span>
             <Badge status="default" />
-            已忽略 <strong>{stats.ignored}</strong>
+            已忽略 <strong>{riskSummary.ignored}</strong>
           </span>
+        </Space>
+        <Space size={12} wrap style={{ marginTop: 8 }}>
+          <span><Badge color="green" />有效 <strong>{riskSummary.active}</strong></span>
+          <span><Badge color="#bfbfbf" />已过时 <strong>{riskSummary.superseded}</strong></span>
+          <span><Badge color="orange" />重开 <strong>{riskSummary.reopened}</strong></span>
+          <span><Badge color="blue" />已解决 <strong>{riskSummary.resolved}</strong></span>
         </Space>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
           <Switch size="small" checked={autoCreateNode} onChange={setAutoCreateNode} />
@@ -436,10 +628,175 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
             </Typography.Text>
           </Tooltip>
         </div>
+        <Space wrap style={{ marginTop: 8 }}>
+          <Button
+            size="small"
+            onClick={() => void handleStageAction("review")}
+            loading={stageActionLoading === "review"}
+            disabled={!requirementId}
+          >
+            评审分析
+          </Button>
+          <Button
+            size="small"
+            onClick={() => void handleStageAction("pre_dev")}
+            loading={stageActionLoading === "pre_dev"}
+            disabled={!requirementId}
+          >
+            开发前分析
+          </Button>
+          <Button
+            size="small"
+            onClick={() => void handleStageAction("pre_release")}
+            loading={stageActionLoading === "pre_release"}
+            disabled={!requirementId}
+          >
+            提测前审计
+          </Button>
+        </Space>
+        <Space wrap style={{ marginTop: 8 }}>
+          <Select
+            size="small"
+            style={{ width: 130 }}
+            value={validityFilter}
+            onChange={(value) => setValidityFilter(value)}
+            options={[
+              { label: "全部有效性", value: "all" },
+              { label: "有效", value: "active" },
+              { label: "已过时", value: "superseded" },
+              { label: "重新打开", value: "reopened" },
+              { label: "已解决", value: "resolved" },
+            ]}
+          />
+          <Select
+            size="small"
+            style={{ width: 130 }}
+            value={analysisStageFilter}
+            onChange={(value) => setAnalysisStageFilter(value)}
+            options={[
+              { label: "全部阶段", value: "all" },
+              { label: "评审", value: "review" },
+              { label: "开发前", value: "pre_dev" },
+              { label: "提测前", value: "pre_release" },
+            ]}
+          />
+        </Space>
+        {latestSnapshot && (
+          <Typography.Text type="secondary" style={{ display: "block", marginTop: 8 }}>
+            最新快照：{latestSnapshot.summary || "未生成摘要"}
+          </Typography.Text>
+        )}
       </div>
 
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
         <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, overflow: "auto", padding: "8px 0" }}>
+          <div style={{ padding: "0 16px 8px", display: "flex", flexDirection: "column", gap: 8 }}>
+            {stageNotice && <Alert type="info" showIcon message={stageNotice} />}
+            {auditResult && (
+              <Alert
+                type={auditResult.blocking_risks.length > 0 ? "warning" : "success"}
+                showIcon
+                message={auditResult.closure_summary || "提测前审计已完成"}
+                description={
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div>阻塞风险：{auditResult.blocking_risks.length}</div>
+                    <div>重新打开：{auditResult.reopened_risks.length}</div>
+                    <div>已解决：{auditResult.resolved_risks.length}</div>
+                    {auditResult.audit_notes.length > 0 && (
+                      <div>审计备注：{auditResult.audit_notes.join("；")}</div>
+                    )}
+                  </div>
+                }
+              />
+            )}
+            <Collapse
+              ghost
+              items={[
+                {
+                  key: "snapshot",
+                  label: "最新有效需求快照",
+                  children: snapshotLoading ? (
+                    <Spin size="small" />
+                  ) : latestSnapshot ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      <Typography.Text type="secondary">
+                        阶段：{stageLabels[latestSnapshot.stage]}，字段数：{latestSnapshotFields.length}
+                      </Typography.Text>
+                      {latestSnapshotFields.length === 0 ? (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无快照字段" />
+                      ) : (
+                        latestSnapshotFields.map((field) => (
+                          <div key={field.id} style={{ border: "1px solid #f0f0f0", borderRadius: 8, padding: 10 }}>
+                            <Space wrap>
+                              <Tag>{field.field_key}</Tag>
+                              {field.derivation && <Tag color="blue">{field.derivation}</Tag>}
+                              {field.confidence != null && <Tag color="gold">置信度 {field.confidence}</Tag>}
+                            </Space>
+                            <Typography.Paragraph style={{ margin: "8px 0 0", whiteSpace: "pre-wrap" }}>
+                              {field.value || "-"}
+                            </Typography.Paragraph>
+                            {field.source_refs && (
+                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                来源：{field.source_refs}
+                              </Typography.Text>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  ) : (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无有效需求快照" />
+                  ),
+                },
+                {
+                  key: "inputs",
+                  label: "正式需求输入",
+                  children: (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      <Form layout="vertical" form={inputForm}>
+                        <Form.Item
+                          name="input_type"
+                          label="输入类型"
+                          rules={[{ required: true, message: "请选择输入类型" }]}
+                        >
+                          <Select options={requirementInputTypeOptions} placeholder="选择输入类型" />
+                        </Form.Item>
+                        <Form.Item
+                          name="content"
+                          label="输入内容"
+                          rules={[{ required: true, message: "请输入输入内容" }]}
+                        >
+                          <Input.TextArea rows={3} placeholder="输入 PM 补充、测试澄清或评审备注" />
+                        </Form.Item>
+                        <Button size="small" type="primary" onClick={() => void handleAddRequirementInput()} disabled={!requirementId}>
+                          添加输入
+                        </Button>
+                      </Form>
+                      {inputsLoading ? (
+                        <Spin size="small" />
+                      ) : requirementInputs.length === 0 ? (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无正式输入" />
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          {requirementInputs.map((item) => (
+                            <div key={item.id} style={{ border: "1px solid #f0f0f0", borderRadius: 8, padding: 10 }}>
+                              <Space wrap>
+                                <Tag>{item.input_type}</Tag>
+                                {item.created_at && <Typography.Text type="secondary">{item.created_at}</Typography.Text>}
+                              </Space>
+                              <Typography.Paragraph style={{ margin: "8px 0 0", whiteSpace: "pre-wrap" }}>
+                                {item.content}
+                              </Typography.Paragraph>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ),
+                },
+              ]}
+            />
+          </div>
           {loading ? (
             <div style={{ textAlign: "center", padding: 32 }}>
               <Spin />
