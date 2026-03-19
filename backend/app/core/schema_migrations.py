@@ -137,6 +137,13 @@ def ensure_risk_convergence_columns(engine: Engine) -> None:
             "chunk_content_hash": "chunk_content_hash VARCHAR(64)",
         },
     )
+    _ensure_additive_columns(
+        engine,
+        "effective_requirement_snapshots",
+        {
+            "basis_hash": "basis_hash VARCHAR(64)",
+        },
+    )
 
 
 def ensure_product_knowledge_columns(engine: Engine) -> None:

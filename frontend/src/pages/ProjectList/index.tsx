@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  Alert,
   Button,
   Card,
   Col,
@@ -27,10 +28,38 @@ import {
   updateProject,
   updateRequirement,
 } from "../../api/projects";
+import { getErrorMessage } from "../../api/client";
+import {
+  fetchLatestNormalizedRequirementDocTask,
+  startNormalizedRequirementDocTask,
+} from "../../api/normalizedRequirementDocTasks";
 import { fetchProductDocs } from "../../api/productDocs";
 import { useAppStore } from "../../stores/appStore";
-import type { ProductDoc, Project, Requirement } from "../../types";
+import type {
+  NormalizedRequirementDocPreview,
+  NormalizedRequirementDocTask,
+  ProductDoc,
+  Project,
+  Requirement,
+} from "../../types";
 import { getSourceTypeLabel } from "../../utils/enumLabels";
+import ReactMarkdown from "react-markdown";
+
+function buildPreviewFromTask(
+  requirement: Requirement,
+  task: NormalizedRequirementDocTask,
+): NormalizedRequirementDocPreview {
+  return {
+    title: requirement.title,
+    markdown: task.result_markdown || "",
+    basis_hash: task.basis_hash || "",
+    uses_fresh_snapshot: task.uses_fresh_snapshot,
+    snapshot_stale: task.snapshot_stale,
+    llm_status: "success",
+    llm_provider: task.llm_provider,
+    llm_message: null,
+  };
+}
 
 export default function ProjectListPage() {
   const {
@@ -51,6 +80,13 @@ export default function ProjectListPage() {
   const [viewRequirement, setViewRequirement] = useState<Requirement | null>(null);
   const [editingRequirement, setEditingRequirement] = useState<Requirement | null>(null);
   const [productDocs, setProductDocs] = useState<ProductDoc[]>([]);
+  const [normalizedDocOpen, setNormalizedDocOpen] = useState(false);
+  const [normalizedDocLoading, setNormalizedDocLoading] = useState(false);
+  const [normalizedDocDownloading, setNormalizedDocDownloading] = useState(false);
+  const [normalizedDocPreview, setNormalizedDocPreview] = useState<NormalizedRequirementDocPreview | null>(null);
+  const [normalizedDocTask, setNormalizedDocTask] = useState<NormalizedRequirementDocTask | null>(null);
+  const normalizedDocPollTimerRef = useRef<number | null>(null);
+  const previousNormalizedDocTaskStatusRef = useRef<string | null>(null);
   const [projectForm] = Form.useForm();
   const [requirementForm] = Form.useForm();
   const [editProjectForm] = Form.useForm();
@@ -189,6 +225,124 @@ export default function ProjectListPage() {
     message.success("需求已删除");
     await reloadRequirements(selectedProjectId, selectedRequirementId === requirementId ? null : selectedRequirementId);
   };
+
+  const openNormalizedDocPreview = async (requirement: Requirement) => {
+    if (
+      normalizedDocTask?.requirement_id === requirement.id &&
+      normalizedDocTask.status === "completed" &&
+      normalizedDocTask.result_markdown
+    ) {
+      setNormalizedDocPreview(buildPreviewFromTask(requirement, normalizedDocTask));
+      setNormalizedDocOpen(true);
+      return;
+    }
+
+    setNormalizedDocPreview(null);
+    setNormalizedDocLoading(true);
+    try {
+      const accepted = await startNormalizedRequirementDocTask(requirement.id);
+      setNormalizedDocTask(accepted.task);
+      message.success("已开始后台生成规范化需求文档");
+    } catch (error) {
+      setNormalizedDocOpen(false);
+      setNormalizedDocPreview(null);
+      message.error(getErrorMessage(error, "发起规范化需求文档生成失败"));
+    } finally {
+      setNormalizedDocLoading(false);
+    }
+  };
+
+  const refreshNormalizedDocTask = async (requirementId: number) => {
+    const task = await fetchLatestNormalizedRequirementDocTask(requirementId);
+    setNormalizedDocTask(task);
+    return task;
+  };
+
+  const hydrateNormalizedDocTask = async (requirement: Requirement) => {
+    try {
+      const task = await fetchLatestNormalizedRequirementDocTask(requirement.id);
+      previousNormalizedDocTaskStatusRef.current = task?.status || null;
+      setNormalizedDocTask(task);
+    } catch (error) {
+      message.error(getErrorMessage(error, "加载规范化需求文档任务失败"));
+    }
+  };
+
+  const handleDownloadNormalizedDoc = async () => {
+    if (!viewRequirement || !normalizedDocPreview) return;
+    setNormalizedDocDownloading(true);
+    try {
+      const blob = new Blob([normalizedDocPreview.markdown], { type: "text/markdown;charset=utf-8" });
+      const filename = `requirement-${viewRequirement.id}.md`;
+      const url = window.URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(url);
+      message.success("Markdown 下载成功");
+    } catch (error) {
+      message.error(getErrorMessage(error, "下载 Markdown 失败"));
+    } finally {
+      setNormalizedDocDownloading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (normalizedDocPollTimerRef.current) {
+      window.clearTimeout(normalizedDocPollTimerRef.current);
+      normalizedDocPollTimerRef.current = null;
+    }
+    if (!viewRequirement || !normalizedDocTask) return;
+    if (normalizedDocTask.status !== "queued" && normalizedDocTask.status !== "running") return;
+
+    normalizedDocPollTimerRef.current = window.setTimeout(() => {
+      void refreshNormalizedDocTask(viewRequirement.id).catch((error) => {
+        message.error(getErrorMessage(error, "刷新规范化需求文档任务失败"));
+      });
+    }, 2000);
+
+    return () => {
+      if (normalizedDocPollTimerRef.current) {
+        window.clearTimeout(normalizedDocPollTimerRef.current);
+        normalizedDocPollTimerRef.current = null;
+      }
+    };
+  }, [normalizedDocTask, viewRequirement]);
+
+  useEffect(() => {
+    const nextStatus = normalizedDocTask?.status || null;
+    const prevStatus = previousNormalizedDocTaskStatusRef.current;
+    previousNormalizedDocTaskStatusRef.current = nextStatus;
+
+    if (!nextStatus || prevStatus === null || prevStatus === nextStatus) return;
+
+    if (nextStatus === "completed" && normalizedDocTask?.result_markdown && viewRequirement) {
+      setNormalizedDocPreview(buildPreviewFromTask(viewRequirement, normalizedDocTask));
+      setNormalizedDocOpen(true);
+      message.success("规范化需求文档生成完成");
+      return;
+    }
+
+    if (nextStatus === "failed") {
+      setNormalizedDocOpen(false);
+      setNormalizedDocPreview(null);
+      message.error(normalizedDocTask?.last_error || "模型调用失败，未生成规范化需求文档");
+    }
+  }, [normalizedDocTask, viewRequirement]);
+
+  useEffect(() => {
+    setNormalizedDocTask(null);
+    previousNormalizedDocTaskStatusRef.current = null;
+    if (!viewRequirement) {
+      setNormalizedDocPreview(null);
+      setNormalizedDocOpen(false);
+      return;
+    }
+    void hydrateNormalizedDocTask(viewRequirement);
+  }, [viewRequirement?.id]);
 
   const requirementColumns = [
     { title: "ID", dataIndex: "id", width: 80 },
@@ -399,8 +553,22 @@ export default function ProjectListPage() {
       <Modal
         title="需求详情"
         open={!!viewRequirement}
-        footer={null}
-        onCancel={() => setViewRequirement(null)}
+        footer={[
+          <Button
+            key="export"
+            type="primary"
+            loading={normalizedDocLoading || normalizedDocTask?.status === "queued" || normalizedDocTask?.status === "running"}
+            onClick={() => viewRequirement && void openNormalizedDocPreview(viewRequirement)}
+          >
+            导出规范化需求
+          </Button>,
+        ]}
+        onCancel={() => {
+          setViewRequirement(null);
+          setNormalizedDocOpen(false);
+          setNormalizedDocPreview(null);
+          setNormalizedDocTask(null);
+        }}
         destroyOnClose
       >
         <Descriptions bordered column={1} size="small">
@@ -409,6 +577,76 @@ export default function ProjectListPage() {
           <Descriptions.Item label="来源">{getSourceTypeLabel(viewRequirement?.source_type)}</Descriptions.Item>
           <Descriptions.Item label="需求原文">{viewRequirement?.raw_text}</Descriptions.Item>
         </Descriptions>
+        {normalizedDocTask?.status === "queued" || normalizedDocTask?.status === "running" ? (
+          <Alert
+            style={{ marginTop: 16 }}
+            type="info"
+            showIcon
+            message="规范化需求文档仍在后台生成中，重新打开后已自动恢复任务状态。"
+          />
+        ) : null}
+        {normalizedDocTask?.status === "completed" ? (
+          <Alert
+            style={{ marginTop: 16 }}
+            type="success"
+            showIcon
+            message="上次规范化需求文档已生成完成，可直接点击“导出规范化需求”查看预览。"
+          />
+        ) : null}
+        {normalizedDocTask?.status === "failed" ? (
+          <Alert
+            style={{ marginTop: 16 }}
+            type="warning"
+            showIcon
+            message={normalizedDocTask.last_error || "上次规范化需求文档生成失败，可重新发起生成。"}
+          />
+        ) : null}
+      </Modal>
+
+      <Modal
+        title="规范化需求预览"
+        open={normalizedDocOpen}
+        width={900}
+        footer={[
+          <Button key="download" type="primary" loading={normalizedDocDownloading} onClick={() => void handleDownloadNormalizedDoc()}>
+            下载 Markdown
+          </Button>,
+        ]}
+        onCancel={() => {
+          setNormalizedDocOpen(false);
+          setNormalizedDocPreview(null);
+        }}
+        destroyOnClose
+      >
+        {normalizedDocLoading ? (
+          <Typography.Text type="secondary">加载中...</Typography.Text>
+        ) : normalizedDocPreview ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <Alert
+              type={normalizedDocPreview.uses_fresh_snapshot ? "success" : normalizedDocPreview.snapshot_stale ? "warning" : "info"}
+              showIcon
+              message={
+                normalizedDocPreview.uses_fresh_snapshot
+                  ? "已复用最新快照"
+                  : normalizedDocPreview.snapshot_stale
+                    ? "当前快照已过期，本次文档基于实时输入整理"
+                    : "暂无快照参考，本次文档基于实时输入整理"
+              }
+            />
+            <div
+              style={{
+                maxHeight: 560,
+                overflow: "auto",
+                padding: 16,
+                border: "1px solid #f0f0f0",
+                borderRadius: 8,
+                background: "#fafafa",
+              }}
+            >
+              <ReactMarkdown>{normalizedDocPreview.markdown}</ReactMarkdown>
+            </div>
+          </div>
+        ) : null}
       </Modal>
 
       <Modal

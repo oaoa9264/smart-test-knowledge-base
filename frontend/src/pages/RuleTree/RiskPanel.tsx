@@ -28,7 +28,7 @@ import {
   BookOutlined,
   BranchesOutlined,
 } from "@ant-design/icons";
-import { getErrorMessage } from "../../api/client";
+import { getErrorDetailCode, getErrorMessage } from "../../api/client";
 import type {
   AnalysisStage,
   EffectiveSnapshot,
@@ -414,6 +414,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
   }, [filteredRisks]);
 
   const [activeKeys, setActiveKeys] = useState<string[]>([]);
+  const latestSnapshotStale = latestSnapshot?.is_stale === true;
 
   useEffect(() => {
     const keys: string[] = [];
@@ -457,7 +458,14 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       );
     } catch (error) {
       void refreshStageTask(stage).catch(() => null);
-      message.error(getErrorMessage(error, stage === "review" ? "评审分析失败" : stage === "pre_dev" ? "开发前分析失败" : "提测前审计失败"));
+      const detailCode = getErrorDetailCode(error);
+      if (detailCode === "NO_SNAPSHOT") {
+        message.error("尚未生成有效需求快照，请先执行评审分析。");
+      } else if (detailCode === "STALE_SNAPSHOT") {
+        message.error("需求已变更，当前快照已过期，请先重新执行评审分析。");
+      } else {
+        message.error(getErrorMessage(error, stage === "review" ? "评审分析失败" : stage === "pre_dev" ? "开发前分析失败" : "提测前审计失败"));
+      }
     } finally {
       setStageActionLoading(null);
     }
@@ -892,6 +900,11 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
             提测前审计
           </Button>
         </Space>
+        {latestSnapshotStale && (
+          <Typography.Text type="warning" style={{ display: "block", marginTop: 8 }}>
+            当前最新快照已过期，开发前分析和提测前审计会要求先重新执行评审分析。
+          </Typography.Text>
+        )}
         {stageTaskAlerts.length > 0 && (
           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
             {stageTaskAlerts}
@@ -935,6 +948,13 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
         <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, overflow: "auto", padding: "8px 0" }}>
           <div style={{ padding: "0 16px 8px", display: "flex", flexDirection: "column", gap: 8 }}>
             {stageNotice && <Alert type="info" showIcon message={stageNotice} />}
+            {latestSnapshotStale && (
+              <Alert
+                type="warning"
+                showIcon
+                message="需求已变更，当前快照不是基于最新输入生成，结果可能不可靠，请重新执行评审分析。"
+              />
+            )}
             {auditResult && (
               <Alert
                 type={auditResult.blocking_risks.length > 0 ? "warning" : "success"}

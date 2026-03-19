@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -36,6 +37,81 @@ _VALID_FIELD_KEYS = {
 _VALID_DERIVATIONS = {d.value for d in Derivation}
 
 
+class NoSnapshotError(ValueError):
+    pass
+
+
+class StaleSnapshotError(ValueError):
+    pass
+
+
+def compute_basis_hash(requirement: Requirement, inputs: List[RequirementInput]) -> str:
+    serialized_inputs = []
+    for inp in sorted(
+        inputs,
+        key=lambda item: (
+            item.created_at.isoformat() if getattr(item, "created_at", None) else "",
+            getattr(item, "id", 0) or 0,
+        ),
+    ):
+        input_type = inp.input_type.value if hasattr(inp.input_type, "value") else inp.input_type
+        serialized_inputs.append({
+            "input_type": input_type,
+            "content": inp.content or "",
+            "source_label": inp.source_label or "",
+        })
+
+    payload = {
+        "raw_text": requirement.raw_text or "",
+        "inputs": serialized_inputs,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def is_snapshot_stale(
+    requirement: Requirement,
+    inputs: List[RequirementInput],
+    snapshot: EffectiveRequirementSnapshot,
+) -> bool:
+    if not snapshot.basis_hash:
+        return True
+    return compute_basis_hash(requirement, inputs) != snapshot.basis_hash
+
+
+def list_requirement_inputs(
+    db: Session,
+    requirement_id: int,
+) -> List[RequirementInput]:
+    return (
+        db.query(RequirementInput)
+        .filter(RequirementInput.requirement_id == requirement_id)
+        .order_by(RequirementInput.created_at.asc(), RequirementInput.id.asc())
+        .all()
+    )
+
+
+def annotate_snapshot_freshness(
+    db: Session,
+    snapshot: Optional[EffectiveRequirementSnapshot],
+    requirement: Optional[Requirement] = None,
+    inputs: Optional[List[RequirementInput]] = None,
+) -> Optional[EffectiveRequirementSnapshot]:
+    if snapshot is None:
+        return None
+
+    current_requirement = requirement or (
+        db.query(Requirement).filter(Requirement.id == snapshot.requirement_id).first()
+    )
+    current_inputs = inputs if inputs is not None else list_requirement_inputs(db, snapshot.requirement_id)
+    snapshot.is_stale = True if current_requirement is None else is_snapshot_stale(
+        current_requirement,
+        current_inputs,
+        snapshot,
+    )
+    return snapshot
+
+
 def generate_review_snapshot(
     db: Session,
     requirement_id: int,
@@ -53,12 +129,7 @@ def generate_review_snapshot(
     if not requirement:
         raise ValueError("requirement not found")
 
-    inputs = (
-        db.query(RequirementInput)
-        .filter(RequirementInput.requirement_id == requirement_id)
-        .order_by(RequirementInput.created_at.asc())
-        .all()
-    )
+    inputs = list_requirement_inputs(db, requirement_id)
 
     formal_inputs_text = _format_inputs(inputs)
     product_context = _build_review_product_context(db, requirement, llm_client)
@@ -81,12 +152,14 @@ def generate_review_snapshot(
     )
 
     input_ids = ",".join(str(inp.id) for inp in inputs) if inputs else ""
+    basis_hash = compute_basis_hash(requirement, inputs)
 
     snapshot = EffectiveRequirementSnapshot(
         requirement_id=requirement_id,
         stage=AnalysisStage.review,
         status=SnapshotStatus.draft,
         based_on_input_ids=input_ids or None,
+        basis_hash=basis_hash,
         summary=llm_result.get("summary", ""),
     )
     db.add(snapshot)

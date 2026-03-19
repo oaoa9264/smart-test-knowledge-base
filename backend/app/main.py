@@ -55,6 +55,8 @@ from app.api.ai_parse import router as ai_router
 from app.api.coverage import router as coverage_router
 from app.api.effective_requirements import router as effective_requirements_router
 from app.api.evidence_blocks import router as evidence_blocks_router
+from app.api.normalized_requirement_docs import router as normalized_requirement_doc_router
+from app.api.normalized_requirement_doc_tasks import router as normalized_requirement_doc_task_router
 from app.api.product_docs import router as product_doc_router
 from app.api.projects import router as project_router
 from app.api.recommendation import router as recommendation_router
@@ -79,6 +81,7 @@ from app.core.schema_migrations import (
 )
 from app.models.entities import (
     Base,
+    NormalizedRequirementDocTask,
     RiskAnalysisTask,
     RiskAnalysisTaskStatus,
     RuleTreeSession,
@@ -161,10 +164,38 @@ def recover_interrupted_risk_analysis_tasks() -> int:
         db.close()
 
 
+def recover_interrupted_normalized_requirement_doc_tasks() -> int:
+    db = SessionLocal()
+    try:
+        tasks = (
+            db.query(NormalizedRequirementDocTask)
+            .filter(
+                NormalizedRequirementDocTask.status.in_(
+                    [
+                        RiskAnalysisTaskStatus.queued,
+                        RiskAnalysisTaskStatus.running,
+                    ]
+                )
+            )
+            .all()
+        )
+        interrupted_at = datetime.utcnow()
+        for task in tasks:
+            task.status = RiskAnalysisTaskStatus.interrupted
+            task.progress_message = "服务重启导致任务中断，请重新发起生成"
+            task.last_error = "服务重启导致任务中断，请重新发起生成"
+            task.current_task_finished_at = interrupted_at
+        db.commit()
+        return len(tasks)
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def _recover_rule_tree_sessions_on_startup() -> None:
     recover_interrupted_rule_tree_sessions()
     recover_interrupted_risk_analysis_tasks()
+    recover_interrupted_normalized_requirement_doc_tasks()
 
 
 @app.get("/health")
@@ -192,3 +223,5 @@ app.include_router(risk_analysis_task_router)
 app.include_router(requirement_inputs_router)
 app.include_router(evidence_blocks_router)
 app.include_router(effective_requirements_router)
+app.include_router(normalized_requirement_doc_router)
+app.include_router(normalized_requirement_doc_task_router)

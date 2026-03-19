@@ -421,6 +421,8 @@ export interface EffectiveSnapshot {
   stage: AnalysisStage;
   status: string;
   based_on_input_ids: string | null;
+  basis_hash: string | null;
+  is_stale: boolean | null;
   summary: string | null;
   base_snapshot_id: number | null;
   created_at: string | null;
@@ -472,6 +474,17 @@ export interface ReviewSnapshotResponse {
   clarification_hints: string[];
 }
 
+export interface NormalizedRequirementDocPreview {
+  title: string;
+  markdown: string;
+  basis_hash: string;
+  uses_fresh_snapshot: boolean;
+  snapshot_stale: boolean;
+  llm_status?: LLMStatus | null;
+  llm_provider?: string | null;
+  llm_message?: string | null;
+}
+
 export interface PredevAnalysisResponse {
   snapshot: EffectiveSnapshot;
   risks: RiskItemCompact[];
@@ -514,6 +527,31 @@ export interface RiskAnalysisTaskSummary {
 export interface RiskAnalysisTaskStartResponse {
   accepted: boolean;
   task: RiskAnalysisTask;
+}
+
+export interface NormalizedRequirementDocTask {
+  id: number;
+  requirement_id: number;
+  status: RiskAnalysisTaskStatus;
+  progress_message: string | null;
+  progress_percent: number | null;
+  last_error: string | null;
+  basis_hash: string | null;
+  uses_fresh_snapshot: boolean;
+  snapshot_stale: boolean;
+  source_payload_json: string | null;
+  snapshot_payload_json: string | null;
+  result_markdown: string | null;
+  llm_provider: string | null;
+  current_task_started_at: string | null;
+  current_task_finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NormalizedRequirementDocTaskStartResponse {
+  accepted: boolean;
+  task: NormalizedRequirementDocTask;
 }
 
 export interface ProductDoc {

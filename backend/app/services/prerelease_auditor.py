@@ -20,7 +20,12 @@ from app.models.entities import (
     RuleNode,
     SnapshotStatus,
 )
-from app.services.effective_requirement_service import get_latest_snapshot
+from app.services.effective_requirement_service import (
+    NoSnapshotError,
+    StaleSnapshotError,
+    is_snapshot_stale,
+    list_requirement_inputs,
+)
 from app.services.evidence_service import get_relevant_evidence
 from app.services.llm_client import LLMClient
 from app.services.product_doc_service import get_relevant_chunks
@@ -54,9 +59,12 @@ def audit_for_prerelease(
 
     latest_snapshot = _get_best_snapshot(db, requirement_id)
     if not latest_snapshot:
-        raise ValueError(
+        raise NoSnapshotError(
             "no effective requirement snapshot found – run review or pre-dev analysis first"
         )
+    inputs = list_requirement_inputs(db, requirement_id)
+    if is_snapshot_stale(requirement, inputs, latest_snapshot):
+        raise StaleSnapshotError("requirement changed after latest effective snapshot")
 
     nodes = (
         db.query(RuleNode)

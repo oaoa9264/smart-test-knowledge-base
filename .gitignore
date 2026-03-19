@@ -23,6 +23,8 @@ dist/
 # IDE
 .idea/
 .vscode/
+.agents/
+.claude/
 
 # Worktrees
 .worktrees/

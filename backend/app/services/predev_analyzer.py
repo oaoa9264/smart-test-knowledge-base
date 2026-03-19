@@ -20,6 +20,13 @@ from app.models.entities import (
     SnapshotStatus,
 )
 from app.services.effective_requirement_service import get_latest_snapshot
+from app.services.effective_requirement_service import (
+    NoSnapshotError,
+    StaleSnapshotError,
+    compute_basis_hash,
+    is_snapshot_stale,
+    list_requirement_inputs,
+)
 from app.services.evidence_service import get_relevant_evidence
 from app.services.llm_client import LLMClient
 from app.services.product_doc_service import get_relevant_chunks
@@ -60,9 +67,12 @@ def analyze_for_predev(
 
     base_snapshot = _get_latest_base_snapshot(db, requirement_id)
     if not base_snapshot:
-        raise ValueError(
+        raise NoSnapshotError(
             "no review snapshot found – run review analysis first"
         )
+    inputs = list_requirement_inputs(db, requirement_id)
+    if is_snapshot_stale(requirement, inputs, base_snapshot):
+        raise StaleSnapshotError("requirement changed after latest effective snapshot")
 
     nodes = (
         db.query(RuleNode)
@@ -90,11 +100,13 @@ def analyze_for_predev(
     base_snapshot.status = SnapshotStatus.superseded
     db.flush()
 
+    input_ids = ",".join(str(inp.id) for inp in inputs) if inputs else ""
     new_snapshot = EffectiveRequirementSnapshot(
         requirement_id=requirement_id,
         stage=AnalysisStage.pre_dev,
         status=SnapshotStatus.draft,
-        based_on_input_ids=base_snapshot.based_on_input_ids,
+        based_on_input_ids=input_ids or None,
+        basis_hash=compute_basis_hash(requirement, inputs),
         summary=llm_result.get("summary", ""),
         base_snapshot_id=base_snapshot.id,
     )

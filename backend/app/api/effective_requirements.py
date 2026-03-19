@@ -20,6 +20,9 @@ from app.schemas.risk_convergence import (
     RiskItemCompact,
 )
 from app.services.effective_requirement_service import (
+    NoSnapshotError,
+    StaleSnapshotError,
+    annotate_snapshot_freshness,
     generate_review_snapshot,
     get_latest_snapshot,
     list_snapshots,
@@ -76,7 +79,7 @@ def list_requirement_snapshots(
         raise HTTPException(status_code=404, detail="requirement not found")
 
     snapshots = list_snapshots(db=db, requirement_id=requirement_id)
-    return [EffectiveSnapshotRead.from_orm(s) for s in snapshots]
+    return [EffectiveSnapshotRead.from_orm(annotate_snapshot_freshness(db, s)) for s in snapshots]
 
 
 @router.get(
@@ -102,7 +105,7 @@ def get_latest_requirement_snapshot(
     if not snapshot:
         return None
 
-    return EffectiveSnapshotRead.from_orm(snapshot)
+    return EffectiveSnapshotRead.from_orm(annotate_snapshot_freshness(db, snapshot, requirement=requirement))
 
 
 @router.post(
@@ -125,6 +128,16 @@ def run_predev_analysis(
         result = analyze_for_predev(
             db=db, requirement_id=payload.requirement_id,
         )
+    except NoSnapshotError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "NO_SNAPSHOT", "message": str(exc)},
+        )
+    except StaleSnapshotError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "STALE_SNAPSHOT", "message": str(exc)},
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -133,7 +146,7 @@ def run_predev_analysis(
     conflicts_raw = result.get("conflicts", [])
     evidence_raw = result.get("matched_evidence", [])
 
-    snapshot_read = EffectiveSnapshotRead.from_orm(snapshot)
+    snapshot_read = EffectiveSnapshotRead.from_orm(annotate_snapshot_freshness(db, snapshot, requirement=requirement))
     risk_compacts = [RiskItemCompact.from_orm(r) for r in risks]
     conflict_items = [ConflictItem(**c) for c in conflicts_raw]
     evidence_items = [MatchedEvidence(**e) for e in evidence_raw]
@@ -165,6 +178,16 @@ def run_prerelease_audit(
     try:
         result = audit_for_prerelease(
             db=db, requirement_id=payload.requirement_id,
+        )
+    except NoSnapshotError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "NO_SNAPSHOT", "message": str(exc)},
+        )
+    except StaleSnapshotError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "STALE_SNAPSHOT", "message": str(exc)},
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

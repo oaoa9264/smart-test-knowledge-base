@@ -45,6 +45,8 @@ class EffectiveSnapshotRead(BaseModel):
     stage: str
     status: str
     based_on_input_ids: Optional[str] = None
+    basis_hash: Optional[str] = None
+    is_stale: Optional[bool] = None
     summary: Optional[str] = None
     base_snapshot_id: Optional[int] = None
     created_at: Optional[datetime] = None

@@ -225,6 +225,11 @@ class Requirement(Base):
     risk_items = relationship("RiskItem", back_populates="requirement", cascade="all, delete-orphan")
     rule_tree_sessions = relationship("RuleTreeSession", back_populates="requirement", cascade="all, delete-orphan")
     risk_analysis_tasks = relationship("RiskAnalysisTask", back_populates="requirement", cascade="all, delete-orphan")
+    normalized_requirement_doc_tasks = relationship(
+        "NormalizedRequirementDocTask",
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+    )
     test_plan_sessions = relationship("TestPlanSession", back_populates="requirement", cascade="all, delete-orphan")
     requirement_inputs = relationship(
         "RequirementInput",
@@ -416,6 +421,31 @@ class RiskAnalysisTask(Base):
     snapshot = relationship("EffectiveRequirementSnapshot")
 
 
+class NormalizedRequirementDocTask(Base):
+    __tablename__ = "normalized_requirement_doc_tasks"
+    __table_args__ = (UniqueConstraint("requirement_id", name="uq_normalized_doc_task_requirement"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    requirement_id = Column(Integer, ForeignKey("requirements.id"), nullable=False, index=True)
+    status = Column(Enum(RiskAnalysisTaskStatus), default=RiskAnalysisTaskStatus.queued, nullable=False)
+    progress_message = Column(Text, nullable=True)
+    progress_percent = Column(Integer, nullable=True)
+    last_error = Column(Text, nullable=True)
+    basis_hash = Column(String(64), nullable=True)
+    uses_fresh_snapshot = Column(Boolean, default=False, nullable=False)
+    snapshot_stale = Column(Boolean, default=False, nullable=False)
+    source_payload_json = Column(Text, nullable=True)
+    snapshot_payload_json = Column(Text, nullable=True)
+    result_markdown = Column(Text, nullable=True)
+    llm_provider = Column(String(64), nullable=True)
+    current_task_started_at = Column(DateTime, nullable=True)
+    current_task_finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    requirement = relationship("Requirement", back_populates="normalized_requirement_doc_tasks")
+
+
 class RuleTreeMessage(Base):
     __tablename__ = "rule_tree_messages"
 
@@ -490,6 +520,7 @@ class EffectiveRequirementSnapshot(Base):
     stage = Column(Enum(AnalysisStage), nullable=False)
     status = Column(Enum(SnapshotStatus), default=SnapshotStatus.draft, nullable=False)
     based_on_input_ids = Column(Text, nullable=True)
+    basis_hash = Column(String(64), nullable=True)
     summary = Column(Text, nullable=True)
     base_snapshot_id = Column(Integer, ForeignKey("effective_requirement_snapshots.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
