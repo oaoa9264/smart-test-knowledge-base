@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.schemas.architecture import ArchitectureAnalysisResult
 from app.services.llm_client import LLMClient
+from app.services.llm_result_helpers import build_llm_failure_meta, build_llm_success_meta
 from app.services.prompts.architecture import (
     GENERATE_SYSTEM_PROMPT,
     GENERATE_USER_TEMPLATE,
@@ -72,28 +73,26 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
                 title=normalized_title,
             )
             stage = "validate"
-            validated, used_mock_fallback = self._validate_and_fallback(
+            validated = self._validate_payload(
                 generated,
-                image_path=image_path,
-                description=normalized_desc,
                 title=normalized_title,
             )
-            self._analysis_mode = "mock_fallback" if used_mock_fallback else "llm"
-            return _decision_tree_only_result(validated)
+            self._analysis_mode = "llm"
+            return {
+                **_decision_tree_only_result(validated),
+                **build_llm_success_meta(self._llm_provider),
+            }
         except Exception:
             logger.exception(
-                "LLM analyze failed at stage=%s, fallback to mock (title=%s, has_image=%s, desc_len=%d)",
+                "LLM analyze failed at stage=%s, returning empty result (title=%s, has_image=%s, desc_len=%d)",
                 stage,
                 normalized_title or "<empty>",
                 bool(image_path),
                 len(normalized_desc),
             )
-            self._analysis_mode = "mock_fallback"
-            return MockAnalyzerProvider().analyze(
-                image_path=image_path,
-                description=normalized_desc,
-                title=normalized_title,
-            )
+            self._analysis_mode = "llm_failed"
+            self._llm_provider = None
+            return _empty_architecture_result()
 
     def _get_llm(self):
         if self.llm is None:
@@ -134,18 +133,16 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
             return str(provider).strip().lower()
         return None
 
-    def _validate_and_fallback(
+    def _validate_payload(
         self,
         payload: Dict,
-        image_path: Optional[str],
-        description: str,
         title: str,
-    ) -> Tuple[Dict, bool]:
+    ) -> Dict:
         payload_summary = _summarize_payload_structure(payload)
         try:
             validated = ArchitectureAnalysisResult.parse_obj(payload).dict()
             _validate_related_node_ids(validated)
-            return _post_process_decision_tree(validated, title=title), False
+            return _post_process_decision_tree(validated, title=title)
         except Exception as exc:
             try:
                 normalized_payload = _normalize_llm_payload(payload)
@@ -156,16 +153,15 @@ class LLMAnalyzerProvider(ArchitectureAnalyzerProvider):
                     (title or "").strip() or "<empty>",
                     payload_summary,
                 )
-                return _post_process_decision_tree(normalized, title=title), False
+                return _post_process_decision_tree(normalized, title=title)
             except Exception as normalize_exc:
-                logger.warning(
-                    "LLM payload invalid, fallback to mock (%s, raw_error=%s, normalize_error=%s)",
-                    payload_summary,
-                    exc,
-                    normalize_exc,
+                raise ValueError(
+                    "LLM payload invalid ({0}, raw_error={1}, normalize_error={2})".format(
+                        payload_summary,
+                        exc,
+                        normalize_exc,
+                    )
                 )
-                fallback_result = MockAnalyzerProvider().analyze(image_path=image_path, description=description, title=title)
-                return fallback_result, True
 
 
 def get_analyzer_provider() -> ArchitectureAnalyzerProvider:
@@ -198,6 +194,16 @@ def _extract_image_hint(image_path: Optional[str]) -> str:
     stem = os.path.splitext(filename)[0]
     normalized = re.sub(r"[_\-]+", " ", stem).strip()
     return normalized or filename
+
+
+def _empty_architecture_result() -> Dict:
+    return {
+        "decision_tree": {"nodes": []},
+        "test_plan": None,
+        "risk_points": [],
+        "test_cases": [],
+        **build_llm_failure_meta(),
+    }
 
 
 def _split_sentences(text: str) -> List[str]:

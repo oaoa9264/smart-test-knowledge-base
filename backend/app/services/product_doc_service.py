@@ -512,15 +512,9 @@ def suggest_doc_update(
             )
             result = llm.chat_with_json(system_prompt=system_prompt, user_prompt=user_prompt)
             suggested_content = result.get("updated_content", "") if isinstance(result, dict) else str(result)
-            if not suggested_content:
-                suggested_content = "{original}\n\n【补充说明】{clarification}".format(
-                    original=original_content, clarification=clarification_text
-                )
         except Exception as exc:
-            logger.warning("Doc update LLM failed (%s: %s), using placeholder", type(exc).__name__, exc)
-            suggested_content = "{original}\n\n【补充说明】{clarification}".format(
-                original=original_content, clarification=clarification_text
-            )
+            logger.warning("Doc update LLM failed (%s: %s), returning empty result", type(exc).__name__, exc)
+            suggested_content = ""
     else:
         suggested_content = "{original}\n\n【补充说明】{clarification}".format(
             original=original_content, clarification=clarification_text

@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from app.services.llm_client import LLMClient
+from app.services.llm_result_helpers import build_llm_failure_meta, build_llm_success_meta
 from app.services.prompts.risk_analysis import RISK_WRITING_GUIDE
 
 
@@ -75,21 +76,24 @@ def parse_requirement_text(raw_text: str, llm_client: Optional[Any] = None) -> D
             )
             normalized = _normalize_llm_payload(payload)
             if normalized["nodes"]:
-                normalized["analysis_mode"] = "llm"
-                return normalized
+                return {
+                    **normalized,
+                    "analysis_mode": "llm",
+                    **build_llm_success_meta(_resolve_provider_from_llm(llm)),
+                }
+            logger.warning("AI parse LLM returned no usable nodes, returning empty result")
         except Exception as exc:
             logger.warning(
-                "AI parse LLM failed, fallback to clause parser (%s: %s)",
+                "AI parse LLM failed, returning empty result (%s: %s)",
                 type(exc).__name__,
                 exc,
             )
-            fallback = _parse_by_clause(text)
-            fallback["analysis_mode"] = "mock_fallback"
-            return fallback
-
-        fallback = _parse_by_clause(text)
-        fallback["analysis_mode"] = "mock_fallback"
-        return fallback
+        return {
+            "analysis_mode": "llm_failed",
+            "nodes": [],
+            "risks": [],
+            **build_llm_failure_meta(),
+        }
 
     fallback = _parse_by_clause(text)
     fallback["analysis_mode"] = "mock"
@@ -269,3 +273,13 @@ def _extract_risks(payload: Any) -> List[Dict[str, Any]]:
         })
 
     return risks
+
+
+def _resolve_provider_from_llm(llm: Any) -> Optional[str]:
+    getter = getattr(llm, "get_last_provider", None)
+    if not callable(getter):
+        return None
+    provider = getter(method_name="chat_with_json")
+    if not provider:
+        return None
+    return str(provider).strip().lower()

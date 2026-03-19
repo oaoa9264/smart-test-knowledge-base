@@ -373,18 +373,15 @@ def _call_llm_for_predev(
         return _parse_predev_payload(payload)
     except Exception as exc:
         logger.warning(
-            "Pre-dev analysis LLM failed (%s: %s), using mock",
+            "Pre-dev analysis LLM failed (%s: %s), returning empty result",
             type(exc).__name__, exc,
         )
-        return _mock_predev_analysis(
-            rule_tree_text,
-            has_product_context=bool(product_context),
-        )
+        return _empty_predev_analysis()
 
 
 def _parse_predev_payload(payload: Any) -> Dict[str, Any]:
     if not isinstance(payload, dict):
-        return _mock_predev_analysis("", False)
+        return _empty_predev_analysis()
 
     summary = str(payload.get("summary", ""))
 
@@ -459,6 +456,16 @@ def _parse_predev_payload(payload: Any) -> Dict[str, Any]:
         "conflicts": parsed_conflicts,
         "fields": parsed_fields,
         "risks": parsed_risks,
+    }
+
+
+def _empty_predev_analysis() -> Dict[str, Any]:
+    return {
+        "summary": "",
+        "matched_evidence": [],
+        "conflicts": [],
+        "fields": [],
+        "risks": [],
     }
 
 

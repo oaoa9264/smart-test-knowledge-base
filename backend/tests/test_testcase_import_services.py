@@ -128,9 +128,11 @@ def test_matcher_uses_llm_and_filters_invalid_ids():
         reason="命中登录条件",
     )
     assert matcher.get_llm_provider() == "openai"
+    assert matcher.get_llm_status() == "success"
+    assert matcher.get_llm_message() is None
 
 
-def test_matcher_fallbacks_to_keyword_when_llm_fails():
+def test_matcher_returns_empty_results_when_llm_fails():
     matcher = _TestCaseMatcher(llm_client=_FakeLLM(should_raise=True))
     cases = [
         ParsedTestCase(
@@ -143,7 +145,9 @@ def test_matcher_fallbacks_to_keyword_when_llm_fails():
     nodes = [_build_node("n-{0}".format(uuid4().hex[:6]), "支付超时触发重试机制")]
 
     results, mode = matcher.match_cases(parsed_cases=cases, rule_nodes=nodes)
-    assert mode == "mock_fallback"
-    assert len(results[0].matched_node_ids) == 1
-    assert results[0].confidence in ["low", "medium", "high"]
+    assert mode == "llm_failed"
+    assert results[0].matched_node_ids == []
+    assert results[0].confidence == "none"
     assert matcher.get_llm_provider() is None
+    assert matcher.get_llm_status() == "failed"
+    assert "所有模型调用失败" in matcher.get_llm_message()

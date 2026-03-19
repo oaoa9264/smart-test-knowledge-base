@@ -409,8 +409,8 @@ def _call_llm_for_risks(
         )
         return _extract_risks_from_payload(payload)
     except Exception as exc:
-        logger.warning("Risk analysis LLM failed, using mock (%s: %s)", type(exc).__name__, exc)
-        return _mock_risk_analysis(tree_nodes_text, has_product_context=bool(product_context))
+        logger.warning("Risk analysis LLM failed, returning empty result (%s: %s)", type(exc).__name__, exc)
+        return []
 
 
 def _mock_risk_analysis(tree_nodes_text: str, has_product_context: bool = False) -> List[Dict[str, Any]]:
@@ -681,8 +681,8 @@ def generate_clarification_questions(
         )
         return _parse_clarification_payload(payload)
     except Exception as exc:
-        logger.warning("Clarification LLM failed (%s: %s), using mock", type(exc).__name__, exc)
-        return _mock_clarification_questions(matched_str, risks)
+        logger.warning("Clarification LLM failed (%s: %s), returning empty result", type(exc).__name__, exc)
+        return []
 
 
 def _parse_clarification_payload(payload: Any) -> List[Dict[str, str]]:

@@ -43,6 +43,11 @@ const analysisModeMeta: Record<string, { label: string; color: string; hint?: st
     color: "orange",
     hint: "LLM 调用失败，已自动降级到规则模板分析",
   },
+  llm_failed: {
+    label: getArchitectureAnalysisModeLabel("llm_failed"),
+    color: "red",
+    hint: "所有模型调用失败，当前结果为空",
+  },
   unknown: {
     label: "未知",
     color: "default",
@@ -108,7 +113,12 @@ export default function ArchitectureAnalysisPage() {
     .toLowerCase();
   const llmProviderTagMeta = llmProviderMeta[llmProviderKey];
   const llmProviderLabel = llmProviderTagMeta ? llmProviderTagMeta.label : analysis?.llm_provider;
-  const showLlmProvider = modeKey === "llm" || modeKey === "mock_fallback";
+  const analysisFailed = analysis?.llm_status === "failed" || modeKey === "llm_failed";
+  const hasDecisionTree = (analysis?.decision_tree.nodes?.length || 0) > 0;
+  const llmFailureMessage =
+    analysis?.llm_message || "所有模型调用失败，未生成结果。请稍后重试或检查模型配置。";
+  const showLlmProvider = modeKey === "llm" && !!llmProviderLabel;
+  const canImportAnalysis = !analysisFailed && hasDecisionTree;
 
   useEffect(() => {
     if (!analysis) return;
@@ -146,8 +156,11 @@ export default function ArchitectureAnalysisPage() {
       setAnalysis(result);
       if (!result.analysis_mode) {
         message.warning("后端未返回分析引擎标识，请重启后端后重试");
+      } else if (result.llm_status === "failed" || result.analysis_mode === "llm_failed") {
+        message.warning(result.llm_message || "所有模型调用失败，未生成结果");
+      } else {
+        message.success("需求拆解完成");
       }
-      message.success("需求拆解完成");
     } catch {
       message.error("分析失败，请检查输入后重试");
     } finally {
@@ -235,15 +248,19 @@ export default function ArchitectureAnalysisPage() {
           <Space style={{ marginBottom: 12 }} wrap>
             <Typography.Text type="secondary">分析引擎</Typography.Text>
             <Tag color={modeMeta.color}>{modeMeta.label}</Tag>
-            {showLlmProvider ? (
-              llmProviderLabel ? (
-                <Tag color={llmProviderTagMeta?.color || "default"}>{`LLM: ${llmProviderLabel}`}</Tag>
-              ) : (
-                <Tag color="default">LLM: 未识别</Tag>
-              )
-            ) : null}
+            {showLlmProvider ? <Tag color={llmProviderTagMeta?.color || "default"}>{`LLM: ${llmProviderLabel}`}</Tag> : null}
             {modeMeta.hint ? <Typography.Text type="secondary">{modeMeta.hint}</Typography.Text> : null}
           </Space>
+
+          {analysisFailed ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="所有模型调用失败"
+              description={llmFailureMessage}
+            />
+          ) : null}
 
           <Typography.Text strong style={{ display: "inline-block", marginBottom: 8 }}>
             判断树
@@ -271,7 +288,7 @@ export default function ArchitectureAnalysisPage() {
             >
               导入判断树
             </Checkbox>
-            <Button type="primary" loading={importing} onClick={importResult}>
+            <Button type="primary" loading={importing} onClick={importResult} disabled={!canImportAnalysis}>
               导入到正式库
             </Button>
           </Space>

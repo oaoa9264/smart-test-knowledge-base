@@ -84,7 +84,13 @@ def test_parse_import_returns_preview(monkeypatch):
             assert len(rule_nodes) >= 1
             return [
                 MatchResult(case_index=0, matched_node_ids=[root_id], confidence="high", reason="命中登录主流程")
-            ], "mock_fallback"
+            ], "llm_failed"
+
+        def get_llm_status(self):
+            return "failed"
+
+        def get_llm_message(self):
+            return "所有模型调用失败，未生成结果。请稍后重试或检查模型配置。"
 
     monkeypatch.setattr(testcase_import_api, "parse_testcases_from_upload", fake_parse)
     monkeypatch.setattr(testcase_import_api, "TestCaseMatcher", lambda: _FakeMatcher())
@@ -97,7 +103,9 @@ def test_parse_import_returns_preview(monkeypatch):
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["analysis_mode"] == "mock_fallback"
+    assert payload["analysis_mode"] == "llm_failed"
+    assert payload["llm_status"] == "failed"
+    assert "所有模型调用失败" in payload["llm_message"]
     assert payload["llm_provider"] is None
     assert payload["total_cases"] == 1
     assert payload["auto_matched"] == 1
@@ -134,6 +142,12 @@ def test_parse_import_returns_llm_provider(monkeypatch):
         def get_llm_provider(self):
             return "openai"
 
+        def get_llm_status(self):
+            return "success"
+
+        def get_llm_message(self):
+            return None
+
     monkeypatch.setattr(testcase_import_api, "parse_testcases_from_upload", fake_parse)
     monkeypatch.setattr(testcase_import_api, "TestCaseMatcher", lambda: _FakeMatcher())
 
@@ -147,6 +161,7 @@ def test_parse_import_returns_llm_provider(monkeypatch):
     payload = resp.json()
     assert payload["analysis_mode"] == "llm"
     assert payload["llm_provider"] == "openai"
+    assert payload["llm_status"] == "success"
 
 
 def test_confirm_import_success_and_skip():

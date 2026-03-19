@@ -1,10 +1,15 @@
 import os
+import logging
 from typing import Any, Dict, List, Optional
 
 from app.services.base_llm_client import BaseLLMClient
 from app.services.fallback_llm_client import FallbackLLMClient
+from app.services.llm_provider_factory import LLMProviderFactory
 from app.services.openai_client import OpenAIClient
 from app.services.zhipu_client import ZhipuClient
+
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -15,7 +20,17 @@ class LLMClient:
         self._fallback = FallbackLLMClient(provider_clients)
 
     def _build_clients_from_env(self) -> List[BaseLLMClient]:
+        provider_chain = [item.strip() for item in os.getenv("LLM_PROVIDER_CHAIN", "").split(",") if item.strip()]
+        if provider_chain:
+            return [LLMProviderFactory.build(alias) for alias in provider_chain]
+
         clients: List[BaseLLMClient] = []
+
+        if os.getenv("OPENAI_API_KEY", "").strip() or os.getenv("ZHIPU_API_KEY", "").strip():
+            logger.warning(
+                "LLM_PROVIDER_CHAIN is not set; falling back to legacy OPENAI_*/ZHIPU_* env configuration. "
+                "Please migrate to LLM_PROVIDER_CHAIN."
+            )
 
         if os.getenv("OPENAI_API_KEY", "").strip():
             clients.append(OpenAIClient())

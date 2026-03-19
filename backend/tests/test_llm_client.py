@@ -8,6 +8,15 @@ class _FakeProvider:
         self.provider_name = provider_name
 
 
+class _FakeFactory:
+    aliases = []
+
+    @classmethod
+    def build(cls, alias):
+        cls.aliases.append(alias)
+        return _FakeProvider(alias)
+
+
 class _FakeFallback:
     last_instance = None
 
@@ -38,6 +47,7 @@ def _reload_llm_client_module():
 
 
 def test_llm_client_builds_chain_openai_first_then_zhipu(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER_CHAIN", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-key")
 
@@ -53,6 +63,7 @@ def test_llm_client_builds_chain_openai_first_then_zhipu(monkeypatch):
 
 
 def test_llm_client_builds_chain_with_single_provider(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER_CHAIN", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-key")
 
@@ -67,6 +78,7 @@ def test_llm_client_builds_chain_with_single_provider(monkeypatch):
 
 
 def test_llm_client_requires_any_provider_key(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER_CHAIN", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
 
@@ -89,3 +101,36 @@ def test_llm_client_delegates_calls_to_fallback(monkeypatch):
     assert _FakeFallback.last_instance.json_calls == [("s", "u")]
     assert len(_FakeFallback.last_instance.vision_calls) == 1
     assert _FakeFallback.last_instance.image_calls == ["/tmp/test.png"]
+
+
+def test_llm_client_builds_clients_from_provider_chain(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER_CHAIN", "main,backup,zhipu")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    _FakeFactory.aliases = []
+
+    module = _reload_llm_client_module()
+    monkeypatch.setattr(module, "LLMProviderFactory", _FakeFactory, raising=False)
+    monkeypatch.setattr(module, "FallbackLLMClient", _FakeFallback)
+
+    module.LLMClient()
+
+    providers = [item.provider_name for item in _FakeFallback.last_instance.clients]
+    assert providers == ["main", "backup", "zhipu"]
+    assert _FakeFactory.aliases == ["main", "backup", "zhipu"]
+
+
+def test_llm_client_falls_back_to_legacy_env_when_chain_unset(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER_CHAIN", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-key")
+
+    module = _reload_llm_client_module()
+    monkeypatch.setattr(module, "OpenAIClient", lambda: _FakeProvider("openai"))
+    monkeypatch.setattr(module, "ZhipuClient", lambda: _FakeProvider("zhipu"))
+    monkeypatch.setattr(module, "FallbackLLMClient", _FakeFallback)
+
+    module.LLMClient()
+
+    providers = [item.provider_name for item in _FakeFallback.last_instance.clients]
+    assert providers == ["openai", "zhipu"]

@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from app.services.fallback_llm_client import FallbackLLMClient
+from app.services.fallback_llm_client import AllLLMProvidersFailedError, FallbackLLMClient
 
 
 class _FakeProvider:
@@ -61,16 +61,19 @@ def test_fallback_moves_to_next_provider_on_error(caplog):
     assert client.get_last_provider("chat_with_json") == "zhipu"
 
 
-def test_fallback_raises_last_error_when_all_providers_fail(caplog):
+def test_fallback_raises_all_providers_failed_error_when_all_providers_fail(caplog):
     openai = _FakeProvider("openai", json_error=RuntimeError("openai failed"))
     zhipu = _FakeProvider("zhipu", json_error=ValueError("zhipu failed"))
 
     client = FallbackLLMClient([openai, zhipu])
     with caplog.at_level(logging.ERROR):
-        with pytest.raises(ValueError, match="zhipu failed"):
+        with pytest.raises(AllLLMProvidersFailedError) as exc:
             client.chat_with_json(system_prompt="system", user_prompt="user")
 
     assert "All LLM providers failed" in caplog.text
+    assert exc.value.failed_providers == ["openai", "zhipu"]
+    assert exc.value.method_name == "chat_with_json"
+    assert isinstance(exc.value.last_error, ValueError)
 
 
 def test_image_to_base64_url_uses_first_provider():

@@ -239,15 +239,15 @@ def _call_llm_for_review(
         return _parse_review_payload(payload)
     except Exception as exc:
         logger.warning(
-            "Review analysis LLM failed (%s: %s), using mock",
+            "Review analysis LLM failed (%s: %s), returning empty result",
             type(exc).__name__, exc,
         )
-        return _mock_review_analysis(raw_text, has_product_context=bool(product_context))
+        return _empty_review_analysis()
 
 
 def _parse_review_payload(payload: Any) -> Dict[str, Any]:
     if not isinstance(payload, dict):
-        return _mock_review_analysis("", False)
+        return _empty_review_analysis()
 
     summary = str(payload.get("summary", ""))
     fields = payload.get("fields", [])
@@ -286,6 +286,10 @@ def _parse_review_payload(payload: Any) -> Dict[str, Any]:
         })
 
     return {"summary": summary, "fields": parsed_fields, "risks": parsed_risks}
+
+
+def _empty_review_analysis() -> Dict[str, Any]:
+    return {"summary": "", "fields": [], "risks": []}
 
 
 def _mock_review_analysis(raw_text: str, has_product_context: bool = False) -> Dict[str, Any]:

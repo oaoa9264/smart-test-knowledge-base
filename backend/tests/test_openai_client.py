@@ -57,18 +57,26 @@ def _reload_openai_client_module():
     return importlib.reload(openai_client_module)
 
 
-def test_openai_client_requires_api_key(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+def test_openai_client_requires_api_key():
     module = _reload_openai_client_module()
 
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
-        module.OpenAIClient()
+    with pytest.raises(ValueError, match="api_key"):
+        module.OpenAIClient(
+            provider_name="main",
+            api_key="",
+            base_url="https://api.routin.ai/v1",
+            text_model="gpt-4o",
+            vision_model="gpt-4o",
+            timeout=60,
+            connect_timeout=10,
+            max_retries=2,
+            max_tokens=6000,
+            temperature=0.3,
+            seed=None,
+        )
 
 
 def test_openai_client_uses_sdk_stream_for_json(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.routin.ai/v1")
-
     _FakeOpenAI.instances = []
     _FakeOpenAI.raise_in_create = None
     _FakeOpenAI.chunks = [
@@ -78,7 +86,19 @@ def test_openai_client_uses_sdk_stream_for_json(monkeypatch):
 
     module = _reload_openai_client_module()
     monkeypatch.setattr(module, "OpenAI", _FakeOpenAI)
-    client = module.OpenAIClient()
+    client = module.OpenAIClient(
+        provider_name="main",
+        api_key="openai-test-key",
+        base_url="https://api.routin.ai/v1",
+        text_model="gpt-4o",
+        vision_model="gpt-4o",
+        timeout=60,
+        connect_timeout=10,
+        max_retries=2,
+        max_tokens=6000,
+        temperature=0.3,
+        seed=None,
+    )
 
     parsed = client.chat_with_json(system_prompt="system", user_prompt="user")
 
@@ -94,10 +114,6 @@ def test_openai_client_uses_sdk_stream_for_json(monkeypatch):
 
 
 def test_openai_client_can_derive_base_url_from_api_url(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_API_URL", "https://api.routin.ai/v1/chat/completions")
-
     _FakeOpenAI.instances = []
     _FakeOpenAI.raise_in_create = None
     _FakeOpenAI.chunks = [_FakeChunk(delta=_FakeDelta(content='{"ok":true}'))]
@@ -105,7 +121,19 @@ def test_openai_client_can_derive_base_url_from_api_url(monkeypatch):
     module = _reload_openai_client_module()
     monkeypatch.setattr(module, "OpenAI", _FakeOpenAI)
 
-    client = module.OpenAIClient()
+    client = module.OpenAIClient(
+        provider_name="main",
+        api_key="openai-test-key",
+        base_url="https://api.routin.ai/v1",
+        text_model="gpt-4o",
+        vision_model="gpt-4o",
+        timeout=60,
+        connect_timeout=10,
+        max_retries=2,
+        max_tokens=6000,
+        temperature=0.3,
+        seed=None,
+    )
     parsed = client.chat_with_json(system_prompt="system", user_prompt="user")
 
     assert parsed["ok"] is True
@@ -115,8 +143,6 @@ def test_openai_client_can_derive_base_url_from_api_url(monkeypatch):
 
 
 def test_openai_client_vision_uses_sdk_stream(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
-
     _FakeOpenAI.instances = []
     _FakeOpenAI.raise_in_create = None
     _FakeOpenAI.chunks = [
@@ -126,7 +152,19 @@ def test_openai_client_vision_uses_sdk_stream(monkeypatch):
 
     module = _reload_openai_client_module()
     monkeypatch.setattr(module, "OpenAI", _FakeOpenAI)
-    client = module.OpenAIClient()
+    client = module.OpenAIClient(
+        provider_name="main",
+        api_key="openai-test-key",
+        base_url="https://api.openai.com/v1",
+        text_model="gpt-4o",
+        vision_model="gpt-4o",
+        timeout=60,
+        connect_timeout=10,
+        max_retries=2,
+        max_tokens=6000,
+        temperature=0.3,
+        seed=None,
+    )
 
     text = client.chat_with_vision(
         system_prompt="system",
@@ -140,17 +178,25 @@ def test_openai_client_vision_uses_sdk_stream(monkeypatch):
 
 
 def test_openai_client_vision_defaults_to_text_model_when_vision_model_unset(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
-    monkeypatch.setenv("OPENAI_TEXT_MODEL", "gpt-5.3-codex")
-    monkeypatch.delenv("OPENAI_VISION_MODEL", raising=False)
-
     _FakeOpenAI.instances = []
     _FakeOpenAI.raise_in_create = None
     _FakeOpenAI.chunks = [_FakeChunk(delta=_FakeDelta(content="ok"))]
 
     module = _reload_openai_client_module()
     monkeypatch.setattr(module, "OpenAI", _FakeOpenAI)
-    client = module.OpenAIClient()
+    client = module.OpenAIClient(
+        provider_name="main",
+        api_key="openai-test-key",
+        base_url="https://api.openai.com/v1",
+        text_model="gpt-5.3-codex",
+        vision_model="gpt-5.3-codex",
+        timeout=60,
+        connect_timeout=10,
+        max_retries=2,
+        max_tokens=6000,
+        temperature=0.3,
+        seed=None,
+    )
 
     client.chat_with_vision(
         system_prompt="system",
@@ -162,16 +208,25 @@ def test_openai_client_vision_defaults_to_text_model_when_vision_model_unset(mon
 
 
 def test_openai_client_passes_seed_when_configured(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
-    monkeypatch.setenv("LLM_SEED", "42")
-
     _FakeOpenAI.instances = []
     _FakeOpenAI.raise_in_create = None
     _FakeOpenAI.chunks = [_FakeChunk(delta=_FakeDelta(content='{"ok":true}'))]
 
     module = _reload_openai_client_module()
     monkeypatch.setattr(module, "OpenAI", _FakeOpenAI)
-    client = module.OpenAIClient()
+    client = module.OpenAIClient(
+        provider_name="main",
+        api_key="openai-test-key",
+        base_url="https://api.openai.com/v1",
+        text_model="gpt-4o",
+        vision_model="gpt-4o",
+        timeout=60,
+        connect_timeout=10,
+        max_retries=2,
+        max_tokens=6000,
+        temperature=0.3,
+        seed=42,
+    )
 
     parsed = client.chat_with_json(system_prompt="system", user_prompt="user")
 

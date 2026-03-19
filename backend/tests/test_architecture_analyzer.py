@@ -136,7 +136,7 @@ def test_llm_analyzer_vision_output_truncates_to_4000_chars():
     assert ("A" * 4001) not in user_prompt
 
 
-def test_llm_analyzer_fallbacks_to_mock_on_llm_error():
+def test_llm_analyzer_returns_empty_result_on_llm_error():
     fake_llm = _FakeLLMClient(raise_in_json=True)
     provider = LLMAnalyzerProvider(llm_client=fake_llm)
 
@@ -146,14 +146,14 @@ def test_llm_analyzer_fallbacks_to_mock_on_llm_error():
         description="用户提交提现申请。如果余额不足，则拒绝提现。",
     )
 
-    assert "decision_tree" in result
-    assert len(result["decision_tree"]["nodes"]) >= 1
+    assert result["decision_tree"]["nodes"] == []
     assert result["test_cases"] == []
-    assert provider.get_analysis_mode() == "mock_fallback"
-    assert provider.get_llm_provider() == "openai"
+    assert result["llm_status"] == "failed"
+    assert provider.get_analysis_mode() == "llm_failed"
+    assert provider.get_llm_provider() is None
 
 
-def test_llm_analyzer_fallbacks_to_mock_on_invalid_llm_payload():
+def test_llm_analyzer_returns_empty_result_on_invalid_llm_payload():
     fake_llm = _FakeLLMClient(json_result={"invalid": True})
     provider = LLMAnalyzerProvider(llm_client=fake_llm)
 
@@ -163,10 +163,10 @@ def test_llm_analyzer_fallbacks_to_mock_on_invalid_llm_payload():
         description="用户提交退款申请。如果订单已发货，则人工审核。",
     )
 
-    assert "decision_tree" in result
-    assert len(result["decision_tree"]["nodes"]) >= 1
+    assert result["decision_tree"]["nodes"] == []
     assert result["test_cases"] == []
-    assert provider.get_analysis_mode() == "mock_fallback"
+    assert result["llm_status"] == "failed"
+    assert provider.get_analysis_mode() == "llm_failed"
 
 
 def test_llm_analyzer_normalizes_common_payload_shape_drifts():
@@ -591,3 +591,50 @@ def test_architecture_import_is_idempotent_for_same_analysis(monkeypatch):
     second_tree = client.get(f"/api/rules/requirements/{requirement_id}/tree")
     assert second_tree.status_code == 200
     assert len(second_tree.json()["nodes"]) == first_node_count
+
+
+def test_architecture_import_rejects_failed_llm_analysis(monkeypatch):
+    class _FailedProvider:
+        @staticmethod
+        def analyze(image_path=None, description="", title=None):
+            return {
+                "decision_tree": {"nodes": []},
+                "test_plan": None,
+                "risk_points": [],
+                "test_cases": [],
+                "llm_status": "failed",
+                "llm_provider": None,
+                "llm_message": "所有模型调用失败，未生成结果。",
+            }
+
+        @staticmethod
+        def get_analysis_mode():
+            return "llm_failed"
+
+        @staticmethod
+        def get_llm_provider():
+            return None
+
+    monkeypatch.setattr("app.api.architecture.get_analyzer_provider", lambda: _FailedProvider())
+
+    project_resp = client.post("/api/projects", json={"name": "arch-p-failed-llm", "description": "architecture"})
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    analyze_resp = client.post(
+        "/api/ai/architecture/analyze",
+        data={
+            "project_id": str(project_id),
+            "title": "失败的架构拆解",
+            "description_text": "用户提交提现申请。",
+        },
+    )
+    assert analyze_resp.status_code == 201
+    analysis_id = analyze_resp.json()["id"]
+
+    import_resp = client.post(
+        f"/api/ai/architecture/{analysis_id}/import",
+        json={"import_decision_tree": True},
+    )
+    assert import_resp.status_code == 400
+    assert "failed" in import_resp.json()["detail"].lower()
