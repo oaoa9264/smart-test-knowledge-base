@@ -2,6 +2,13 @@ export type RiskLevel = "critical" | "high" | "medium" | "low";
 export type NodeType = "root" | "condition" | "branch" | "action" | "exception";
 export type NodeStatus = "active" | "modified" | "deleted";
 export type TestCaseStatus = "active" | "needs_review" | "invalidated";
+export type LLMStatus = "success" | "failed";
+
+export interface LLMExecutionMeta {
+  llm_status?: LLMStatus | null;
+  llm_provider?: string | null;
+  llm_message?: string | null;
+}
 
 export interface Project {
   id: number;
@@ -211,7 +218,7 @@ export interface TestCase {
 }
 
 export type ImportConfidence = "high" | "medium" | "low" | "none";
-export type ImportAnalysisMode = "llm" | "mock_fallback";
+export type ImportAnalysisMode = "llm" | "mock_fallback" | "llm_failed";
 
 export interface ParsedCasePreview {
   index: number;
@@ -225,13 +232,12 @@ export interface ParsedCasePreview {
   match_reason: string;
 }
 
-export interface ImportParseResponse {
+export interface ImportParseResponse extends LLMExecutionMeta {
   parsed_cases: ParsedCasePreview[];
   total_cases: number;
   auto_matched: number;
   need_review: number;
   analysis_mode: ImportAnalysisMode;
-  llm_provider?: "openai" | "zhipu" | string | null;
 }
 
 export interface ImportConfirmCasePayload {
@@ -287,8 +293,8 @@ export interface AIParseNode {
   parent_id: string | null;
 }
 
-export interface AIParseResult {
-  analysis_mode: "llm" | "mock" | "mock_fallback";
+export interface AIParseResult extends LLMExecutionMeta {
+  analysis_mode: "llm" | "mock" | "mock_fallback" | "llm_failed";
   nodes: AIParseNode[];
 }
 
@@ -306,10 +312,9 @@ export interface DecisionTreeNode {
   risk_level: RiskLevel;
 }
 
-export interface ArchitectureAnalysisResult {
+export interface ArchitectureAnalysisResult extends LLMExecutionMeta {
   id: number;
-  analysis_mode: "llm" | "mock" | "mock_fallback";
-  llm_provider?: "openai" | "zhipu" | string | null;
+  analysis_mode: "llm" | "mock" | "mock_fallback" | "llm_failed";
   decision_tree: { nodes: DecisionTreeNode[] };
 }
 
@@ -636,7 +641,7 @@ export interface TestPoint {
   priority: "high" | "medium" | "low" | string;
 }
 
-export interface TestPlanResponse {
+export interface TestPlanResponse extends LLMExecutionMeta {
   markdown: string;
   test_points: TestPoint[];
   session_id?: number | null;
@@ -658,7 +663,7 @@ export interface TestCaseGenRequest {
   session_id?: number | null;
 }
 
-export interface TestCaseGenResponse {
+export interface TestCaseGenResponse extends LLMExecutionMeta {
   test_cases: GeneratedTestCase[];
   session_id?: number | null;
 }

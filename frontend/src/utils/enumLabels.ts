@@ -8,7 +8,7 @@ import type {
 } from "../types";
 
 type RequirementInputType = "raw_requirement" | "pm_addendum" | "test_clarification" | "review_note";
-type ArchitectureAnalysisMode = "llm" | "mock" | "mock_fallback";
+type ArchitectureAnalysisMode = "llm" | "mock" | "mock_fallback" | "llm_failed";
 type TestPointType = "normal" | "exception" | "boundary";
 
 export const riskLevelLabels: Record<RiskLevel, string> = {
@@ -48,12 +48,14 @@ export const requirementInputTypeLabels: Record<RequirementInputType, string> = 
 export const importAnalysisModeLabels: Record<ImportAnalysisMode, string> = {
   llm: "大模型解析",
   mock_fallback: "关键词兜底",
+  llm_failed: "模型调用失败",
 };
 
 export const architectureAnalysisModeLabels: Record<ArchitectureAnalysisMode, string> = {
   llm: "大模型分析",
   mock: "规则模板分析",
   mock_fallback: "模板降级分析",
+  llm_failed: "模型调用失败",
 };
 
 export const recoModeLabels: Record<RecoMode, string> = {

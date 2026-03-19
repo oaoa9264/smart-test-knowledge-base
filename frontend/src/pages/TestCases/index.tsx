@@ -37,6 +37,7 @@ import { fetchRuleTree } from "../../api/rules";
 import { useAppStore } from "../../stores/appStore";
 import type {
   ImportAnalysisMode,
+  LLMStatus,
   ParsedCasePreview,
   RiskLevel,
   RuleNode,
@@ -148,7 +149,9 @@ export default function TestCasesPage() {
   const [importConfirming, setImportConfirming] = useState(false);
   const [importRows, setImportRows] = useState<ImportPreviewRow[]>([]);
   const [importAnalysisMode, setImportAnalysisMode] = useState<ImportAnalysisMode>("mock_fallback");
+  const [importLlmStatus, setImportLlmStatus] = useState<LLMStatus | null>(null);
   const [importLlmProvider, setImportLlmProvider] = useState<string | null>(null);
+  const [importLlmMessage, setImportLlmMessage] = useState<string | null>(null);
   const [importSelectedRowKeys, setImportSelectedRowKeys] = useState<number[]>([]);
   const [batchRiskLevel, setBatchRiskLevel] = useState<RiskLevel>("medium");
   const [importNodes, setImportNodes] = useState<RuleNode[]>([]);
@@ -563,7 +566,9 @@ export default function TestCasesPage() {
     setImportSelectedRowKeys([]);
     setBatchRiskLevel("medium");
     setImportAnalysisMode("mock_fallback");
+    setImportLlmStatus(null);
     setImportLlmProvider(null);
+    setImportLlmMessage(null);
   };
 
   const closeImportModal = () => {
@@ -577,7 +582,9 @@ export default function TestCasesPage() {
     setImportSelectedRowKeys([]);
     setImportRequirementId(selectedRequirementId);
     setImportAnalysisMode("mock_fallback");
+    setImportLlmStatus(null);
     setImportLlmProvider(null);
+    setImportLlmMessage(null);
   };
 
   const handleParseImport = async () => {
@@ -605,10 +612,16 @@ export default function TestCasesPage() {
       }));
       setImportRows(rows);
       setImportAnalysisMode(result.analysis_mode);
+      setImportLlmStatus(result.llm_status || null);
       setImportLlmProvider(result.llm_provider || null);
+      setImportLlmMessage(result.llm_message || null);
       setImportSelectedRowKeys(rows.map((item) => item.index));
       setImportStep(1);
-      message.success(`解析完成，共 ${result.total_cases} 条`);
+      if (result.llm_status === "failed" || result.analysis_mode === "llm_failed") {
+        message.warning(result.llm_message || "所有模型调用失败，未生成结果");
+      } else {
+        message.success(`解析完成，共 ${result.total_cases} 条`);
+      }
     } catch (error) {
       message.error(getErrorMessage(error, "解析失败"));
     } finally {
@@ -993,6 +1006,15 @@ export default function TestCasesPage() {
 
         {importStep === 1 ? (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            {importLlmStatus === "failed" ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="所有模型调用失败"
+                description={importLlmMessage || "所有模型调用失败，未生成结果。请稍后重试或检查模型配置。"}
+              />
+            ) : null}
+
             <Alert
               type="info"
               showIcon
@@ -1151,6 +1173,15 @@ export default function TestCasesPage() {
 
         {importStep === 2 ? (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            {importLlmStatus === "failed" ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="所有模型调用失败"
+                description={importLlmMessage || "所有模型调用失败，未生成结果。请稍后重试或检查模型配置。"}
+              />
+            ) : null}
+
             <Descriptions bordered column={2} size="small">
               <Descriptions.Item label="解析模式">
                 {formatImportAnalysisLabel(importAnalysisMode, importLlmProvider)}

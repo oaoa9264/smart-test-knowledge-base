@@ -56,6 +56,7 @@ import type {
   DiffRecordRead,
   DecisionTreeNode,
   GeneratedTestCase,
+  LLMStatus,
   RuleTreeSession,
   RuleTreeSessionDetail,
   RuleTreeSessionGenerateResult,
@@ -442,7 +443,13 @@ export default function RuleTreePage() {
   const [testCaseConfirmLoading, setTestCaseConfirmLoading] = useState(false);
   const [testPlanMarkdown, setTestPlanMarkdown] = useState("");
   const [testPlanPoints, setTestPlanPoints] = useState<TestPoint[]>([]);
+  const [testPlanLlmStatus, setTestPlanLlmStatus] = useState<LLMStatus | null>(null);
+  const [testPlanLlmProvider, setTestPlanLlmProvider] = useState<string | null>(null);
+  const [testPlanLlmMessage, setTestPlanLlmMessage] = useState<string | null>(null);
   const [generatedCases, setGeneratedCases] = useState<GeneratedTestCase[]>([]);
+  const [testCaseGenLlmStatus, setTestCaseGenLlmStatus] = useState<LLMStatus | null>(null);
+  const [testCaseGenLlmProvider, setTestCaseGenLlmProvider] = useState<string | null>(null);
+  const [testCaseGenLlmMessage, setTestCaseGenLlmMessage] = useState<string | null>(null);
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
   const [currentSessionConfirmed, setCurrentSessionConfirmed] = useState(false);
   const [testPlanSessionLoading, setTestPlanSessionLoading] = useState(false);
@@ -468,6 +475,18 @@ export default function RuleTreePage() {
   const pendingCanvasTreeRef = useRef<MindMapTreeNode | null>(null);
   const domainNodesRef = useRef<RuleNode[]>([]);
   const activeRequirementIdRef = useRef<number | null>(activeRequirementId);
+
+  const resetTestPlanLlmMeta = () => {
+    setTestPlanLlmStatus(null);
+    setTestPlanLlmProvider(null);
+    setTestPlanLlmMessage(null);
+  };
+
+  const resetTestCaseGenLlmMeta = () => {
+    setTestCaseGenLlmStatus(null);
+    setTestCaseGenLlmProvider(null);
+    setTestCaseGenLlmMessage(null);
+  };
 
   const beginSuppressCanvasSync = useCallback((durationMs: number = 800) => {
     suppressCanvasSyncRef.current = true;
@@ -1484,6 +1503,8 @@ export default function RuleTreePage() {
     setTestPlanMarkdown(session.plan_markdown || "");
     setTestPlanPoints(session.test_points || []);
     setGeneratedCases(session.generated_cases || []);
+    resetTestPlanLlmMeta();
+    resetTestCaseGenLlmMeta();
     setIsEditingPlan(false);
     setTestPlanStep(targetStep);
   };
@@ -1510,9 +1531,17 @@ export default function RuleTreePage() {
       const result = await generateTestPlan(activeRequirementId, sessionId);
       setTestPlanMarkdown(result.markdown);
       setTestPlanPoints(result.test_points);
+      setTestPlanLlmStatus(result.llm_status || null);
+      setTestPlanLlmProvider(result.llm_provider || null);
+      setTestPlanLlmMessage(result.llm_message || null);
+      resetTestCaseGenLlmMeta();
       setSessionCreatedAt(new Date().toISOString());
       setTestPlanStep(1);
-      message.success("测试方案生成完成");
+      if (result.llm_status === "failed") {
+        message.warning(result.llm_message || "所有模型调用失败，未生成测试方案");
+      } else {
+        message.success("测试方案生成完成");
+      }
     } catch (error) {
       message.error(getErrorMessage(error, "生成测试方案失败"));
     } finally {
@@ -1536,6 +1565,8 @@ export default function RuleTreePage() {
       setTestPlanMarkdown(content);
       setTestPlanPoints([]);
       setGeneratedCases([]);
+      resetTestPlanLlmMeta();
+      resetTestCaseGenLlmMeta();
       setSessionCreatedAt(new Date().toISOString());
       setEditingMarkdown(content);
       setEditingPoints([]);
@@ -1560,9 +1591,16 @@ export default function RuleTreePage() {
         session_id: currentSessionId,
       });
       setGeneratedCases(result.test_cases);
+      setTestCaseGenLlmStatus(result.llm_status || null);
+      setTestCaseGenLlmProvider(result.llm_provider || null);
+      setTestCaseGenLlmMessage(result.llm_message || null);
       setSessionCreatedAt(new Date().toISOString());
       setTestPlanStep(2);
-      message.success(`已生成 ${result.test_cases.length} 条测试用例`);
+      if (result.llm_status === "failed") {
+        message.warning(result.llm_message || "所有模型调用失败，未生成测试用例");
+      } else {
+        message.success(`已生成 ${result.test_cases.length} 条测试用例`);
+      }
     } catch (error) {
       message.error(getErrorMessage(error, "生成测试用例失败"));
     } finally {
@@ -1583,6 +1621,8 @@ export default function RuleTreePage() {
       setCurrentSessionId(null);
       setCurrentSessionConfirmed(false);
       setSessionCreatedAt(null);
+      resetTestPlanLlmMeta();
+      resetTestCaseGenLlmMeta();
       setTestPlanDrawerOpen(false);
     } catch (error) {
       message.error(getErrorMessage(error, "导入测试用例失败"));
@@ -2300,6 +2340,8 @@ export default function RuleTreePage() {
         onClose={() => {
           setTestPlanDrawerOpen(false);
           setIsEditingPlan(false);
+          resetTestPlanLlmMeta();
+          resetTestCaseGenLlmMeta();
         }}
       >
         <Spin spinning={testPlanSessionLoading} tip="加载会话...">
@@ -2439,6 +2481,19 @@ export default function RuleTreePage() {
 
         {testPlanStep === 1 && (
           <div>
+            {testPlanLlmStatus === "failed" && (
+              <Alert
+                type="warning"
+                style={{ marginBottom: 12 }}
+                message="所有模型调用失败"
+                description={
+                  testPlanLlmProvider
+                    ? `${testPlanLlmMessage || "所有模型调用失败，未生成结果。请稍后重试或检查模型配置。"}（${testPlanLlmProvider}）`
+                    : (testPlanLlmMessage || "所有模型调用失败，未生成结果。请稍后重试或检查模型配置。")
+                }
+                showIcon
+              />
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
               <Typography.Title level={5} style={{ marginBottom: 0 }}>测试方案预览</Typography.Title>
               {!isEditingPlan ? (
@@ -2590,6 +2645,8 @@ export default function RuleTreePage() {
                     setTestPlanMarkdown("");
                     setTestPlanPoints([]);
                     setGeneratedCases([]);
+                    resetTestPlanLlmMeta();
+                    resetTestCaseGenLlmMeta();
                   }}
                 >
                   返回历史记录
@@ -2611,6 +2668,8 @@ export default function RuleTreePage() {
                       setTestPlanMarkdown("");
                       setTestPlanPoints([]);
                       setGeneratedCases([]);
+                      resetTestPlanLlmMeta();
+                      resetTestCaseGenLlmMeta();
                     }}
                   >
                     重新生成
@@ -2620,7 +2679,7 @@ export default function RuleTreePage() {
                     icon={<CheckCircleOutlined />}
                     onClick={handleGenerateTestCases}
                     loading={testCaseGenLoading}
-                    disabled={isEditingPlan}
+                    disabled={isEditingPlan || testPlanLlmStatus === "failed"}
                   >
                     测试方案通过，生成用例
                   </Button>
@@ -2632,6 +2691,19 @@ export default function RuleTreePage() {
 
         {testPlanStep === 2 && (
           <div>
+            {testCaseGenLlmStatus === "failed" && (
+              <Alert
+                type="warning"
+                style={{ marginBottom: 12 }}
+                message="所有模型调用失败"
+                description={
+                  testCaseGenLlmProvider
+                    ? `${testCaseGenLlmMessage || "所有模型调用失败，未生成结果。请稍后重试或检查模型配置。"}（${testCaseGenLlmProvider}）`
+                    : (testCaseGenLlmMessage || "所有模型调用失败，未生成结果。请稍后重试或检查模型配置。")
+                }
+                showIcon
+              />
+            )}
             {currentSessionConfirmed && (
               <Alert
                 type="warning"
@@ -2642,9 +2714,13 @@ export default function RuleTreePage() {
               />
             )}
             <Alert
-              type="success"
+              type={testCaseGenLlmStatus === "failed" ? "warning" : "success"}
               style={{ marginBottom: 16 }}
-              message={`${currentSessionConfirmed ? "历史生成" : "已生成"} ${generatedCases.length} 条测试用例`}
+              message={
+                testCaseGenLlmStatus === "failed"
+                  ? "当前未生成测试用例"
+                  : `${currentSessionConfirmed ? "历史生成" : "已生成"} ${generatedCases.length} 条测试用例`
+              }
               description={
                 <span>
                   节点覆盖：{testPlanCoverageStats.covered} / {testPlanCoverageStats.total} 个可测试节点
