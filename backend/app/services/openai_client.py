@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.base_llm_client import BaseLLMClient
 
@@ -16,39 +16,53 @@ logger = logging.getLogger(__name__)
 class OpenAIClient(BaseLLMClient):
     provider_name = "openai"
 
-    def __init__(self):
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY is required")
+    def __init__(
+        self,
+        *,
+        provider_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        text_model: Optional[str] = None,
+        vision_model: Optional[str] = None,
+        timeout: Optional[float] = None,
+        connect_timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        seed: Optional[int] = None,
+    ):
+        resolved_api_key = (api_key or os.getenv("OPENAI_API_KEY", "")).strip()
+        if not resolved_api_key:
+            raise ValueError("api_key is required")
 
         if OpenAI is None:
             raise RuntimeError("openai package is required for OpenAIClient")
 
-        self.base_url = self._resolve_base_url()
+        self.provider_name = (provider_name or self.provider_name).strip()
+        self.base_url = self._resolve_base_url(base_url=base_url)
         api_url = "{0}/chat/completions".format(self.base_url.rstrip("/"))
-        text_model = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o")
-        vision_model = os.getenv("OPENAI_VISION_MODEL", text_model)
+        resolved_text_model = (text_model or os.getenv("OPENAI_TEXT_MODEL", "gpt-4o")).strip()
+        resolved_vision_model = (vision_model or os.getenv("OPENAI_VISION_MODEL", resolved_text_model)).strip()
 
         super().__init__(
-            api_key=api_key,
+            api_key=resolved_api_key,
             api_url=api_url,
-            text_model=text_model,
-            vision_model=vision_model,
-            timeout=float(os.getenv("LLM_REQUEST_TIMEOUT", "60")),
-            connect_timeout=float(os.getenv("LLM_CONNECT_TIMEOUT", "10")),
-            max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
-            max_tokens=int(os.getenv("LLM_MAX_TOKENS", "6000")),
-            temperature=float(os.getenv("LLM_TEMPERATURE", "0.3")),
-            seed=self._read_seed_from_env(),
+            text_model=resolved_text_model,
+            vision_model=resolved_vision_model,
+            timeout=float(timeout if timeout is not None else os.getenv("LLM_REQUEST_TIMEOUT", "60")),
+            connect_timeout=float(connect_timeout if connect_timeout is not None else os.getenv("LLM_CONNECT_TIMEOUT", "10")),
+            max_retries=int(max_retries if max_retries is not None else os.getenv("LLM_MAX_RETRIES", "2")),
+            max_tokens=int(max_tokens if max_tokens is not None else os.getenv("LLM_MAX_TOKENS", "6000")),
+            temperature=float(temperature if temperature is not None else os.getenv("LLM_TEMPERATURE", "0.3")),
+            seed=self._resolve_seed(seed),
         )
-        self._sdk_client = OpenAI(api_key=api_key, base_url=self.base_url)
+        self._sdk_client = OpenAI(api_key=resolved_api_key, base_url=self.base_url)
 
     @staticmethod
-    def _resolve_base_url() -> str:
-        # Preferred input for SDK usage.
-        base_url = os.getenv("OPENAI_BASE_URL", "").strip()
-        if base_url:
-            return base_url.rstrip("/")
+    def _resolve_base_url(*, base_url: Optional[str] = None) -> str:
+        resolved_base_url = (base_url or os.getenv("OPENAI_BASE_URL", "")).strip()
+        if resolved_base_url:
+            return resolved_base_url.rstrip("/")
 
         # Backward compatibility with existing OPENAI_API_URL setting.
         api_url = os.getenv("OPENAI_API_URL", "").strip()
@@ -60,6 +74,15 @@ class OpenAIClient(BaseLLMClient):
             return normalized
 
         return "https://api.openai.com/v1"
+
+    @staticmethod
+    def _resolve_seed(seed: Optional[int]) -> Optional[int]:
+        if seed is not None:
+            return int(seed)
+        seed_text = os.getenv("LLM_SEED", "").strip()
+        if not seed_text:
+            return None
+        return int(seed_text)
 
     def _stream_chat_completion(self, payload: Dict[str, Any]) -> Tuple[str, str]:
         reasoning_acc: List[str] = []
@@ -115,10 +138,3 @@ class OpenAIClient(BaseLLMClient):
             )
 
         return "".join(reasoning_acc), "".join(content_acc)
-
-    @staticmethod
-    def _read_seed_from_env():
-        seed_text = os.getenv("LLM_SEED", "").strip()
-        if not seed_text:
-            return None
-        return int(seed_text)

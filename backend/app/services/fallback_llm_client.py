@@ -7,6 +7,18 @@ from app.services.base_llm_client import BaseLLMClient
 logger = logging.getLogger(__name__)
 
 
+class AllLLMProvidersFailedError(Exception):
+    def __init__(self, *, failed_providers: List[str], last_error: Optional[Exception], method_name: str):
+        self.failed_providers = failed_providers
+        self.last_error = last_error
+        self.method_name = method_name
+        message = "All LLM providers failed (method={0}, providers={1})".format(
+            method_name,
+            ",".join(failed_providers),
+        )
+        super().__init__(message)
+
+
 class FallbackLLMClient:
     """Sequential provider fallback for JSON and vision calls."""
 
@@ -36,6 +48,7 @@ class FallbackLLMClient:
 
     def _call_with_fallback(self, method_name: str, **kwargs: Any) -> Any:
         last_error: Optional[Exception] = None
+        failed_providers: List[str] = []
 
         for idx, client in enumerate(self.clients):
             provider = client.provider_name
@@ -47,6 +60,7 @@ class FallbackLLMClient:
                 return result
             except Exception as exc:
                 last_error = exc
+                failed_providers.append(provider)
                 if idx + 1 < len(self.clients):
                     next_provider = self.clients[idx + 1].provider_name
                     logger.warning(
@@ -69,6 +83,8 @@ class FallbackLLMClient:
                     )
 
         logger.error("All LLM providers failed (method=%s)", method_name)
-        if last_error is None:
-            raise RuntimeError("All LLM providers failed")
-        raise last_error
+        raise AllLLMProvidersFailedError(
+            failed_providers=failed_providers,
+            last_error=last_error,
+            method_name=method_name,
+        )
