@@ -556,7 +556,7 @@ def test_generate_test_cases_rejects_session_requirement_mismatch(monkeypatch):
     assert session_detail.json()["generated_cases"] is None
 
 
-def test_generate_test_plan_falls_back_when_llm_client_unavailable(monkeypatch):
+def test_generate_test_plan_returns_empty_result_when_llm_client_unavailable(monkeypatch):
     project_id, requirement_id, _ = _create_project_and_requirement("plan-fallback")
 
     session_resp = client.post(
@@ -579,12 +579,14 @@ def test_generate_test_plan_falls_back_when_llm_client_unavailable(monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["session_id"] == session_id
-    assert body["markdown"] != ""
-    assert len(body["test_points"]) > 0
+    assert body["markdown"] == ""
+    assert body["test_points"] == []
+    assert body["llm_status"] == "failed"
 
     session_detail = client.get(f"/api/test-plan/sessions/{session_id}")
     assert session_detail.status_code == 200
-    assert session_detail.json()["status"] == "plan_generated"
+    assert session_detail.json()["status"] == "archived"
+    assert session_detail.json()["plan_markdown"] is None
 
 
 def test_generate_test_plan_archives_fresh_session_on_failure(monkeypatch):
@@ -614,7 +616,7 @@ def test_generate_test_plan_archives_fresh_session_on_failure(monkeypatch):
     assert session_detail.json()["plan_markdown"] is None
 
 
-def test_generate_test_cases_falls_back_when_llm_client_unavailable(monkeypatch):
+def test_generate_test_cases_returns_empty_result_when_llm_client_unavailable(monkeypatch):
     _, requirement_id, node_id = _create_project_and_requirement("cases-fallback")
 
     session_resp = client.post(
@@ -651,8 +653,10 @@ def test_generate_test_cases_falls_back_when_llm_client_unavailable(monkeypatch)
     assert resp.status_code == 200
     body = resp.json()
     assert body["session_id"] == session_id
-    assert len(body["test_cases"]) > 0
+    assert body["test_cases"] == []
+    assert body["llm_status"] == "failed"
 
     session_detail = client.get(f"/api/test-plan/sessions/{session_id}")
     assert session_detail.status_code == 200
-    assert session_detail.json()["status"] == "cases_generated"
+    assert session_detail.json()["status"] == "plan_generating"
+    assert session_detail.json()["generated_cases"] is None

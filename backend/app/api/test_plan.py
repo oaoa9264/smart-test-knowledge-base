@@ -276,18 +276,31 @@ def api_generate_test_plan(
     ]
 
     if session:
-        session.plan_markdown = result.get("markdown", "")
-        session.test_points_json = json.dumps(
-            [tp.dict() for tp in test_points], ensure_ascii=False,
-        )
-        session.generated_cases_json = None
-        session.status = TestPlanSessionStatus.plan_generated
+        if result.get("llm_status") == "failed":
+            if (
+                previous_status == TestPlanSessionStatus.plan_generating
+                and not session.plan_markdown
+                and not session.test_points_json
+            ):
+                session.status = TestPlanSessionStatus.archived
+            else:
+                session.status = previous_status or TestPlanSessionStatus.archived
+        else:
+            session.plan_markdown = result.get("markdown", "")
+            session.test_points_json = json.dumps(
+                [tp.dict() for tp in test_points], ensure_ascii=False,
+            )
+            session.generated_cases_json = None
+            session.status = TestPlanSessionStatus.plan_generated
         db.commit()
         db.refresh(session)
 
     return TestPlanResponse(
         markdown=result.get("markdown", ""),
         test_points=test_points,
+        llm_status=result.get("llm_status"),
+        llm_provider=result.get("llm_provider"),
+        llm_message=result.get("llm_message"),
         session_id=session.id if session else None,
     )
 
@@ -300,6 +313,7 @@ def api_generate_test_cases(
     _, nodes, paths = _load_nodes_and_paths(db, payload.requirement_id)
 
     session = _get_session_for_requirement(db, payload.session_id, payload.requirement_id)
+    previous_status = session.status if session else None
     if session:
         session.status = TestPlanSessionStatus.cases_generating
         db.commit()
@@ -307,7 +321,7 @@ def api_generate_test_cases(
     test_points_dicts = [tp.dict() for tp in payload.test_points]
 
     try:
-        cases = generate_test_cases(
+        result = generate_test_cases(
             test_plan_markdown=payload.test_plan_markdown,
             test_points=test_points_dicts,
             nodes=nodes,
@@ -329,19 +343,25 @@ def api_generate_test_cases(
             risk_level=c.get("risk_level", "medium"),
             related_node_ids=c.get("related_node_ids", []),
         )
-        for c in cases
+        for c in result.get("test_cases", [])
     ]
 
     if session:
-        session.generated_cases_json = json.dumps(
-            [g.dict() for g in generated], ensure_ascii=False,
-        )
-        session.status = TestPlanSessionStatus.cases_generated
+        if result.get("llm_status") == "failed":
+            session.status = previous_status or TestPlanSessionStatus.plan_generated
+        else:
+            session.generated_cases_json = json.dumps(
+                [g.dict() for g in generated], ensure_ascii=False,
+            )
+            session.status = TestPlanSessionStatus.cases_generated
         db.commit()
         db.refresh(session)
 
     return TestCaseGenResponse(
         test_cases=generated,
+        llm_status=result.get("llm_status"),
+        llm_provider=result.get("llm_provider"),
+        llm_message=result.get("llm_message"),
         session_id=session.id if session else None,
     )
 

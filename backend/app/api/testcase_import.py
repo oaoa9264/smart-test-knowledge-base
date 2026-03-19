@@ -45,7 +45,9 @@ async def parse_import_file(
     )
     matcher = TestCaseMatcher()
     matches, analysis_mode = matcher.match_cases(parsed_cases=parsed_cases, rule_nodes=rule_nodes)
-    llm_provider = matcher.get_llm_provider() if analysis_mode == "llm" else None
+    llm_provider = getattr(matcher, "get_llm_provider", lambda: None)()
+    llm_status = getattr(matcher, "get_llm_status", lambda: None)()
+    llm_message = getattr(matcher, "get_llm_message", lambda: None)()
 
     node_map = {node.id: node for node in rule_nodes}
     preview_rows = _build_preview_rows(parsed_cases=parsed_cases, matches=matches, node_map=node_map)
@@ -60,7 +62,9 @@ async def parse_import_file(
         auto_matched=auto_matched,
         need_review=need_review,
         analysis_mode=analysis_mode,
+        llm_status=llm_status,
         llm_provider=llm_provider,
+        llm_message=llm_message,
     )
 
 

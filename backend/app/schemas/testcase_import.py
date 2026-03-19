@@ -4,7 +4,7 @@ from pydantic import BaseModel, validator
 
 
 _CONFIDENCE_VALUES = {"high", "medium", "low", "none"}
-_ANALYSIS_MODE_VALUES = {"llm", "mock_fallback"}
+_ANALYSIS_MODE_VALUES = {"llm", "mock_fallback", "llm_failed"}
 _RISK_LEVEL_VALUES = {"critical", "high", "medium", "low"}
 
 
@@ -38,7 +38,9 @@ class ImportParseResponse(BaseModel):
     auto_matched: int
     need_review: int
     analysis_mode: str
+    llm_status: Optional[str] = None
     llm_provider: Optional[str] = None
+    llm_message: Optional[str] = None
 
     @validator("analysis_mode")
     def _validate_analysis_mode(cls, value):

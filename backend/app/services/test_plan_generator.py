@@ -3,6 +3,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from app.services.llm_client import LLMClient
+from app.services.llm_result_helpers import build_llm_failure_meta, build_llm_success_meta
 from app.services.prompts.test_plan import (
     TEST_CASE_GEN_SYSTEM_PROMPT,
     TEST_CASE_GEN_USER_TEMPLATE,
@@ -177,13 +178,18 @@ def generate_test_plan(
             system_prompt=TEST_PLAN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
         )
+        llm_meta = build_llm_success_meta(_resolve_provider_from_llm(llm))
     except Exception as exc:
         logger.warning(
-            "Test plan generation failed (%s: %s), using fallback",
+            "Test plan generation failed (%s: %s), returning empty result",
             type(exc).__name__,
             exc,
         )
-        result = _fallback_test_plan(nodes=nodes, paths=paths)
+        return {
+            "markdown": "",
+            "test_points": [],
+            **build_llm_failure_meta(),
+        }
 
     markdown = result.get("markdown", "")
     test_points = result.get("test_points", [])
@@ -193,7 +199,7 @@ def generate_test_plan(
     test_points = _validate_node_ids(test_points, set(node_map.keys()))
     test_points = _ensure_coverage(test_points, coverable_ids)
 
-    return {"markdown": markdown, "test_points": test_points}
+    return {"markdown": markdown, "test_points": test_points, **llm_meta}
 
 
 def generate_test_cases(
@@ -202,7 +208,7 @@ def generate_test_cases(
     nodes: List[Dict[str, Any]],
     paths: List[List[str]],
     llm_client: Optional[LLMClient] = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     node_map = {n["id"]: n for n in nodes}
     coverable_ids = {
         n["id"] for n in nodes if n.get("node_type") in COVERABLE_TYPES
@@ -225,13 +231,14 @@ def generate_test_cases(
             system_prompt=TEST_CASE_GEN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
         )
+        llm_meta = build_llm_success_meta(_resolve_provider_from_llm(llm))
     except Exception as exc:
         logger.warning(
-            "Test case generation failed (%s: %s), using fallback",
+            "Test case generation failed (%s: %s), returning empty result",
             type(exc).__name__,
             exc,
         )
-        result = {"test_cases": _fallback_test_cases(test_points=test_points, nodes=nodes)}
+        return {"test_cases": [], **build_llm_failure_meta()}
 
     test_cases = result.get("test_cases", [])
     if not isinstance(test_cases, list):
@@ -261,4 +268,14 @@ def generate_test_cases(
                 }
             )
 
-    return test_cases
+    return {"test_cases": test_cases, **llm_meta}
+
+
+def _resolve_provider_from_llm(llm: object) -> Optional[str]:
+    getter = getattr(llm, "get_last_provider", None)
+    if not callable(getter):
+        return None
+    provider = getter(method_name="chat_with_json")
+    if not provider:
+        return None
+    return str(provider).strip().lower()

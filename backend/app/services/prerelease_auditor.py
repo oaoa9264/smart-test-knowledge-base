@@ -377,18 +377,15 @@ def _call_llm_for_audit(
         return _parse_audit_payload(payload)
     except Exception as exc:
         logger.warning(
-            "Pre-release audit LLM failed (%s: %s), using mock",
+            "Pre-release audit LLM failed (%s: %s), returning empty result",
             type(exc).__name__, exc,
         )
-        return _mock_prerelease_audit(
-            risk_ledger_text,
-            has_product_context=bool(product_context),
-        )
+        return _empty_prerelease_audit()
 
 
 def _parse_audit_payload(payload: Any) -> Dict[str, Any]:
     if not isinstance(payload, dict):
-        return _mock_prerelease_audit("", False)
+        return _empty_prerelease_audit()
 
     closure_summary = str(payload.get("closure_summary", ""))
 
@@ -440,6 +437,16 @@ def _parse_audit_payload(payload: Any) -> Dict[str, Any]:
         "reopened_risks": parsed_reopened,
         "resolved_risks": parsed_resolved,
         "audit_notes": parsed_notes,
+    }
+
+
+def _empty_prerelease_audit() -> Dict[str, Any]:
+    return {
+        "closure_summary": "",
+        "blocking_risks": [],
+        "reopened_risks": [],
+        "resolved_risks": [],
+        "audit_notes": [],
     }
 
 

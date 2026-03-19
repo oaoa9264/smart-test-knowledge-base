@@ -20,6 +20,9 @@ class TestPoint(BaseModel):
 class TestPlanResponse(BaseModel):
     markdown: str
     test_points: List[TestPoint]
+    llm_status: Optional[str] = None
+    llm_provider: Optional[str] = None
+    llm_message: Optional[str] = None
     session_id: Optional[int] = None
 
 
@@ -72,6 +75,9 @@ class GeneratedTestCase(BaseModel):
 
 class TestCaseGenResponse(BaseModel):
     test_cases: List[GeneratedTestCase]
+    llm_status: Optional[str] = None
+    llm_provider: Optional[str] = None
+    llm_message: Optional[str] = None
     session_id: Optional[int] = None
 
 

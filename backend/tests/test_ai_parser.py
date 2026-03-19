@@ -35,20 +35,22 @@ def test_parse_requirement_text_prefers_llm_output(monkeypatch):
 
     assert len(fake_client.calls) == 1
     assert result["analysis_mode"] == "llm"
+    assert result["llm_status"] == "success"
     assert result["nodes"][0]["content"] == "用户进入充值页"
     assert result["nodes"][1]["parent_id"] == "n1"
 
 
-def test_parse_requirement_text_fallbacks_to_rule_parse_when_llm_fails(monkeypatch):
+def test_parse_requirement_text_returns_empty_result_when_llm_fails(monkeypatch):
     module = _reload_ai_parser_module()
     monkeypatch.setenv("AI_PARSE_PROVIDER", "llm")
     monkeypatch.setattr(module, "LLMClient", lambda: _FakeLLMClient(should_raise=True))
 
     result = module.parse_requirement_text("如果用户未实名，则禁止充值")
 
-    assert result["analysis_mode"] == "mock_fallback"
-    assert len(result["nodes"]) >= 1
-    assert result["nodes"][0]["content"] == "如果用户未实名"
+    assert result["analysis_mode"] == "llm_failed"
+    assert result["llm_status"] == "failed"
+    assert result["nodes"] == []
+    assert result["risks"] == []
 
 
 def test_parse_requirement_text_accepts_decision_tree_payload_shape(monkeypatch):
@@ -69,6 +71,7 @@ def test_parse_requirement_text_accepts_decision_tree_payload_shape(monkeypatch)
     result = module.parse_requirement_text("充值流程需求")
 
     assert result["analysis_mode"] == "llm"
+    assert result["llm_status"] == "success"
     assert result["nodes"][0]["id"] == "root_1"
     assert result["nodes"][0]["type"] == "root"
     assert result["nodes"][1]["parent_id"] == "root_1"

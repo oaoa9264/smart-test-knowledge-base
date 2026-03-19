@@ -259,9 +259,8 @@ def test_ai_parse_returns_draft_nodes():
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["analysis_mode"] in ["llm", "mock", "mock_fallback"]
+    assert body["analysis_mode"] in ["llm", "mock", "llm_failed"]
     assert "nodes" in body
-    assert len(body["nodes"]) >= 1
 
 
 def test_deleted_node_is_hidden_from_rule_tree():

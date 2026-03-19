@@ -192,6 +192,8 @@ def import_analysis(
         raise HTTPException(status_code=400, detail="analysis result is empty")
 
     result = json.loads(analysis.analysis_result)
+    if result.get("llm_status") == "failed" or result.get("analysis_mode") == "llm_failed":
+        raise HTTPException(status_code=400, detail="cannot import failed architecture analysis")
 
     requirement = None
     if analysis.requirement_id:

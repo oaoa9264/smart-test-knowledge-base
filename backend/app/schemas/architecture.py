@@ -43,7 +43,9 @@ class ArchitectureAnalysisResult(BaseModel):
     risk_points: List[RiskPoint] = Field(default_factory=list)
     test_cases: List[GeneratedTestCase] = Field(default_factory=list)
     analysis_mode: Optional[str] = None
+    llm_status: Optional[str] = None
     llm_provider: Optional[str] = None
+    llm_message: Optional[str] = None
 
 
 class ArchitectureAnalysisRead(BaseModel):

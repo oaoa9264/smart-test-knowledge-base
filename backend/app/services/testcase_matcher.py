@@ -6,6 +6,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from app.models.entities import RuleNode
 from app.services.llm_client import LLMClient
+from app.services.llm_result_helpers import build_llm_failure_meta, build_llm_success_meta
 from app.services.prompts.testcase_match import MATCH_SYSTEM_PROMPT, MATCH_USER_TEMPLATE
 from app.services.testcase_importer import ParsedTestCase
 
@@ -34,6 +35,8 @@ class TestCaseMatcher:
     ):
         self._llm_client = llm_client
         self._llm_provider: Optional[str] = None
+        self._llm_status: Optional[str] = None
+        self._llm_message: Optional[str] = None
         self.top_k = top_k or int(os.getenv("TESTCASE_MATCH_TOP_K", "30"))
         self.batch_size = batch_size or int(os.getenv("TESTCASE_MATCH_BATCH_SIZE", "6"))
 
@@ -43,6 +46,8 @@ class TestCaseMatcher:
         rule_nodes: Sequence[RuleNode],
     ) -> Tuple[List[MatchResult], str]:
         self._llm_provider = None
+        self._llm_status = None
+        self._llm_message = None
         if not parsed_cases:
             return [], "mock_fallback"
 
@@ -54,13 +59,25 @@ class TestCaseMatcher:
 
         try:
             results = self._match_with_llm(parsed_cases=parsed_cases, rule_nodes=rule_nodes)
+            success_meta = build_llm_success_meta(self._llm_provider)
+            self._llm_status = success_meta["llm_status"]
+            self._llm_message = success_meta["llm_message"]
             return results, "llm"
         except Exception:
-            fallback_results = self._match_with_keyword_fallback(parsed_cases=parsed_cases, rule_nodes=rule_nodes)
-            return fallback_results, "mock_fallback"
+            failure_meta = build_llm_failure_meta()
+            self._llm_status = failure_meta["llm_status"]
+            self._llm_provider = failure_meta["llm_provider"]
+            self._llm_message = failure_meta["llm_message"]
+            return self._empty_results(parsed_cases=parsed_cases), "llm_failed"
 
     def get_llm_provider(self) -> Optional[str]:
         return self._llm_provider
+
+    def get_llm_status(self) -> Optional[str]:
+        return self._llm_status
+
+    def get_llm_message(self) -> Optional[str]:
+        return self._llm_message
 
     def _get_llm(self) -> LLMClient:
         if self._llm_client is None:
@@ -196,6 +213,18 @@ class TestCaseMatcher:
                 )
             )
         return results
+
+    @staticmethod
+    def _empty_results(parsed_cases: Sequence[ParsedTestCase]) -> List[MatchResult]:
+        return [
+            MatchResult(
+                case_index=index,
+                matched_node_ids=[],
+                confidence="none",
+                reason="所有模型调用失败，请手动绑定节点",
+            )
+            for index, _ in enumerate(parsed_cases)
+        ]
 
     def _select_candidates(
         self,

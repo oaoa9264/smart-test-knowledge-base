@@ -372,10 +372,10 @@ def _extract_evidence_from_chunk(
         return _parse_evidence_payload(payload, chunk_title)
     except Exception as exc:
         logger.warning(
-            "Evidence extraction LLM failed (%s: %s), using mock",
+            "Evidence extraction LLM failed (%s: %s), returning empty result",
             type(exc).__name__, exc,
         )
-        return _mock_evidence_extraction(chunk_title, chunk_content)
+        return []
 
 
 def _parse_evidence_payload(

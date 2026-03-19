@@ -81,10 +81,10 @@ def analyze_requirement_modules(
         return _parse_module_analysis(payload, chunks)
     except Exception as exc:
         logger.warning(
-            "Module analysis LLM failed (%s: %s), using mock",
+            "Module analysis LLM failed (%s: %s), returning empty result",
             type(exc).__name__, exc,
         )
-        return _mock_module_analysis(chunks, requirement.raw_text)
+        return ModuleAnalysisResult()
 
 
 def _parse_module_analysis(
