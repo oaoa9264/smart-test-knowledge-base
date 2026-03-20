@@ -434,6 +434,8 @@ export default function RuleTreePage() {
   const [lastImpact, setLastImpact] = useState<number[]>([]);
   const [riskItems, setRiskItems] = useState<RiskItem[]>([]);
   const [riskPanelVisible, setRiskPanelVisible] = useState(false);
+  const [riskPanelWidth, setRiskPanelWidth] = useState(520);
+  const riskDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
 
   const [testPlanDrawerOpen, setTestPlanDrawerOpen] = useState(false);
@@ -516,6 +518,28 @@ export default function RuleTreePage() {
     },
     [beginSuppressCanvasSync],
   );
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!riskDragRef.current) return;
+      e.preventDefault();
+      const delta = riskDragRef.current.startX - e.clientX;
+      const newWidth = Math.max(340, Math.min(window.innerWidth * 0.75, riskDragRef.current.startWidth + delta));
+      setRiskPanelWidth(newWidth);
+    };
+    const onMouseUp = () => {
+      if (!riskDragRef.current) return;
+      riskDragRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
 
   const reload = useCallback(async (targetRequirementId?: number | null) => {
     const requirementId = targetRequirementId ?? activeRequirementIdRef.current;
@@ -1969,27 +1993,68 @@ export default function RuleTreePage() {
           {riskPanelVisible && (
             <div
               style={{
-                width: 340,
-                minHeight: 0,
-                border: "1px solid #d7e2ee",
-                borderRadius: 10,
+                position: "fixed",
+                top: 0,
+                right: 0,
+                bottom: 0,
+                width: riskPanelWidth,
+                zIndex: 1000,
+                background: "#fff",
+                boxShadow: "-4px 0 16px rgba(0,0,0,0.12)",
                 display: "flex",
                 flexDirection: "column",
                 overflow: "hidden",
               }}
             >
-              <RiskPanel
-                requirementId={activeRequirementId}
-                onNodeLocate={(nodeId) => {
-                  setFocusedNodeId(nodeId);
-                  mindMapRef.current?.focusNode(nodeId);
-                  mindMapRef.current?.highlightNode(nodeId);
+              {/* drag handle */}
+              <div
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  bottom: 0,
+                  width: 6,
+                  cursor: "col-resize",
+                  zIndex: 10,
                 }}
-                onRiskConverted={() => {
-                  reload();
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  riskDragRef.current = { startX: e.clientX, startWidth: riskPanelWidth };
+                  document.body.style.cursor = "col-resize";
+                  document.body.style.userSelect = "none";
                 }}
-                onRisksChange={(risks) => setRiskItems(risks)}
-              />
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "50%",
+                    left: 1,
+                    transform: "translateY(-50%)",
+                    width: 4,
+                    height: 40,
+                    borderRadius: 2,
+                    background: "#d9d9d9",
+                  }}
+                />
+              </div>
+              <div style={{ padding: "12px 16px", borderBottom: "1px solid #f0f0f0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <Typography.Text strong style={{ fontSize: 15 }}>风险识别</Typography.Text>
+                <Button type="text" icon={<CloseOutlined />} onClick={() => setRiskPanelVisible(false)} size="small" />
+              </div>
+              <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                <RiskPanel
+                  requirementId={activeRequirementId}
+                  onNodeLocate={(nodeId) => {
+                    setFocusedNodeId(nodeId);
+                    mindMapRef.current?.focusNode(nodeId);
+                    mindMapRef.current?.highlightNode(nodeId);
+                  }}
+                  onRiskConverted={() => {
+                    reload();
+                  }}
+                  onRisksChange={(risks) => setRiskItems(risks)}
+                />
+              </div>
             </div>
           )}
         </div>

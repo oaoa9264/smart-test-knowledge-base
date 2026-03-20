@@ -826,8 +826,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       }}
     >
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #f0f0f0" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <Typography.Text strong>风险识别</Typography.Text>
+        <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginBottom: 8 }}>
           <Tooltip title={riskSummary.pending > 0 ? "请先处理所有待处理风险项" : undefined}>
             <span>
               <Button

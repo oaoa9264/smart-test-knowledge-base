@@ -32,3 +32,6 @@ dist/
 # Runtime artifacts
 backend/backend.log
 backend/uploads/
+
+# Local skill lockfile
+skills-lock.json
