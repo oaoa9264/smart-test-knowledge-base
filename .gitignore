@@ -38,6 +38,7 @@ backend/uploads/
 # Knowledge base (company-sensitive product docs)
 knowledge_base/
 docs/
+KNOWLEDGE_BASE.md
 
 # Local skill lockfile
 skills-lock.json
