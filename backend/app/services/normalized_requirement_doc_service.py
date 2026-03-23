@@ -9,6 +9,7 @@ from app.services.effective_requirement_service import (
     annotate_snapshot_freshness,
     compute_basis_hash,
     get_latest_snapshot,
+    list_visible_snapshot_fields,
     list_requirement_inputs,
 )
 from app.services.llm_client import LLMClient
@@ -89,7 +90,7 @@ def serialize_normalized_requirement_snapshot(
     snapshot: EffectiveRequirementSnapshot,
 ) -> Dict[str, Any]:
     fields = []
-    for field in sorted(snapshot.fields, key=lambda item: item.sort_order):
+    for field in list_visible_snapshot_fields(snapshot):
         derivation = field.derivation.value if hasattr(field.derivation, "value") and field.derivation else field.derivation
         fields.append(
             {

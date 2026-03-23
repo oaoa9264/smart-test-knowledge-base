@@ -1,3 +1,4 @@
+import json
 from fastapi.testclient import TestClient
 
 from typing import List, Optional, Tuple
@@ -6,12 +7,18 @@ from uuid import uuid4
 from app.core.database import SessionLocal
 from app.main import app
 from app.models.entities import (
+    AnalysisStage,
+    EffectiveRequirementField,
+    EffectiveRequirementSnapshot,
     InputType,
     NodeType,
+    ProductDoc,
+    ProductDocChunk,
     Project,
     Requirement,
     RequirementInput,
     RiskLevel,
+    SnapshotStatus,
     RuleNode,
     SourceType,
 )
@@ -38,6 +45,50 @@ def _create_requirement_with_inputs(
             title="有效需求测试",
             raw_text=raw_text,
             source_type=SourceType.prd,
+        )
+        db.add(requirement)
+        db.flush()
+
+        if extra_inputs:
+            for input_type, content, source_label in extra_inputs:
+                db.add(
+                    RequirementInput(
+                        requirement_id=requirement.id,
+                        input_type=InputType(input_type),
+                        content=content,
+                        source_label=source_label,
+                    )
+                )
+
+        db.commit()
+        return requirement.id
+    finally:
+        db.close()
+
+
+def _create_requirement_with_product_context(
+    *,
+    product_code: str,
+    raw_text: str = "用户提交表单，如果字段为空则给出提示。",
+    extra_inputs: Optional[List[Tuple[str, str, Optional[str]]]] = None,
+    matched_chains: Optional[List[str]] = None,
+) -> int:
+    db = SessionLocal()
+    try:
+        project = Project(
+            name="effective-pc-{0}".format(uuid4().hex[:8]),
+            description="effective requirement product context test",
+            product_code=product_code,
+        )
+        db.add(project)
+        db.flush()
+
+        requirement = Requirement(
+            project_id=project.id,
+            title="有效需求产品知识测试",
+            raw_text=raw_text,
+            source_type=SourceType.prd,
+            matched_chains=json.dumps(matched_chains, ensure_ascii=False) if matched_chains else None,
         )
         db.add(requirement)
         db.flush()
@@ -193,6 +244,206 @@ def test_generate_review_snapshot_persists_basis_hash():
         assert snapshot.basis_hash == expected_hash
     finally:
         db.close()
+
+
+def test_build_review_product_context_skips_module_analysis_when_matched_chains_exist(monkeypatch):
+    product_code = "review-chain-{0}".format(uuid4().hex[:8])
+
+    db = SessionLocal()
+    try:
+        doc = ProductDoc(product_code=product_code, name="Review Context Product", description="d")
+        db.add(doc)
+        db.flush()
+        db.add(
+            ProductDocChunk(
+                product_doc_id=doc.id,
+                stage_key="stage_0",
+                title="系统事实档案",
+                content="事实档案内容",
+                sort_order=0,
+                chain_key="overview",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    requirement_id = _create_requirement_with_product_context(
+        product_code=product_code,
+        matched_chains=["send-report"],
+        extra_inputs=[("pm_addendum", "补充：需要支持失败重试。", "pm")],
+    )
+
+    db = SessionLocal()
+    try:
+        requirement = db.query(Requirement).filter(Requirement.id == requirement_id).first()
+        inputs = effective_requirement_service.list_requirement_inputs(db, requirement_id)
+
+        captured = {}
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("module analysis should not run when matched_chains exist")
+
+        def _fake_chain_chunks(db, product_code, requirement_text, *, matched_chains, max_chunks, matched_modules, related_modules, use_evidence=True):
+            del db, product_code, max_chunks, use_evidence
+            captured["requirement_text"] = requirement_text
+            captured["matched_chains"] = matched_chains
+            captured["matched_modules"] = matched_modules
+            captured["related_modules"] = related_modules
+            return [type("Chunk", (), {"title": "系统事实档案", "content": "事实档案内容"})()]
+
+        monkeypatch.setattr(effective_requirement_service, "analyze_requirement_modules", _boom)
+        monkeypatch.setattr(effective_requirement_service, "get_chain_aware_chunks", _fake_chain_chunks)
+
+        context = effective_requirement_service._build_review_product_context(
+            db,
+            requirement,
+            inputs,
+        )
+
+        assert context == "### 系统事实档案\n事实档案内容"
+        assert captured["matched_chains"] == ["send-report"]
+        assert captured["matched_modules"] is None
+        assert captured["related_modules"] is None
+    finally:
+        db.close()
+
+
+def test_build_review_product_context_uses_formal_inputs_in_retrieval_query(monkeypatch):
+    product_code = "review-inputs-{0}".format(uuid4().hex[:8])
+
+    db = SessionLocal()
+    try:
+        doc = ProductDoc(product_code=product_code, name="Review Inputs Product", description="d")
+        db.add(doc)
+        db.flush()
+        db.add(
+            ProductDocChunk(
+                product_doc_id=doc.id,
+                stage_key="stage_0",
+                title="提现流程",
+                content="提现相关说明",
+                sort_order=0,
+                chain_key="overview",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    requirement_id = _create_requirement_with_product_context(
+        product_code=product_code,
+        raw_text="用户发起提现申请。",
+        extra_inputs=[
+            ("pm_addendum", "补充：提现失败后要展示失败原因。", "pm"),
+            ("review_note", "评审：单笔提现金额不能超过5万。", "review"),
+        ],
+    )
+
+    db = SessionLocal()
+    try:
+        requirement = db.query(Requirement).filter(Requirement.id == requirement_id).first()
+        inputs = effective_requirement_service.list_requirement_inputs(db, requirement_id)
+
+        captured = {}
+
+        def _fake_module_analysis(*args, **kwargs):
+            del args, kwargs
+            return type(
+                "ModuleResult",
+                (),
+                {"matched_modules": ["提现流程"], "related_modules": ["异常处理"]},
+            )()
+
+        def _fake_chain_chunks(db, product_code, requirement_text, *, matched_chains, max_chunks, matched_modules, related_modules, use_evidence=True):
+            del db, product_code, matched_chains, max_chunks, matched_modules, related_modules, use_evidence
+            captured["requirement_text"] = requirement_text
+            return [type("Chunk", (), {"title": "提现流程", "content": "提现相关说明"})()]
+
+        monkeypatch.setattr(effective_requirement_service, "analyze_requirement_modules", _fake_module_analysis)
+        monkeypatch.setattr(effective_requirement_service, "get_chain_aware_chunks", _fake_chain_chunks)
+
+        effective_requirement_service._build_review_product_context(
+            db,
+            requirement,
+            inputs,
+        )
+
+        assert "用户发起提现申请。" in captured["requirement_text"]
+        assert "补充：提现失败后要展示失败原因。" in captured["requirement_text"]
+        assert "评审：单笔提现金额不能超过5万。" in captured["requirement_text"]
+    finally:
+        db.close()
+
+
+def test_parse_review_payload_drops_rollout_strategy_field():
+    payload = {
+        "summary": "摘要",
+        "fields": [
+            {
+                "field_key": "goal",
+                "value": "保留的目标",
+                "derivation": "explicit",
+                "confidence": 0.95,
+                "source_refs": "原始需求",
+            },
+            {
+                "field_key": "rollout_strategy",
+                "value": "灰度上线后再全量",
+                "derivation": "explicit",
+                "confidence": 0.8,
+                "source_refs": "评审备注",
+            },
+        ],
+        "risks": [],
+    }
+
+    parsed = effective_requirement_service._parse_review_payload(payload)
+
+    assert [field["field_key"] for field in parsed["fields"]] == ["goal"]
+    assert all(field["value"] != "灰度上线后再全量" for field in parsed["fields"])
+
+
+def test_latest_snapshot_api_hides_rollout_strategy_fields():
+    requirement_id = _create_requirement_with_inputs()
+
+    db = SessionLocal()
+    try:
+        snapshot = EffectiveRequirementSnapshot(
+            requirement_id=requirement_id,
+            stage=AnalysisStage.review,
+            status=SnapshotStatus.draft,
+            summary="测试快照",
+        )
+        db.add(snapshot)
+        db.flush()
+
+        db.add(
+            EffectiveRequirementField(
+                snapshot_id=snapshot.id,
+                field_key="goal",
+                value="展示主目标",
+                sort_order=0,
+            )
+        )
+        db.add(
+            EffectiveRequirementField(
+                snapshot_id=snapshot.id,
+                field_key="rollout_strategy",
+                value="先灰度后全量",
+                sort_order=1,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.get("/api/requirements/{0}/snapshots/latest".format(requirement_id))
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert [field["field_key"] for field in payload["fields"]] == ["goal"]
+    assert all(field["value"] != "先灰度后全量" for field in payload["fields"])
 
 
 def test_get_latest_snapshot_marks_snapshot_stale_after_input_change():

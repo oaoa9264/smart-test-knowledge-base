@@ -18,7 +18,7 @@ from app.models.entities import (
     SnapshotStatus,
 )
 from app.services.llm_client import LLMClient
-from app.services.product_doc_service import get_relevant_chunks
+from app.services.product_doc_service import get_chain_aware_chunks, get_relevant_chunks, parse_matched_chains
 from app.services.prompts.effective_requirement import (
     REVIEW_ANALYSIS_SYSTEM_PROMPT,
     REVIEW_ANALYSIS_USER_TEMPLATE,
@@ -32,8 +32,9 @@ logger = logging.getLogger(__name__)
 _VALID_FIELD_KEYS = {
     "goal", "main_flow", "preconditions", "state_changes", "exceptions",
     "constraints", "performance", "compatibility", "integration",
-    "rollout_strategy", "other",
+    "other",
 }
+_BLOCKED_FIELD_KEYS = {"rollout_strategy"}
 _VALID_DERIVATIONS = {d.value for d in Derivation}
 
 
@@ -43,6 +44,36 @@ class NoSnapshotError(ValueError):
 
 class StaleSnapshotError(ValueError):
     pass
+
+
+def is_effective_field_blocked(field_key: Optional[str]) -> bool:
+    return str(field_key or "") in _BLOCKED_FIELD_KEYS
+
+
+def sanitize_effective_fields(fields: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    sanitized: List[Dict[str, Any]] = []
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+
+        field_key = str(field.get("field_key", "other"))
+        if is_effective_field_blocked(field_key):
+            continue
+        if field_key not in _VALID_FIELD_KEYS:
+            field_key = "other"
+
+        normalized = dict(field)
+        normalized["field_key"] = field_key
+        sanitized.append(normalized)
+    return sanitized
+
+
+def list_visible_snapshot_fields(snapshot: EffectiveRequirementSnapshot) -> List[EffectiveRequirementField]:
+    return [
+        field
+        for field in sorted(snapshot.fields, key=lambda item: item.sort_order)
+        if not is_effective_field_blocked(getattr(field, "field_key", None))
+    ]
 
 
 def compute_basis_hash(requirement: Requirement, inputs: List[RequirementInput]) -> str:
@@ -132,7 +163,7 @@ def generate_review_snapshot(
     inputs = list_requirement_inputs(db, requirement_id)
 
     formal_inputs_text = _format_inputs(inputs)
-    product_context = _build_review_product_context(db, requirement, llm_client)
+    product_context = _build_review_product_context(db, requirement, inputs, llm_client)
 
     llm_result = _call_llm_for_review(
         raw_text=requirement.raw_text,
@@ -165,7 +196,7 @@ def generate_review_snapshot(
     db.add(snapshot)
     db.flush()
 
-    fields_data = llm_result.get("fields", [])
+    fields_data = sanitize_effective_fields(llm_result.get("fields", []))
     for idx, fd in enumerate(fields_data):
         field_key = fd.get("field_key", "other")
         if field_key not in _VALID_FIELD_KEYS:
@@ -255,20 +286,28 @@ def _format_inputs(inputs: List[RequirementInput]) -> str:
 def _build_review_product_context(
     db: Session,
     requirement: Requirement,
+    inputs: List[RequirementInput],
     llm_client: Optional[Any] = None,
 ) -> Optional[str]:
     project = db.query(Project).filter(Project.id == requirement.project_id).first()
     if not project or not project.product_code:
         return None
 
-    module_result = analyze_requirement_modules(db, requirement, llm_client=llm_client)
-    matched = module_result.matched_modules if module_result else None
-    related = module_result.related_modules if module_result else None
+    matched_chains = parse_matched_chains(requirement)
+    matched = None
+    related = None
+    if not matched_chains:
+        module_result = analyze_requirement_modules(db, requirement, llm_client=llm_client)
+        matched = module_result.matched_modules if module_result else None
+        related = module_result.related_modules if module_result else None
 
-    chunks = get_relevant_chunks(
+    retrieval_text = _build_review_context_query_text(requirement, inputs)
+
+    chunks = get_chain_aware_chunks(
         db,
         project.product_code,
-        requirement.raw_text,
+        retrieval_text,
+        matched_chains=matched_chains,
         max_chunks=5,
         matched_modules=matched,
         related_modules=related,
@@ -280,6 +319,27 @@ def _build_review_product_context(
     for chunk in chunks:
         sections.append("### {title}\n{content}".format(title=chunk.title, content=chunk.content))
     return "\n\n".join(sections)
+
+
+def _build_review_context_query_text(
+    requirement: Requirement,
+    inputs: List[RequirementInput],
+) -> str:
+    parts = [requirement.raw_text or ""]
+    for item in inputs:
+        content = (item.content or "").strip()
+        if not content or content == (requirement.raw_text or "").strip():
+            continue
+        label = item.source_label or ""
+        input_type = item.input_type.value if hasattr(item.input_type, "value") else item.input_type
+        parts.append(
+            "[{type}]{label_part} {content}".format(
+                type=input_type,
+                label_part="（来源：{0}）".format(label) if label else "",
+                content=content,
+            )
+        )
+    return "\n".join(part for part in parts if part.strip())
 
 
 def _call_llm_for_review(
@@ -358,7 +418,11 @@ def _parse_review_payload(payload: Any) -> Dict[str, Any]:
             "risk_source": "product_knowledge" if r.get("category") == "product_knowledge" else "rule_tree",
         })
 
-    return {"summary": summary, "fields": parsed_fields, "risks": parsed_risks}
+    return {
+        "summary": summary,
+        "fields": sanitize_effective_fields(parsed_fields),
+        "risks": parsed_risks,
+    }
 
 
 def _empty_review_analysis() -> Dict[str, Any]:

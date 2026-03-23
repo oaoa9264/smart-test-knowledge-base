@@ -1,5 +1,7 @@
 from typing import List
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
@@ -87,6 +89,7 @@ def create_requirement(project_id: int, payload: RequirementCreate, db: Session 
         title=payload.title,
         raw_text=payload.raw_text,
         source_type=SourceType(payload.source_type),
+        matched_chains=json.dumps(payload.matched_chains, ensure_ascii=False) if payload.matched_chains else None,
     )
     db.add(requirement)
     db.flush()
@@ -147,6 +150,7 @@ def update_requirement(
     requirement.title = payload.title
     requirement.raw_text = payload.raw_text
     requirement.source_type = SourceType(payload.source_type)
+    requirement.matched_chains = json.dumps(payload.matched_chains, ensure_ascii=False) if payload.matched_chains else None
     raw_input = (
         db.query(RequirementInput)
         .filter(

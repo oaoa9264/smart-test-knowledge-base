@@ -73,6 +73,7 @@ from app.core.database import SessionLocal, engine
 from app.core.schema_migrations import (
     ensure_requirement_source_type_values,
     ensure_product_knowledge_columns,
+    ensure_hierarchical_knowledge_columns,
     ensure_risk_analysis_task_columns,
     ensure_requirements_versioning_columns,
     ensure_risk_convergence_columns,
@@ -96,6 +97,7 @@ ensure_rule_tree_session_async_columns(engine)
 ensure_risk_analysis_task_columns(engine)
 ensure_product_knowledge_columns(engine)
 ensure_risk_convergence_columns(engine)
+ensure_hierarchical_knowledge_columns(engine)
 
 app = FastAPI(title="Test Knowledge Base MVP", version="0.1.0")
 
@@ -196,6 +198,28 @@ def _recover_rule_tree_sessions_on_startup() -> None:
     recover_interrupted_rule_tree_sessions()
     recover_interrupted_risk_analysis_tasks()
     recover_interrupted_normalized_requirement_doc_tasks()
+
+
+@app.on_event("startup")
+def _sync_knowledge_base_on_startup() -> None:
+    """Auto-sync knowledge_base/products/ to ProductDoc tables on startup."""
+    from app.services.knowledge_base_importer import import_all_domains
+
+    kb_root = os.path.join(BACKEND_DIR, "..", "knowledge_base", "products")
+    if not os.path.isdir(kb_root):
+        return
+    db = SessionLocal()
+    try:
+        docs = import_all_domains(db, kb_root)
+        if docs:
+            import logging
+            logging.getLogger(__name__).info(
+                "Knowledge base synced: %d domains (%s)",
+                len(docs),
+                ", ".join(d.product_code for d in docs),
+            )
+    finally:
+        db.close()
 
 
 @app.get("/health")

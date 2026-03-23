@@ -25,6 +25,7 @@ from app.services.effective_requirement_service import (
     annotate_snapshot_freshness,
     generate_review_snapshot,
     get_latest_snapshot,
+    is_effective_field_blocked,
     list_snapshots,
 )
 from app.services.predev_analyzer import analyze_for_predev
@@ -56,7 +57,7 @@ def create_review_snapshot(
     risks = result["risks"]
     hints = result["clarification_hints"]
 
-    snapshot_read = EffectiveSnapshotRead.from_orm(snapshot)
+    snapshot_read = _build_snapshot_read(snapshot)
     risk_compacts = [RiskItemCompact.from_orm(r) for r in risks]
 
     return ReviewSnapshotResponse(
@@ -79,7 +80,7 @@ def list_requirement_snapshots(
         raise HTTPException(status_code=404, detail="requirement not found")
 
     snapshots = list_snapshots(db=db, requirement_id=requirement_id)
-    return [EffectiveSnapshotRead.from_orm(annotate_snapshot_freshness(db, s)) for s in snapshots]
+    return [_build_snapshot_read(annotate_snapshot_freshness(db, s)) for s in snapshots]
 
 
 @router.get(
@@ -105,7 +106,7 @@ def get_latest_requirement_snapshot(
     if not snapshot:
         return None
 
-    return EffectiveSnapshotRead.from_orm(annotate_snapshot_freshness(db, snapshot, requirement=requirement))
+    return _build_snapshot_read(annotate_snapshot_freshness(db, snapshot, requirement=requirement))
 
 
 @router.post(
@@ -146,7 +147,7 @@ def run_predev_analysis(
     conflicts_raw = result.get("conflicts", [])
     evidence_raw = result.get("matched_evidence", [])
 
-    snapshot_read = EffectiveSnapshotRead.from_orm(annotate_snapshot_freshness(db, snapshot, requirement=requirement))
+    snapshot_read = _build_snapshot_read(annotate_snapshot_freshness(db, snapshot, requirement=requirement))
     risk_compacts = [RiskItemCompact.from_orm(r) for r in risks]
     conflict_items = [ConflictItem(**c) for c in conflicts_raw]
     evidence_items = [MatchedEvidence(**e) for e in evidence_raw]
@@ -199,3 +200,13 @@ def run_prerelease_audit(
         resolved_risks=[ResolvedRisk(**r) for r in result.get("resolved_risks", [])],
         audit_notes=result.get("audit_notes", []),
     )
+
+
+def _build_snapshot_read(snapshot) -> EffectiveSnapshotRead:
+    snapshot_read = EffectiveSnapshotRead.from_orm(snapshot)
+    snapshot_read.fields = [
+        field
+        for field in snapshot_read.fields
+        if not is_effective_field_blocked(field.field_key)
+    ]
+    return snapshot_read

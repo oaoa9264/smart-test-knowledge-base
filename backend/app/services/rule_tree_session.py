@@ -11,6 +11,7 @@ from app.core.database import SessionLocal
 from app.models.entities import (
     NodeStatus,
     NodeType,
+    Project,
     Requirement,
     RiskItem,
     RiskLevel,
@@ -20,6 +21,11 @@ from app.models.entities import (
     RuleTreeSessionStatus,
 )
 from app.services.llm_client import LLMClient
+from app.services.product_doc_service import (
+    get_chain_aware_chunks,
+    get_relevant_chunks,
+    parse_matched_chains,
+)
 from app.services.prompts.architecture import (
     VISION_SYSTEM_PROMPT,
     VISION_USER_TEMPLATE,
@@ -27,6 +33,7 @@ from app.services.prompts.architecture import (
 from app.services.prompts.rule_tree_session import (
     GENERATE_SYSTEM_PROMPT,
     GENERATE_USER_TEMPLATE,
+    GENERATE_WITH_PRODUCT_USER_TEMPLATE,
     INCREMENTAL_UPDATE_USER_TEMPLATE,
     REVIEW_USER_PROMPT,
 )
@@ -319,6 +326,32 @@ def _import_tree_to_requirement(db: Session, requirement_id: int, tree_json: Dic
     return imported
 
 
+def _build_rule_tree_product_context(
+    db: Session,
+    requirement: Requirement,
+) -> Optional[str]:
+    """Build product context string for rule tree generation."""
+    project = db.query(Project).filter(Project.id == requirement.project_id).first()
+    if not project or not project.product_code:
+        return None
+
+    matched_chains = parse_matched_chains(requirement)
+    chunks = get_chain_aware_chunks(
+        db,
+        project.product_code,
+        requirement.raw_text,
+        matched_chains=matched_chains,
+        max_chunks=6,
+    )
+    if not chunks:
+        return None
+
+    sections = []
+    for chunk in chunks:
+        sections.append("### {title}\n{content}".format(title=chunk.title, content=chunk.content))
+    return "\n\n".join(sections)
+
+
 def _get_session_with_requirement(db: Session, session_id: int) -> Tuple[RuleTreeSession, Requirement]:
     session = db.query(RuleTreeSession).filter(RuleTreeSession.id == session_id).first()
     if not session:
@@ -429,7 +462,7 @@ def run_rule_tree_generation_task(
 ) -> None:
     db = db_session_factory()
     try:
-        session, _ = _get_session_with_requirement(db, session_id)
+        session, requirement = _get_session_with_requirement(db, session_id)
         if title:
             session.title = title.strip() or session.title
         _persist_progress(
@@ -447,7 +480,14 @@ def run_rule_tree_generation_task(
                 "{req}\n\n【流程图解析结果】\n{vision}".format(req=requirement_text, vision=vision_understanding)
             )
 
-        wrapped_requirement = GENERATE_USER_TEMPLATE.format(requirement_text=effective_text)
+        product_context = _build_rule_tree_product_context(db, requirement)
+        if product_context:
+            wrapped_requirement = GENERATE_WITH_PRODUCT_USER_TEMPLATE.format(
+                requirement_text=effective_text,
+                product_context=product_context,
+            )
+        else:
+            wrapped_requirement = GENERATE_USER_TEMPLATE.format(requirement_text=effective_text)
         base_messages = [
             {"role": "system", "content": GENERATE_SYSTEM_PROMPT},
             {"role": "user", "content": wrapped_requirement},
@@ -534,7 +574,7 @@ def generate_with_review(
     image_path: Optional[str] = None,
     llm_client: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    session, _ = _get_session_with_requirement(db, session_id)
+    session, requirement = _get_session_with_requirement(db, session_id)
     if title:
         session.title = title.strip() or session.title
 
@@ -548,7 +588,14 @@ def generate_with_review(
             .format(req=requirement_text, vision=vision_understanding)
         )
 
-    wrapped_requirement = GENERATE_USER_TEMPLATE.format(requirement_text=effective_text)
+    product_context = _build_rule_tree_product_context(db, requirement)
+    if product_context:
+        wrapped_requirement = GENERATE_WITH_PRODUCT_USER_TEMPLATE.format(
+            requirement_text=effective_text,
+            product_context=product_context,
+        )
+    else:
+        wrapped_requirement = GENERATE_USER_TEMPLATE.format(requirement_text=effective_text)
     base_messages = [
         {"role": "system", "content": GENERATE_SYSTEM_PROMPT},
         {"role": "user", "content": wrapped_requirement},

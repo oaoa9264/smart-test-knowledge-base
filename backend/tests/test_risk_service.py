@@ -934,6 +934,36 @@ def test_predev_analysis_uses_latest_effective_snapshot_as_base():
         db.close()
 
 
+def test_parse_predev_payload_drops_rollout_strategy_field():
+    payload = {
+        "summary": "开发前摘要",
+        "matched_evidence": [],
+        "conflicts": [],
+        "fields": [
+            {
+                "field_key": "main_flow",
+                "value": "保留主流程",
+                "derivation": "explicit",
+                "confidence": 0.9,
+                "source_refs": "review 快照",
+            },
+            {
+                "field_key": "rollout_strategy",
+                "value": "按城市分批放量",
+                "derivation": "inferred",
+                "confidence": 0.5,
+                "source_refs": "模型推断",
+            },
+        ],
+        "risks": [],
+    }
+
+    parsed = predev_analyzer._parse_predev_payload(payload)
+
+    assert [field["field_key"] for field in parsed["fields"]] == ["main_flow"]
+    assert all(field["value"] != "按城市分批放量" for field in parsed["fields"])
+
+
 def test_predev_analysis_requires_review_snapshot():
     """Pre-dev analysis should fail if no review snapshot exists."""
     requirement_id = _create_requirement_with_root()

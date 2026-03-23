@@ -48,7 +48,6 @@ field_key 只能从以下值中选取：
 - performance: 性能要求
 - compatibility: 兼容性要求
 - integration: 集成/联动要求
-- rollout_strategy: 上线策略
 - other: 其他
 
 每个字段必须包含以下属性：

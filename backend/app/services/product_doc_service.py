@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -336,6 +337,123 @@ def get_relevant_chunks(
     return result
 
 
+def parse_matched_chains(requirement) -> Optional[List[str]]:
+    """Parse the JSON matched_chains column from a Requirement."""
+    raw = getattr(requirement, "matched_chains", None)
+    if not raw:
+        return None
+    try:
+        chains = json.loads(raw)
+        return chains if isinstance(chains, list) and chains else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+_OVERVIEW_CHAIN_KEYS = frozenset({None, "overview"})
+_BASE_TITLE_KEYWORDS = frozenset(("术语", "口径", "总览", "概述", "简介", "背景"))
+
+
+def get_chain_aware_chunks(
+    db: Session,
+    product_code: str,
+    requirement_text: str,
+    matched_chains: Optional[List[str]] = None,
+    max_chunks: int = 8,
+    matched_modules: Optional[List[str]] = None,
+    related_modules: Optional[List[str]] = None,
+    use_evidence: bool = True,
+) -> List[ProductDocChunk]:
+    """Three-tier retrieval: overview + user-selected chains + keyword fallback.
+
+    Tier 1: Overview / fact-archive chunks (always included)
+    Tier 2: Chunks from user-selected chains + common-concepts
+    Tier 3: Keyword-based scoring on remaining chunks (fills remaining slots)
+
+    Falls back to ``get_relevant_chunks`` when *matched_chains* is empty.
+    """
+    if not matched_chains:
+        return get_relevant_chunks(
+            db,
+            product_code,
+            requirement_text,
+            max_chunks=max_chunks,
+            matched_modules=matched_modules,
+            related_modules=related_modules,
+            use_evidence=use_evidence,
+        )
+
+    doc = db.query(ProductDoc).filter(ProductDoc.product_code == product_code).first()
+    if not doc:
+        return []
+
+    all_chunks = (
+        db.query(ProductDocChunk)
+        .filter(ProductDocChunk.product_doc_id == doc.id)
+        .order_by(ProductDocChunk.sort_order)
+        .all()
+    )
+    if not all_chunks:
+        return []
+
+    chain_set = set(matched_chains)
+
+    tier1: List[ProductDocChunk] = []
+    tier2: List[ProductDocChunk] = []
+    tier3_candidates: List[ProductDocChunk] = []
+
+    for chunk in all_chunks:
+        ck = chunk.chain_key
+        title_lower = chunk.title.lower()
+
+        # Tier 1: overview / base knowledge
+        is_overview = ck in _OVERVIEW_CHAIN_KEYS
+        is_base = any(kw in title_lower for kw in _BASE_TITLE_KEYWORDS)
+        if is_overview or is_base:
+            tier1.append(chunk)
+            continue
+
+        # Tier 2: user-selected chains + common-concepts
+        if ck in chain_set or ck == "common-concepts":
+            tier2.append(chunk)
+            continue
+
+        # Tier 3 candidates: everything else
+        tier3_candidates.append(chunk)
+
+    # Combine tier 1 and tier 2
+    combined: List[ProductDocChunk] = []
+    seen_ids: Set[int] = set()
+
+    for chunk in tier1 + tier2:
+        if chunk.id not in seen_ids:
+            seen_ids.add(chunk.id)
+            combined.append(chunk)
+
+    remaining_slots = max(0, max_chunks - len(combined))
+
+    # Tier 3: keyword scoring on remaining candidates
+    if remaining_slots > 0 and tier3_candidates:
+        req_keywords = set(kw.lower() for kw in _extract_keywords_from_text(requirement_text))
+
+        scored: List[Tuple[float, ProductDocChunk]] = []
+        for chunk in tier3_candidates:
+            if chunk.id in seen_ids:
+                continue
+            chunk_kw_str = (chunk.keywords or "") + "," + chunk.title
+            chunk_keywords = set(kw.lower().strip() for kw in chunk_kw_str.split(",") if kw.strip())
+            title_words = set(re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z_]\w{2,}", chunk.title.lower()))
+            overlap = len(req_keywords & chunk_keywords) + len(req_keywords & title_words) * 2.0
+            if overlap > 0:
+                scored.append((overlap, chunk))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for _, chunk in scored[:remaining_slots]:
+            if chunk.id not in seen_ids:
+                seen_ids.add(chunk.id)
+                combined.append(chunk)
+
+    return combined[:max_chunks]
+
 def _sync_product_doc_chunks(
     db: Session,
     product_doc_id: int,
@@ -386,6 +504,8 @@ def _sync_product_doc_chunks(
         chunk.keywords = chunk_data["keywords"]
         chunk.parent_title = chunk_data.get("parent_title")
         chunk.heading_level = chunk_data.get("heading_level")
+        chunk.chain_key = chunk_data.get("chain_key")
+        chunk.source_file = chunk_data.get("source_file")
 
     stale_chunk_ids = list(remaining_by_id.keys())
     if stale_chunk_ids:

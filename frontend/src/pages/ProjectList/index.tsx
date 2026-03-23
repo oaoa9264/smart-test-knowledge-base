@@ -33,9 +33,10 @@ import {
   fetchLatestNormalizedRequirementDocTask,
   startNormalizedRequirementDocTask,
 } from "../../api/normalizedRequirementDocTasks";
-import { fetchProductDocs } from "../../api/productDocs";
+import { fetchChains, fetchProductDocs } from "../../api/productDocs";
 import { useAppStore } from "../../stores/appStore";
 import type {
+  ChainInfo,
   NormalizedRequirementDocPreview,
   NormalizedRequirementDocTask,
   ProductDoc,
@@ -44,6 +45,7 @@ import type {
 } from "../../types";
 import { getSourceTypeLabel } from "../../utils/enumLabels";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 function buildPreviewFromTask(
   requirement: Requirement,
@@ -91,6 +93,7 @@ export default function ProjectListPage() {
   const [requirementForm] = Form.useForm();
   const [editProjectForm] = Form.useForm();
   const [editRequirementForm] = Form.useForm();
+  const [availableChains, setAvailableChains] = useState<ChainInfo[]>([]);
 
   useEffect(() => {
     reloadProjects();
@@ -103,6 +106,20 @@ export default function ProjectListPage() {
       setProductDocs(docs);
     } catch {
       // ignore
+    }
+  };
+
+  const loadChainsForProject = async (projectId: number) => {
+    const project = projects.find((p) => p.id === projectId);
+    if (!project?.product_code) {
+      setAvailableChains([]);
+      return;
+    }
+    try {
+      const chains = await fetchChains(project.product_code);
+      setAvailableChains(chains);
+    } catch {
+      setAvailableChains([]);
     }
   };
 
@@ -163,7 +180,8 @@ export default function ProjectListPage() {
       return;
     }
     const values = await requirementForm.validateFields();
-    const req = await createRequirement(selectedProjectId, { ...values, source_type: "prd" });
+    const matched_chains = values.matched_chains?.length ? values.matched_chains : undefined;
+    const req = await createRequirement(selectedProjectId, { ...values, source_type: "prd", matched_chains });
     setRequirementModalOpen(false);
     requirementForm.resetFields();
     message.success("需求已创建");
@@ -206,13 +224,16 @@ export default function ProjectListPage() {
       title: requirement.title,
       raw_text: requirement.raw_text,
       source_type: requirement.source_type,
+      matched_chains: requirement.matched_chains || [],
     });
+    if (selectedProjectId) loadChainsForProject(selectedProjectId);
   };
 
   const handleUpdateRequirement = async () => {
     if (!selectedProjectId || !editingRequirement) return;
     const values = await editRequirementForm.validateFields();
-    await updateRequirement(selectedProjectId, editingRequirement.id, values);
+    const matched_chains = values.matched_chains?.length ? values.matched_chains : undefined;
+    await updateRequirement(selectedProjectId, editingRequirement.id, { ...values, matched_chains });
     message.success("需求已更新");
     setEditingRequirement(null);
     editRequirementForm.resetFields();
@@ -456,7 +477,10 @@ export default function ProjectListPage() {
           extra={
             <Space>
               <Typography.Text type="secondary">当前项目: {selectedProjectId ?? "未选择"}</Typography.Text>
-              <Button type="primary" onClick={() => setRequirementModalOpen(true)}>
+              <Button type="primary" onClick={() => {
+                if (selectedProjectId) loadChainsForProject(selectedProjectId);
+                setRequirementModalOpen(true);
+              }}>
                 新建需求
               </Button>
             </Space>
@@ -483,11 +507,11 @@ export default function ProjectListPage() {
           <Form.Item label="项目描述" name="description">
             <Input.TextArea rows={3} />
           </Form.Item>
-          <Form.Item label="所属产品" name="product_code">
+          <Form.Item label="所属产品域" name="product_code">
             <Select
               allowClear
-              placeholder="选择关联的产品文档"
-              options={productDocs.map((d) => ({ label: `${d.name} (${d.product_code})`, value: d.product_code }))}
+              placeholder="选择产品域（来自知识库）"
+              options={productDocs.map((d) => ({ label: d.name, value: d.product_code }))}
             />
           </Form.Item>
         </Form>
@@ -506,6 +530,18 @@ export default function ProjectListPage() {
           <Form.Item label="需求原文" name="raw_text" rules={[{ required: true, message: "请输入需求文本" }]}>
             <Input.TextArea rows={6} />
           </Form.Item>
+          {availableChains.filter((c) => c.chain_type === "chain").length > 0 && (
+            <Form.Item label="关联业务链路" name="matched_chains" tooltip="选择需求涉及的业务链路，用于精准匹配产品知识（可选）">
+              <Select
+                mode="multiple"
+                allowClear
+                placeholder="选择需求涉及的业务链路"
+                options={availableChains
+                  .filter((c) => c.chain_type === "chain")
+                  .map((c) => ({ label: `${c.display_name} (${c.chunk_count}段)`, value: c.chain_key }))}
+              />
+            </Form.Item>
+          )}
         </Form>
       </Modal>
 
@@ -520,7 +556,7 @@ export default function ProjectListPage() {
           <Descriptions.Item label="ID">{viewProject?.id}</Descriptions.Item>
           <Descriptions.Item label="项目名称">{viewProject?.name}</Descriptions.Item>
           <Descriptions.Item label="项目描述">{viewProject?.description || "-"}</Descriptions.Item>
-          <Descriptions.Item label="所属产品">{viewProject?.product_code || "-"}</Descriptions.Item>
+          <Descriptions.Item label="所属产品域">{viewProject?.product_code || "-"}</Descriptions.Item>
         </Descriptions>
       </Modal>
 
@@ -540,11 +576,11 @@ export default function ProjectListPage() {
           <Form.Item label="项目描述" name="description">
             <Input.TextArea rows={3} />
           </Form.Item>
-          <Form.Item label="所属产品" name="product_code">
+          <Form.Item label="所属产品域" name="product_code">
             <Select
               allowClear
-              placeholder="选择关联的产品文档"
-              options={productDocs.map((d) => ({ label: `${d.name} (${d.product_code})`, value: d.product_code }))}
+              placeholder="选择产品域（来自知识库）"
+              options={productDocs.map((d) => ({ label: d.name, value: d.product_code }))}
             />
           </Form.Item>
         </Form>
@@ -643,7 +679,7 @@ export default function ProjectListPage() {
                 background: "#fafafa",
               }}
             >
-              <ReactMarkdown>{normalizedDocPreview.markdown}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{normalizedDocPreview.markdown}</ReactMarkdown>
             </div>
           </div>
         ) : null}
@@ -674,6 +710,18 @@ export default function ProjectListPage() {
           <Form.Item label="需求原文" name="raw_text" rules={[{ required: true, message: "请输入需求文本" }]}>
             <Input.TextArea rows={6} />
           </Form.Item>
+          {availableChains.filter((c) => c.chain_type === "chain").length > 0 && (
+            <Form.Item label="关联业务链路" name="matched_chains" tooltip="选择需求涉及的业务链路，用于精准匹配产品知识（可选）">
+              <Select
+                mode="multiple"
+                allowClear
+                placeholder="选择需求涉及的业务链路"
+                options={availableChains
+                  .filter((c) => c.chain_type === "chain")
+                  .map((c) => ({ label: `${c.display_name} (${c.chunk_count}段)`, value: c.chain_key }))}
+              />
+            </Form.Item>
+          )}
         </Form>
       </Modal>
     </Row>

@@ -24,6 +24,7 @@ from app.services.effective_requirement_service import (
     NoSnapshotError,
     StaleSnapshotError,
     is_snapshot_stale,
+    list_visible_snapshot_fields,
     list_requirement_inputs,
 )
 from app.services.evidence_service import get_relevant_evidence
@@ -172,7 +173,7 @@ def _format_rule_tree(nodes: List[RuleNode]) -> str:
 
 def _format_snapshot(snapshot: EffectiveRequirementSnapshot) -> tuple:
     summary = snapshot.summary or "(no summary)"
-    fields = sorted(snapshot.fields, key=lambda f: f.sort_order)
+    fields = list_visible_snapshot_fields(snapshot)
     field_lines = []
     for f in fields:
         derivation = f.derivation.value if hasattr(f.derivation, "value") and f.derivation else "unknown"

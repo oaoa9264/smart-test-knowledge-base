@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -150,3 +151,33 @@ def reject_update(update_id: int, db: Session = Depends(get_db)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return update
+
+
+@router.post("/import-knowledge-base", status_code=status.HTTP_200_OK)
+def import_knowledge_base(db: Session = Depends(get_db)):
+    """Batch import all domains from knowledge_base/products/ directory."""
+    from app.services.knowledge_base_importer import import_all_domains
+
+    current_dir = os.path.dirname(__file__)
+    kb_root = os.path.abspath(
+        os.path.join(current_dir, "..", "..", "..", "knowledge_base", "products")
+    )
+    if not os.path.isdir(kb_root):
+        raise HTTPException(
+            status_code=404,
+            detail="knowledge_base/products directory not found at {0}".format(kb_root),
+        )
+    docs = import_all_domains(db, kb_root)
+    return {
+        "imported_domains": len(docs),
+        "product_codes": [d.product_code for d in docs],
+    }
+
+
+@router.get("/{product_code}/chains")
+def list_chains(product_code: str, db: Session = Depends(get_db)):
+    """List available chains for a product, for the frontend chain selector."""
+    from app.services.knowledge_base_importer import list_chains_for_product
+
+    chains = list_chains_for_product(db, product_code)
+    return chains

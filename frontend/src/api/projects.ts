@@ -27,7 +27,7 @@ export async function fetchRequirements(projectId: number): Promise<Requirement[
 
 export async function createRequirement(
   projectId: number,
-  payload: { title: string; raw_text: string; source_type: "prd" | "flowchart" | "api_doc" },
+  payload: { title: string; raw_text: string; source_type: "prd" | "flowchart" | "api_doc"; matched_chains?: string[] },
 ): Promise<Requirement> {
   const { data } = await http.post<Requirement>(`/api/projects/${projectId}/requirements`, payload);
   return data;
@@ -36,7 +36,7 @@ export async function createRequirement(
 export async function updateRequirement(
   projectId: number,
   requirementId: number,
-  payload: { title: string; raw_text: string; source_type: "prd" | "flowchart" | "api_doc" },
+  payload: { title: string; raw_text: string; source_type: "prd" | "flowchart" | "api_doc"; matched_chains?: string[] },
 ): Promise<Requirement> {
   const { data } = await http.put<Requirement>(`/api/projects/${projectId}/requirements/${requirementId}`, payload);
   return data;

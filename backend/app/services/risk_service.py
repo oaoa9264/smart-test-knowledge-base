@@ -28,7 +28,7 @@ from app.models.entities import (
     RuleNode,
 )
 from app.services.llm_client import LLMClient
-from app.services.product_doc_service import get_relevant_chunks
+from app.services.product_doc_service import get_chain_aware_chunks, get_relevant_chunks, parse_matched_chains
 from app.services.prompts.risk_analysis import (
     RISK_ANALYSIS_SYSTEM_PROMPT,
     RISK_ANALYSIS_USER_TEMPLATE,
@@ -141,11 +141,13 @@ def _build_product_context(
 
     matched = module_result.matched_modules if module_result else None
     related = module_result.related_modules if module_result else None
+    matched_chains = parse_matched_chains(requirement)
 
-    chunks = get_relevant_chunks(
+    chunks = get_chain_aware_chunks(
         db,
         project.product_code,
         requirement.raw_text,
+        matched_chains=matched_chains,
         max_chunks=5,
         matched_modules=matched,
         related_modules=related,

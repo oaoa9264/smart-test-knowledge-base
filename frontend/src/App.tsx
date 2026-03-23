@@ -26,7 +26,7 @@ const menuItems = [
   { key: "/test-cases", label: <Link to="/test-cases">用例管理</Link>, icon: <AppstoreOutlined /> },
   { key: "/coverage", label: <Link to="/coverage">覆盖矩阵</Link>, icon: <TableOutlined /> },
   { key: "/recommendation", label: <Link to="/recommendation">回归推荐</Link>, icon: <FireOutlined /> },
-  { key: "/product-docs", label: <Link to="/product-docs">产品文档</Link>, icon: <FileTextOutlined /> },
+  { key: "/product-docs", label: <Link to="/product-docs">产品知识库</Link>, icon: <FileTextOutlined /> },
 ];
 
 function AppShell() {

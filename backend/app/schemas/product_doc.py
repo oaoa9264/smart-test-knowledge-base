@@ -12,6 +12,8 @@ class ProductDocChunkRead(BaseModel):
     content: str
     sort_order: int
     keywords: Optional[str] = None
+    chain_key: Optional[str] = None
+    source_file: Optional[str] = None
 
     class Config:
         orm_mode = True

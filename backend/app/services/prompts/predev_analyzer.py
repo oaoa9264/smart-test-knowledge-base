@@ -99,7 +99,7 @@ JSON 顶层结构必须为：
 
 field_key 只能从以下值中选取：
 goal / main_flow / preconditions / state_changes / exceptions /
-constraints / performance / compatibility / integration / rollout_strategy / other
+constraints / performance / compatibility / integration / other
 
 derivation 取值：explicit / inferred / missing / contradicted
 

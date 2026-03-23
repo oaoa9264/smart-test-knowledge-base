@@ -171,3 +171,28 @@ def ensure_product_knowledge_columns(engine: Engine) -> None:
             "heading_level": "heading_level INTEGER",
         },
     )
+
+
+def ensure_hierarchical_knowledge_columns(engine: Engine) -> None:
+    _ensure_additive_columns(
+        engine,
+        "product_doc_chunks",
+        {
+            "chain_key": "chain_key VARCHAR(128)",
+            "source_file": "source_file VARCHAR(512)",
+        },
+    )
+    _ensure_additive_columns(
+        engine,
+        "requirements",
+        {
+            "matched_chains": "matched_chains TEXT",
+        },
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_product_doc_chunks_chain_key "
+                "ON product_doc_chunks (chain_key)"
+            )
+        )

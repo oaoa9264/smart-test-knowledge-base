@@ -133,7 +133,6 @@ const snapshotFieldLabels: Record<string, string> = {
   performance: "性能要求",
   compatibility: "兼容性要求",
   integration: "集成/联动要求",
-  rollout_strategy: "上线策略",
   other: "其他",
 };
 
@@ -780,7 +779,9 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
 
   const ruleTreeItems = buildCollapseItems("rule_tree");
   const productItems = buildCollapseItems("product_knowledge");
-  const latestSnapshotFields = latestSnapshot?.fields || [];
+  const latestSnapshotFields = (latestSnapshot?.fields || []).filter(
+    (field) => field.field_key !== "rollout_strategy",
+  );
   const stageNotice = reviewResult?.clarification_hints?.length
     ? "评审分析已生成澄清提示"
     : predevResult?.conflicts?.length

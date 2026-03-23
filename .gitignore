@@ -6,6 +6,8 @@ __pycache__/
 .pytest_cache/
 .venv/
 .venv38/
+backend/.venv.broken-*/
+backend/.venv.py312-broken-*/
 
 # Node
 node_modules/
@@ -32,6 +34,10 @@ dist/
 # Runtime artifacts
 backend/backend.log
 backend/uploads/
+
+# Knowledge base (company-sensitive product docs)
+knowledge_base/
+docs/
 
 # Local skill lockfile
 skills-lock.json

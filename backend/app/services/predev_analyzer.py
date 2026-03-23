@@ -26,10 +26,12 @@ from app.services.effective_requirement_service import (
     compute_basis_hash,
     is_snapshot_stale,
     list_requirement_inputs,
+    list_visible_snapshot_fields,
+    sanitize_effective_fields,
 )
 from app.services.evidence_service import get_relevant_evidence
 from app.services.llm_client import LLMClient
-from app.services.product_doc_service import get_relevant_chunks
+from app.services.product_doc_service import get_chain_aware_chunks, get_relevant_chunks, parse_matched_chains
 from app.services.prompts.predev_analyzer import (
     PREDEV_ANALYSIS_SYSTEM_PROMPT,
     PREDEV_ANALYSIS_USER_TEMPLATE,
@@ -43,7 +45,7 @@ logger = logging.getLogger(__name__)
 _VALID_FIELD_KEYS = {
     "goal", "main_flow", "preconditions", "state_changes", "exceptions",
     "constraints", "performance", "compatibility", "integration",
-    "rollout_strategy", "other",
+    "other",
 }
 _VALID_DERIVATIONS = {d.value for d in Derivation}
 
@@ -113,7 +115,7 @@ def analyze_for_predev(
     db.add(new_snapshot)
     db.flush()
 
-    fields_data = llm_result.get("fields", [])
+    fields_data = sanitize_effective_fields(llm_result.get("fields", []))
     if not fields_data:
         fields_data = _copy_review_fields(base_snapshot)
 
@@ -209,7 +211,7 @@ def _get_latest_base_snapshot(
 def _format_snapshot(snapshot: EffectiveRequirementSnapshot) -> tuple:
     summary = snapshot.summary or "(no summary)"
 
-    fields = sorted(snapshot.fields, key=lambda f: f.sort_order)
+    fields = list_visible_snapshot_fields(snapshot)
     field_lines = []
     for f in fields:
         derivation = f.derivation.value if hasattr(f.derivation, "value") and f.derivation else "unknown"
@@ -232,7 +234,7 @@ def _format_snapshot(snapshot: EffectiveRequirementSnapshot) -> tuple:
 def _copy_review_fields(snapshot: EffectiveRequirementSnapshot) -> List[Dict[str, Any]]:
     """Copy fields from review snapshot as fallback when LLM returns none."""
     result = []
-    for f in sorted(snapshot.fields, key=lambda x: x.sort_order):
+    for f in list_visible_snapshot_fields(snapshot):
         derivation = f.derivation.value if hasattr(f.derivation, "value") and f.derivation else None
         result.append({
             "field_key": f.field_key,
@@ -257,6 +259,7 @@ def _build_predev_product_context(
     module_result = analyze_requirement_modules(db, requirement, llm_client=llm_client)
     matched = module_result.matched_modules if module_result else None
     related = module_result.related_modules if module_result else None
+    matched_chains = parse_matched_chains(requirement)
 
     sections: List[str] = []
 
@@ -280,10 +283,11 @@ def _build_predev_product_context(
             ))
         sections.append("【结构化产品证据】\n" + "\n".join(ev_lines))
 
-    chunks = get_relevant_chunks(
+    chunks = get_chain_aware_chunks(
         db,
         project.product_code,
         requirement.raw_text,
+        matched_chains=matched_chains,
         max_chunks=4,
         matched_modules=matched,
         related_modules=related,
@@ -466,7 +470,7 @@ def _parse_predev_payload(payload: Any) -> Dict[str, Any]:
         "summary": summary,
         "matched_evidence": parsed_evidence,
         "conflicts": parsed_conflicts,
-        "fields": parsed_fields,
+        "fields": sanitize_effective_fields(parsed_fields),
         "risks": parsed_risks,
     }
 

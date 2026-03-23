@@ -25,6 +25,7 @@ export interface Requirement {
   source_type: "prd" | "flowchart" | "api_doc";
   version: number;
   requirement_group_id: number | null;
+  matched_chains?: string[] | null;
 }
 
 export interface RequirementVersion extends Requirement {
@@ -573,6 +574,15 @@ export interface ProductDocChunk {
   content: string;
   sort_order: number;
   keywords?: string | null;
+  chain_key?: string | null;
+  source_file?: string | null;
+}
+
+export interface ChainInfo {
+  chain_key: string;
+  display_name: string;
+  chain_type: "overview" | "chain" | "common-concepts";
+  chunk_count: number;
 }
 
 export interface ProductDocDetail extends ProductDoc {

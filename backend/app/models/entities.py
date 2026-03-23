@@ -215,6 +215,7 @@ class Requirement(Base):
     source_type = Column(Enum(SourceType), default=SourceType.prd, nullable=False)
     version = Column(Integer, default=1, nullable=False)
     requirement_group_id = Column(Integer, nullable=True, index=True)
+    matched_chains = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     project = relationship("Project", back_populates="requirements")
@@ -593,6 +594,9 @@ class ProductDocChunk(Base):
     keywords = Column(Text, nullable=True)
     parent_title = Column(String(255), nullable=True)
     heading_level = Column(Integer, nullable=True)
+
+    chain_key = Column(String(128), nullable=True, index=True)
+    source_file = Column(String(512), nullable=True)
 
     product_doc = relationship("ProductDoc", back_populates="chunks")
 

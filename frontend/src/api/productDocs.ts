@@ -1,5 +1,5 @@
 import { http } from "./client";
-import type { ProductDoc, ProductDocChunk, ProductDocDetail, ProductDocUpdate } from "../types";
+import type { ChainInfo, ProductDoc, ProductDocChunk, ProductDocDetail, ProductDocUpdate } from "../types";
 
 export async function importProductDoc(payload: {
   product_code: string;
@@ -60,5 +60,17 @@ export async function applyDocUpdate(updateId: number): Promise<ProductDocUpdate
 
 export async function rejectDocUpdate(updateId: number): Promise<ProductDocUpdate> {
   const { data } = await http.put<ProductDocUpdate>(`/api/product-docs/updates/${updateId}/reject`);
+  return data;
+}
+
+export async function fetchChains(productCode: string): Promise<ChainInfo[]> {
+  const { data } = await http.get<ChainInfo[]>(`/api/product-docs/${productCode}/chains`);
+  return data;
+}
+
+export async function importKnowledgeBase(): Promise<{ imported_domains: number; product_codes: string[] }> {
+  const { data } = await http.post<{ imported_domains: number; product_codes: string[] }>(
+    "/api/product-docs/import-knowledge-base",
+  );
   return data;
 }
