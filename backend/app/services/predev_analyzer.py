@@ -14,6 +14,7 @@ from app.models.entities import (
     NodeStatus,
     Project,
     Requirement,
+    RequirementInput,
     RiskItem,
     RiskValidity,
     RuleNode,
@@ -23,6 +24,7 @@ from app.services.effective_requirement_service import get_latest_snapshot
 from app.services.effective_requirement_service import (
     NoSnapshotError,
     StaleSnapshotError,
+    build_product_context_query_text,
     compute_basis_hash,
     is_snapshot_stale,
     list_requirement_inputs,
@@ -89,7 +91,7 @@ def analyze_for_predev(
 
     rule_tree_text = _format_rule_tree(nodes)
     snapshot_summary, snapshot_fields_text = _format_snapshot(base_snapshot)
-    product_context = _build_predev_product_context(db, requirement, llm_client)
+    product_context = _build_predev_product_context(db, requirement, inputs, llm_client)
 
     llm_result = _call_llm_for_predev(
         snapshot_summary=snapshot_summary,
@@ -250,24 +252,31 @@ def _copy_review_fields(snapshot: EffectiveRequirementSnapshot) -> List[Dict[str
 def _build_predev_product_context(
     db: Session,
     requirement: Requirement,
+    inputs: List[RequirementInput],
     llm_client: Optional[Any] = None,
 ) -> Optional[str]:
     project = db.query(Project).filter(Project.id == requirement.project_id).first()
     if not project or not project.product_code:
         return None
 
-    module_result = analyze_requirement_modules(db, requirement, llm_client=llm_client)
-    matched = module_result.matched_modules if module_result else None
-    related = module_result.related_modules if module_result else None
     matched_chains = parse_matched_chains(requirement)
+    matched = None
+    related = None
+    if not matched_chains:
+        module_result = analyze_requirement_modules(db, requirement, llm_client=llm_client)
+        matched = module_result.matched_modules if module_result else None
+        related = module_result.related_modules if module_result else None
+
+    retrieval_text = build_product_context_query_text(requirement, inputs)
 
     sections: List[str] = []
 
     evidence_blocks = get_relevant_evidence(
         db,
         project.product_code,
-        requirement.raw_text,
+        retrieval_text,
         module_names=matched,
+        matched_chains=matched_chains,
         max_items=8,
     )
     if evidence_blocks:
@@ -286,7 +295,7 @@ def _build_predev_product_context(
     chunks = get_chain_aware_chunks(
         db,
         project.product_code,
-        requirement.raw_text,
+        retrieval_text,
         matched_chains=matched_chains,
         max_chunks=4,
         matched_modules=matched,

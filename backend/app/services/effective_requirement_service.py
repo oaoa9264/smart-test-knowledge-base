@@ -301,7 +301,7 @@ def _build_review_product_context(
         matched = module_result.matched_modules if module_result else None
         related = module_result.related_modules if module_result else None
 
-    retrieval_text = _build_review_context_query_text(requirement, inputs)
+    retrieval_text = build_product_context_query_text(requirement, inputs)
 
     chunks = get_chain_aware_chunks(
         db,
@@ -321,7 +321,7 @@ def _build_review_product_context(
     return "\n\n".join(sections)
 
 
-def _build_review_context_query_text(
+def build_product_context_query_text(
     requirement: Requirement,
     inputs: List[RequirementInput],
 ) -> str:

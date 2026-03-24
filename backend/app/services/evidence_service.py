@@ -181,6 +181,7 @@ def get_relevant_evidence(
     product_code: str,
     requirement_text: str,
     module_names: Optional[List[str]] = None,
+    matched_chains: Optional[List[str]] = None,
     evidence_types: Optional[List[str]] = None,
     max_items: int = 10,
 ) -> List[EvidenceBlock]:
@@ -214,6 +215,20 @@ def get_relevant_evidence(
     if not blocks:
         return []
 
+    allowed_chunk_ids = None
+    if matched_chains:
+        chain_set = set(matched_chains)
+        allowed_chunk_ids = {
+            row[0]
+            for row in db.query(ProductDocChunk.id)
+            .filter(ProductDocChunk.product_doc_id == doc.id)
+            .filter(
+                ProductDocChunk.chain_key.in_(chain_set | {"overview", "common-concepts"})
+                | ProductDocChunk.chain_key.is_(None)
+            )
+            .all()
+        }
+
     from app.services.product_doc_service import _extract_keywords_from_text
 
     req_keywords = set(kw.lower() for kw in _extract_keywords_from_text(requirement_text))
@@ -221,6 +236,9 @@ def get_relevant_evidence(
 
     scored: List[tuple] = []
     for block in blocks:
+        if allowed_chunk_ids is not None and block.chunk_id is not None and block.chunk_id not in allowed_chunk_ids:
+            continue
+
         score = 0.0
 
         status_bonus = 10.0 if block.status == EvidenceStatus.verified else 0.0
@@ -244,7 +262,11 @@ def get_relevant_evidence(
         return [b for _, b in scored[:max_items]]
 
     fallback = sorted(
-        blocks,
+        [
+            block
+            for block in blocks
+            if allowed_chunk_ids is None or block.chunk_id is None or block.chunk_id in allowed_chunk_ids
+        ],
         key=lambda block: (
             1 if block.status == EvidenceStatus.verified else 0,
             block.created_at or datetime.min,

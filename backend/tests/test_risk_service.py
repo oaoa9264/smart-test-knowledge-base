@@ -1,3 +1,4 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 from uuid import uuid4
@@ -54,6 +55,49 @@ def _create_requirement_with_root() -> int:
                 risk_level=RiskLevel.medium,
             )
         )
+        db.commit()
+        return requirement.id
+    finally:
+        db.close()
+
+
+def _create_requirement_with_product_context(
+    *,
+    raw_text: str = "用户提交表单，如果字段为空则给出提示。",
+    extra_inputs=None,
+    matched_chains=None,
+) -> int:
+    db = SessionLocal()
+    try:
+        project = Project(
+            name="risk-pc-{0}".format(uuid4().hex[:8]),
+            description="risk product context test",
+            product_code="pc-{0}".format(uuid4().hex[:8]),
+        )
+        db.add(project)
+        db.flush()
+
+        requirement = Requirement(
+            project_id=project.id,
+            title="风险产品知识需求",
+            raw_text=raw_text,
+            source_type=SourceType.prd,
+            matched_chains=json.dumps(matched_chains, ensure_ascii=False) if matched_chains else None,
+        )
+        db.add(requirement)
+        db.flush()
+
+        if extra_inputs:
+            for input_type, content, source_label in extra_inputs:
+                db.add(
+                    RequirementInput(
+                        requirement_id=requirement.id,
+                        input_type=InputType(input_type),
+                        content=content,
+                        source_label=source_label,
+                    )
+                )
+
         db.commit()
         return requirement.id
     finally:
@@ -934,6 +978,66 @@ def test_predev_analysis_uses_latest_effective_snapshot_as_base():
         db.close()
 
 
+def test_build_predev_product_context_skips_module_analysis_and_uses_inputs(monkeypatch):
+    requirement_id = _create_requirement_with_product_context(
+        raw_text="用户发起提现申请。",
+        extra_inputs=[
+            ("pm_addendum", "补充：提现失败后展示失败原因。", "pm"),
+            ("review_note", "评审：单笔提现金额不能超过5万。", "review"),
+        ],
+        matched_chains=["withdraw-flow"],
+    )
+
+    db = SessionLocal()
+    try:
+        requirement = db.query(Requirement).filter(Requirement.id == requirement_id).first()
+        inputs = effective_requirement_service.list_requirement_inputs(db, requirement_id)
+        captured = {}
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("module analysis should not run when matched_chains exist")
+
+        def _fake_evidence(db, product_code, requirement_text, module_names=None, matched_chains=None, evidence_types=None, max_items=10):
+            del db, product_code, evidence_types, max_items
+            captured["evidence_text"] = requirement_text
+            captured["evidence_modules"] = module_names
+            captured["evidence_chains"] = matched_chains
+            return [
+                type(
+                    "Evidence",
+                    (),
+                    {"evidence_type": "state_rule", "status": "verified", "module_name": "提现流程", "statement": "提现失败后展示失败原因"},
+                )()
+            ]
+
+        def _fake_chunks(db, product_code, requirement_text, *, matched_chains, max_chunks, matched_modules, related_modules, use_evidence=True):
+            del db, product_code, max_chunks, use_evidence
+            captured["chunk_text"] = requirement_text
+            captured["chunk_chains"] = matched_chains
+            captured["chunk_matched_modules"] = matched_modules
+            captured["chunk_related_modules"] = related_modules
+            return [type("Chunk", (), {"title": "提现流程", "content": "提现链路说明"})()]
+
+        monkeypatch.setattr(predev_analyzer, "analyze_requirement_modules", _boom)
+        monkeypatch.setattr(predev_analyzer, "get_relevant_evidence", _fake_evidence)
+        monkeypatch.setattr(predev_analyzer, "get_chain_aware_chunks", _fake_chunks)
+
+        context = predev_analyzer._build_predev_product_context(db, requirement, inputs)
+
+        assert "【结构化产品证据】" in context
+        assert "### 提现流程" in context
+        assert captured["evidence_modules"] is None
+        assert captured["evidence_chains"] == ["withdraw-flow"]
+        assert captured["chunk_chains"] == ["withdraw-flow"]
+        assert captured["chunk_matched_modules"] is None
+        assert captured["chunk_related_modules"] is None
+        assert "用户发起提现申请。" in captured["evidence_text"]
+        assert "补充：提现失败后展示失败原因。" in captured["evidence_text"]
+        assert "评审：单笔提现金额不能超过5万。" in captured["chunk_text"]
+    finally:
+        db.close()
+
+
 def test_parse_predev_payload_drops_rollout_strategy_field():
     payload = {
         "summary": "开发前摘要",
@@ -998,6 +1102,66 @@ def test_predev_analysis_requires_rule_tree():
             assert False, "should have raised ValueError"
         except ValueError as exc:
             assert "rule tree" in str(exc).lower() or "rule_tree" in str(exc).lower()
+    finally:
+        db.close()
+
+
+def test_build_audit_product_context_skips_module_analysis_and_uses_chain_aware_inputs(monkeypatch):
+    requirement_id = _create_requirement_with_product_context(
+        raw_text="用户提交发票申请。",
+        extra_inputs=[
+            ("pm_addendum", "补充：开票失败时要给出失败原因。", "pm"),
+            ("test_clarification", "测试确认：仅企业用户可申请专票。", "qa"),
+        ],
+        matched_chains=["invoice-flow"],
+    )
+
+    db = SessionLocal()
+    try:
+        requirement = db.query(Requirement).filter(Requirement.id == requirement_id).first()
+        inputs = effective_requirement_service.list_requirement_inputs(db, requirement_id)
+        captured = {}
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("module analysis should not run when matched_chains exist")
+
+        def _fake_evidence(db, product_code, requirement_text, module_names=None, matched_chains=None, evidence_types=None, max_items=10):
+            del db, product_code, evidence_types, max_items
+            captured["evidence_text"] = requirement_text
+            captured["evidence_modules"] = module_names
+            captured["evidence_chains"] = matched_chains
+            return [
+                type(
+                    "Evidence",
+                    (),
+                    {"evidence_type": "field_rule", "status": "draft", "module_name": "发票申请", "statement": "仅企业用户可申请专票"},
+                )()
+            ]
+
+        def _fake_chunks(db, product_code, requirement_text, *, matched_chains, max_chunks, matched_modules, related_modules, use_evidence=True):
+            del db, product_code, max_chunks, use_evidence
+            captured["chunk_text"] = requirement_text
+            captured["chunk_chains"] = matched_chains
+            captured["chunk_matched_modules"] = matched_modules
+            captured["chunk_related_modules"] = related_modules
+            return [type("Chunk", (), {"title": "发票申请", "content": "发票链路说明"})()]
+
+        monkeypatch.setattr(prerelease_auditor, "analyze_requirement_modules", _boom)
+        monkeypatch.setattr(prerelease_auditor, "get_relevant_evidence", _fake_evidence)
+        monkeypatch.setattr(prerelease_auditor, "get_chain_aware_chunks", _fake_chunks)
+
+        context = prerelease_auditor._build_audit_product_context(db, requirement, inputs)
+
+        assert "【结构化产品证据】" in context
+        assert "### 发票申请" in context
+        assert captured["evidence_modules"] is None
+        assert captured["evidence_chains"] == ["invoice-flow"]
+        assert captured["chunk_chains"] == ["invoice-flow"]
+        assert captured["chunk_matched_modules"] is None
+        assert captured["chunk_related_modules"] is None
+        assert "用户提交发票申请。" in captured["evidence_text"]
+        assert "补充：开票失败时要给出失败原因。" in captured["chunk_text"]
+        assert "测试确认：仅企业用户可申请专票。" in captured["chunk_text"]
     finally:
         db.close()
 
