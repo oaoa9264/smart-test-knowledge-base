@@ -18,6 +18,7 @@ from app.models.entities import (
     SnapshotStatus,
 )
 from app.services.llm_client import LLMClient
+from app.services.evidence_service import get_relevant_evidence
 from app.services.product_doc_service import get_chain_aware_chunks, get_relevant_chunks, parse_matched_chains
 from app.services.prompts.effective_requirement import (
     REVIEW_ANALYSIS_SYSTEM_PROMPT,
@@ -110,16 +111,9 @@ def is_snapshot_stale(
     return compute_basis_hash(requirement, inputs) != snapshot.basis_hash
 
 
-def list_requirement_inputs(
-    db: Session,
-    requirement_id: int,
-) -> List[RequirementInput]:
-    return (
-        db.query(RequirementInput)
-        .filter(RequirementInput.requirement_id == requirement_id)
-        .order_by(RequirementInput.created_at.asc(), RequirementInput.id.asc())
-        .all()
-    )
+# Re-exported from shared module for backward compatibility.
+from app.services.requirement_context_helpers import list_requirement_inputs  # noqa: F811,E402
+list_requirement_inputs = list_requirement_inputs  # re-export
 
 
 def annotate_snapshot_freshness(
@@ -303,43 +297,50 @@ def _build_review_product_context(
 
     retrieval_text = build_product_context_query_text(requirement, inputs)
 
+    sections: List[str] = []
+
+    evidence_blocks = get_relevant_evidence(
+        db,
+        project.product_code,
+        retrieval_text,
+        module_names=matched,
+        matched_chains=matched_chains,
+        max_items=8,
+    )
+    if evidence_blocks:
+        ev_lines = []
+        for eb in evidence_blocks:
+            etype = eb.evidence_type.value if hasattr(eb.evidence_type, "value") else eb.evidence_type
+            status = eb.status.value if hasattr(eb.status, "value") else eb.status
+            ev_lines.append("- [{type}][{status}] ({module}) {stmt}".format(
+                type=etype,
+                status=status,
+                module=eb.module_name or "unknown",
+                stmt=eb.statement,
+            ))
+        sections.append("【结构化产品证据】\n" + "\n".join(ev_lines))
+
     chunks = get_chain_aware_chunks(
         db,
         project.product_code,
         retrieval_text,
         matched_chains=matched_chains,
-        max_chunks=5,
+        max_chunks=6,
         matched_modules=matched,
         related_modules=related,
     )
-    if not chunks:
-        return None
+    if chunks:
+        for chunk in chunks:
+            sections.append("### {title}\n{content}".format(title=chunk.title, content=chunk.content))
 
-    sections = []
-    for chunk in chunks:
-        sections.append("### {title}\n{content}".format(title=chunk.title, content=chunk.content))
+    if not sections:
+        return None
     return "\n\n".join(sections)
 
 
-def build_product_context_query_text(
-    requirement: Requirement,
-    inputs: List[RequirementInput],
-) -> str:
-    parts = [requirement.raw_text or ""]
-    for item in inputs:
-        content = (item.content or "").strip()
-        if not content or content == (requirement.raw_text or "").strip():
-            continue
-        label = item.source_label or ""
-        input_type = item.input_type.value if hasattr(item.input_type, "value") else item.input_type
-        parts.append(
-            "[{type}]{label_part} {content}".format(
-                type=input_type,
-                label_part="（来源：{0}）".format(label) if label else "",
-                content=content,
-            )
-        )
-    return "\n".join(part for part in parts if part.strip())
+# Re-exported from shared module for backward compatibility.
+from app.services.requirement_context_helpers import build_product_context_query_text  # noqa: F811,E402
+build_product_context_query_text = build_product_context_query_text  # re-export
 
 
 def _call_llm_for_review(

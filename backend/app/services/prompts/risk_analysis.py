@@ -83,6 +83,12 @@ RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT = """
 5. security: 安全风险（权限绕过、越权操作）
 6. product_knowledge: 产品知识风险（需求与现有产品流程矛盾、遗漏了现有产品已有的校验或约束、未考虑现有产品的状态机或数据流向）
 
+**产品知识核对要求**：请逐条检查产品背景知识和结构化产品证据中的以下类别条目，确认需求是否已覆盖。对于与当前需求涉及的对象、字段、保存链路或返回反馈直接相关且未被覆盖的条目，必须输出对应的 product_knowledge 类型风险：
+- 每个流程、规则和约束
+- 已知历史包袱、待确认问题、跨系统交互点中的条目
+- 同一对象被多个入口或系统修改时的一致性风险
+- 保存触发的副作用、反向约束、附带写入、异步后置动作
+
 请严格输出 JSON 对象，不要输出任何额外文本。
 禁止输出 markdown 代码块、解释性文字或前后缀说明。
 
@@ -116,6 +122,7 @@ JSON 顶层结构必须为：
 
 RISK_ANALYSIS_USER_TEMPLATE = """
 请分析以下规则树和需求文本，识别未覆盖的异常场景风险。
+{supplemental_inputs}
 
 【原始需求】
 {raw_text}
@@ -133,6 +140,7 @@ RISK_ANALYSIS_WITH_PRODUCT_USER_TEMPLATE = """
 以下是该需求所属产品的相关流程说明，请结合这些已有的产品流程来分析需求是否存在遗漏或冲突：
 
 {product_context}
+{supplemental_inputs}
 
 【原始需求】
 {raw_text}

@@ -28,7 +28,12 @@ from app.models.entities import (
     RuleNode,
 )
 from app.services.llm_client import LLMClient
+from app.services.evidence_service import get_relevant_evidence
 from app.services.product_doc_service import get_chain_aware_chunks, get_relevant_chunks, parse_matched_chains
+from app.services.requirement_context_helpers import (
+    build_product_context_query_text,
+    list_requirement_inputs,
+)
 from app.services.prompts.risk_analysis import (
     RISK_ANALYSIS_SYSTEM_PROMPT,
     RISK_ANALYSIS_USER_TEMPLATE,
@@ -108,8 +113,16 @@ def _analyze_risks_once(
         for n in nodes
     )
 
-    module_result = analyze_requirement_modules(db, requirement, llm_client=llm_client)
-    product_context = _build_product_context(db, requirement, module_result=module_result)
+    matched_chains = parse_matched_chains(requirement)
+    module_result = None
+    if not matched_chains:
+        module_result = analyze_requirement_modules(db, requirement, llm_client=llm_client)
+    product_context = _build_product_context(
+        db, requirement, module_result=module_result, matched_chains=matched_chains,
+    )
+
+    inputs = list_requirement_inputs(db, requirement_id)
+    supplemental_text = _format_supplemental_inputs(requirement, inputs)
 
     raw_risks = _call_llm_for_risks(
         raw_text=requirement.raw_text,
@@ -117,6 +130,7 @@ def _analyze_risks_once(
         llm_client=llm_client,
         product_context=product_context,
         module_result=module_result,
+        supplemental_inputs_text=supplemental_text,
     )
 
     node_id_set = {n.id for n in nodes}
@@ -133,6 +147,7 @@ def _build_product_context(
     db: Session,
     requirement: Requirement,
     module_result: Optional[ModuleAnalysisResult] = None,
+    matched_chains: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Build product context string using hybrid retrieval."""
     project = db.query(Project).filter(Project.id == requirement.project_id).first()
@@ -141,23 +156,48 @@ def _build_product_context(
 
     matched = module_result.matched_modules if module_result else None
     related = module_result.related_modules if module_result else None
-    matched_chains = parse_matched_chains(requirement)
+
+    inputs = list_requirement_inputs(db, requirement.id)
+    retrieval_text = build_product_context_query_text(requirement, inputs)
+
+    sections: List[str] = []
+
+    evidence_blocks = get_relevant_evidence(
+        db,
+        project.product_code,
+        retrieval_text,
+        module_names=matched,
+        matched_chains=matched_chains,
+        max_items=8,
+    )
+    if evidence_blocks:
+        ev_lines = []
+        for eb in evidence_blocks:
+            etype = eb.evidence_type.value if hasattr(eb.evidence_type, "value") else eb.evidence_type
+            status = eb.status.value if hasattr(eb.status, "value") else eb.status
+            ev_lines.append("- [{type}][{status}] ({module}) {stmt}".format(
+                type=etype,
+                status=status,
+                module=eb.module_name or "unknown",
+                stmt=eb.statement,
+            ))
+        sections.append("【结构化产品证据】\n" + "\n".join(ev_lines))
 
     chunks = get_chain_aware_chunks(
         db,
         project.product_code,
-        requirement.raw_text,
+        retrieval_text,
         matched_chains=matched_chains,
-        max_chunks=5,
+        max_chunks=6,
         matched_modules=matched,
         related_modules=related,
     )
-    if not chunks:
-        return None
+    if chunks:
+        for chunk in chunks:
+            sections.append("### {title}\n{content}".format(title=chunk.title, content=chunk.content))
 
-    sections = []
-    for chunk in chunks:
-        sections.append("### {title}\n{content}".format(title=chunk.title, content=chunk.content))
+    if not sections:
+        return None
     return "\n\n".join(sections)
 
 
@@ -364,12 +404,34 @@ def get_risks_for_requirement(db: Session, requirement_id: int) -> List[RiskItem
     )
 
 
+def _format_supplemental_inputs(
+    requirement: Requirement,
+    inputs: List[RequirementInput],
+) -> Optional[str]:
+    """Format supplemental inputs for prompt display (deduplicated, lightweight)."""
+    lines = []
+    raw_text_stripped = (requirement.raw_text or "").strip()
+    for item in inputs:
+        content = (item.content or "").strip()
+        if not content or content == raw_text_stripped:
+            continue
+        label = item.source_label or ""
+        input_type = item.input_type.value if hasattr(item.input_type, "value") else item.input_type
+        lines.append("[{type}]{label_part} {content}".format(
+            type=input_type,
+            label_part="（来源：{0}）".format(label) if label else "",
+            content=content,
+        ))
+    return "\n".join(lines) if lines else None
+
+
 def _call_llm_for_risks(
     raw_text: str,
     tree_nodes_text: str,
     llm_client: Optional[Any] = None,
     product_context: Optional[str] = None,
     module_result: Optional[ModuleAnalysisResult] = None,
+    supplemental_inputs_text: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     provider = os.getenv("ANALYZER_PROVIDER", "mock").lower()
     if provider != "llm":
@@ -393,17 +455,36 @@ def _call_llm_for_risks(
                     analysis=module_result.module_analysis or "无",
                 )
 
+            supplemental_section = ""
+            if supplemental_inputs_text:
+                supplemental_section = (
+                    "\n\n【正式补充输入】\n"
+                    "以下是需求的补充说明材料，请一并纳入分析范围：\n\n"
+                    "{inputs}"
+                ).format(inputs=supplemental_inputs_text)
+
             user_prompt = RISK_ANALYSIS_WITH_PRODUCT_USER_TEMPLATE.format(
                 product_context=product_context,
                 raw_text=raw_text,
                 tree_nodes=tree_nodes_text,
                 module_context=module_section,
+                supplemental_inputs=supplemental_section,
             )
         else:
             system_prompt = RISK_ANALYSIS_SYSTEM_PROMPT
+
+            supplemental_section = ""
+            if supplemental_inputs_text:
+                supplemental_section = (
+                    "\n\n【正式补充输入】\n"
+                    "以下是需求的补充说明材料，请一并纳入分析范围：\n\n"
+                    "{inputs}"
+                ).format(inputs=supplemental_inputs_text)
+
             user_prompt = RISK_ANALYSIS_USER_TEMPLATE.format(
                 raw_text=raw_text,
                 tree_nodes=tree_nodes_text,
+                supplemental_inputs=supplemental_section,
             )
         payload = llm.chat_with_json(
             system_prompt=system_prompt,

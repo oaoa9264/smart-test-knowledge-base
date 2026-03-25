@@ -24,12 +24,14 @@ from app.services.effective_requirement_service import get_latest_snapshot
 from app.services.effective_requirement_service import (
     NoSnapshotError,
     StaleSnapshotError,
-    build_product_context_query_text,
     compute_basis_hash,
     is_snapshot_stale,
-    list_requirement_inputs,
     list_visible_snapshot_fields,
     sanitize_effective_fields,
+)
+from app.services.requirement_context_helpers import (
+    build_product_context_query_text,
+    list_requirement_inputs,
 )
 from app.services.evidence_service import get_relevant_evidence
 from app.services.llm_client import LLMClient
@@ -297,7 +299,7 @@ def _build_predev_product_context(
         project.product_code,
         retrieval_text,
         matched_chains=matched_chains,
-        max_chunks=4,
+        max_chunks=6,
         matched_modules=matched,
         related_modules=related,
     )

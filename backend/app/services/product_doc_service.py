@@ -20,6 +20,21 @@ from app.services.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
+def _calc_kw_score(title: str, keywords: str, req_keywords: Set[str]) -> float:
+    """Calculate keyword overlap score between a chunk and requirement keywords.
+
+    Pure function — does not depend on ORM objects.
+    """
+    if not req_keywords:
+        return 0.0
+    chunk_kw_str = (keywords or "") + "," + title
+    chunk_keywords = set(kw.lower().strip() for kw in chunk_kw_str.split(",") if kw.strip())
+    overlap = len(req_keywords & chunk_keywords)
+    title_words = set(re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z_]\w{2,}", title.lower()))
+    title_overlap = len(req_keywords & title_words)
+    return overlap + title_overlap * 2.0
+
+
 _STOP_WORDS = frozenset(
     "的 了 在 是 我 有 和 就 不 人 都 一 一个 上 也 很 到 说 要 去 你 会 着 没有 看 好 自己 这"
     " 他 她 它 们 那 被 从 把 让 用 可以 什么 没 与 及 等 但 又 或 为 对 以 通过 进行 使用 如果"
@@ -302,14 +317,7 @@ def get_relevant_chunks(
         elif effective_title in related_set or parent_lower in related_set:
             module_score = 50.0
 
-        kw_score = 0.0
-        if req_keywords:
-            chunk_kw_str = (chunk.keywords or "") + "," + chunk.title
-            chunk_keywords = set(kw.lower().strip() for kw in chunk_kw_str.split(",") if kw.strip())
-            overlap = len(req_keywords & chunk_keywords)
-            title_words = set(re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z_]\w{2,}", title_lower))
-            title_overlap = len(req_keywords & title_words)
-            kw_score = overlap + title_overlap * 2.0
+        kw_score = _calc_kw_score(chunk.title, chunk.keywords or "", req_keywords)
 
         total_score = evidence_score + module_score + kw_score
         if total_score > 0:
@@ -317,7 +325,71 @@ def get_relevant_chunks(
 
     scored_chunks.sort(key=lambda x: x[0], reverse=True)
 
-    top_chunks = [c for _, c in scored_chunks[:max_chunks]]
+    # --- Phase 1: generic-title diversity cap ---
+    _GENERIC_TITLES = frozenset(("主要流程", "入口清单", "依赖表"))
+    _MAX_GENERIC_PER_TITLE = 2
+
+    generic_counts: Dict[str, int] = {}
+    diversity_filtered: List[Tuple[float, ProductDocChunk]] = []
+    overflow: List[Tuple[float, ProductDocChunk]] = []
+
+    for score, chunk in scored_chunks:
+        title_lower = chunk.title.lower()
+        if title_lower in _GENERIC_TITLES:
+            count = generic_counts.get(title_lower, 0)
+            if count >= _MAX_GENERIC_PER_TITLE:
+                overflow.append((score, chunk))
+                continue
+            generic_counts[title_lower] = count + 1
+        diversity_filtered.append((score, chunk))
+
+    top_chunks = [c for _, c in diversity_filtered[:max_chunks]]
+
+    # --- Phase 2: related_modules hard guarantee ---
+    related_in_top = any(
+        (c.title.lower() in related_set or (c.parent_title or "").lower() in related_set)
+        for c in top_chunks
+    ) if related_set else True
+
+    if not related_in_top and related_set:
+        # Find best qualifying related chunk (must have kw_score > 0 or evidence_score > 0)
+        best_related: Optional[ProductDocChunk] = None
+        best_related_score = -1.0
+        for score, chunk in diversity_filtered[max_chunks:] + overflow:
+            title_lower = chunk.title.lower()
+            parent_lower = (chunk.parent_title or "").lower()
+            if title_lower not in related_set and parent_lower not in related_set:
+                continue
+            ev = evidence_chunk_ids.get(chunk.id, 0.0)
+            kw = _calc_kw_score(chunk.title, chunk.keywords or "", req_keywords)
+            if ev > 0 or kw > 0:
+                if score > best_related_score:
+                    best_related = chunk
+                    best_related_score = score
+
+        if best_related is not None:
+            # Swap out the weakest generic-title item; if none, skip replacement
+            swap_idx = None
+            for i in range(len(top_chunks) - 1, -1, -1):
+                if top_chunks[i].title.lower() in _GENERIC_TITLES:
+                    swap_idx = i
+                    break
+            if swap_idx is not None:
+                top_chunks[swap_idx] = best_related
+            else:
+                logger.info(
+                    "related_modules fallback skipped: no generic-title item to swap out | "
+                    "product_code=%s max_chunks=%d related_modules=%s "
+                    "best_related_title=%s best_related_score=%.2f "
+                    "top_chunk_titles=%s",
+                    product_code,
+                    max_chunks,
+                    list(related_set),
+                    best_related.title,
+                    best_related_score,
+                    [c.title for c in top_chunks],
+                )
+
     remaining_slots = max(0, max_chunks - len(top_chunks))
 
     seen_ids = set()
@@ -439,10 +511,7 @@ def get_chain_aware_chunks(
         for chunk in tier3_candidates:
             if chunk.id in seen_ids:
                 continue
-            chunk_kw_str = (chunk.keywords or "") + "," + chunk.title
-            chunk_keywords = set(kw.lower().strip() for kw in chunk_kw_str.split(",") if kw.strip())
-            title_words = set(re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z_]\w{2,}", chunk.title.lower()))
-            overlap = len(req_keywords & chunk_keywords) + len(req_keywords & title_words) * 2.0
+            overlap = _calc_kw_score(chunk.title, chunk.keywords or "", req_keywords)
             if overlap > 0:
                 scored.append((overlap, chunk))
 

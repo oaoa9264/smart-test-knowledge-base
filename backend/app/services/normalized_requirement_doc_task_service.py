@@ -15,8 +15,8 @@ from app.services.effective_requirement_service import (
     annotate_snapshot_freshness,
     compute_basis_hash,
     get_latest_snapshot,
-    list_requirement_inputs,
 )
+from app.services.requirement_context_helpers import list_requirement_inputs
 from app.services.normalized_requirement_doc_service import (
     build_normalized_requirement_doc_source_payload,
     generate_normalized_requirement_doc_from_task_payloads,

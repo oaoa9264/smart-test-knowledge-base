@@ -10,8 +10,8 @@ from app.services.effective_requirement_service import (
     compute_basis_hash,
     get_latest_snapshot,
     list_visible_snapshot_fields,
-    list_requirement_inputs,
 )
+from app.services.requirement_context_helpers import list_requirement_inputs
 from app.services.llm_client import LLMClient
 from app.services.llm_result_helpers import build_llm_success_meta
 from app.services.prompts.normalized_requirement_doc import (

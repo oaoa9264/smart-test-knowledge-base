@@ -726,3 +726,201 @@ def test_delete_product_doc_cascades_evidence_blocks():
         assert evidence_count == 0
     finally:
         db.close()
+
+
+def _create_doc_with_generic_and_related_chunks():
+    """Create a product doc with multiple generic-title chunks and one related chunk."""
+    db = SessionLocal()
+    try:
+        product_code = "test-div-{0}".format(uuid4().hex[:8])
+        doc = ProductDoc(
+            product_code=product_code,
+            name="Diversity Test",
+            description="For diversity and related guarantee tests",
+        )
+        db.add(doc)
+        db.flush()
+
+        from app.services.product_doc_service import _extract_keywords_from_text
+
+        chunks_data = [
+            # 3 "主要流程" from different chains — should be capped at 2
+            ("主要流程", "chain-a", "配置保存后写入数据库和Redis"),
+            ("主要流程", "chain-b", "导入数据后落库并同步Redis"),
+            ("主要流程", "chain-c", "统计任务汇总后写入日表"),
+            # 1 related chunk with keyword overlap
+            ("已知历史包袱", "chain-a", "配置保存 副作用 多个入口修改同一对象 Redis"),
+            # 1 matched chunk
+            ("多机房Redis", "common", "配置保存后同步多套Redis"),
+        ]
+        for idx, (title, chain, content) in enumerate(chunks_data):
+            kw_list = _extract_keywords_from_text(title + " " + content)
+            db.add(ProductDocChunk(
+                product_doc_id=doc.id,
+                stage_key="stage_{0}".format(idx),
+                chain_key=chain,
+                title=title,
+                content=content,
+                sort_order=idx,
+                keywords=",".join(kw_list),
+            ))
+
+        db.commit()
+        return product_code
+    finally:
+        db.close()
+
+
+def test_get_relevant_chunks_related_modules_guarantee():
+    """When a qualifying related_modules chunk exists, it must appear in results."""
+    product_code = _create_doc_with_generic_and_related_chunks()
+
+    db = SessionLocal()
+    try:
+        chunks = product_doc_service.get_relevant_chunks(
+            db=db,
+            product_code=product_code,
+            requirement_text="配置保存 Redis 同步",
+            max_chunks=3,
+            matched_modules=["多机房Redis", "主要流程"],
+            related_modules=["已知历史包袱"],
+        )
+        titles = [c.title for c in chunks]
+        assert "已知历史包袱" in titles, (
+            "related_modules chunk with keyword overlap must be guaranteed a slot; got: {0}".format(titles)
+        )
+    finally:
+        db.close()
+
+
+def test_get_relevant_chunks_generic_title_diversity():
+    """Multiple chunks with the same generic title should not fill all slots."""
+    product_code = _create_doc_with_generic_and_related_chunks()
+
+    db = SessionLocal()
+    try:
+        chunks = product_doc_service.get_relevant_chunks(
+            db=db,
+            product_code=product_code,
+            requirement_text="配置保存 Redis 同步",
+            max_chunks=4,
+            matched_modules=["多机房Redis", "主要流程"],
+            related_modules=[],
+        )
+        main_flow_count = sum(1 for c in chunks if c.title == "主要流程")
+        assert main_flow_count <= 2, (
+            "Generic title '主要流程' should be capped at 2 slots; got {0}".format(main_flow_count)
+        )
+    finally:
+        db.close()
+
+
+def test_related_fallback_accepts_title_only_overlap():
+    """A related chunk with title_overlap > 0 but keywords overlap = 0 must pass the fallback threshold."""
+    db = SessionLocal()
+    try:
+        product_code = "title-kw-{0}".format(uuid4().hex[:8])
+        doc = ProductDoc(
+            product_code=product_code,
+            name="Title Overlap Test",
+            description="For title-only kw_score boundary test",
+        )
+        db.add(doc)
+        db.flush()
+
+        # Matched chunk — fills the only slot (max_chunks=1)
+        db.add(ProductDocChunk(
+            product_doc_id=doc.id,
+            stage_key="s0",
+            title="主要流程",
+            content="订单提交后进入待审核状态。",
+            sort_order=0,
+            keywords="订单,审核,状态",
+        ))
+        # Related chunk — title contains req keyword "权限校验" but keywords field has zero overlap
+        db.add(ProductDocChunk(
+            product_doc_id=doc.id,
+            stage_key="s1",
+            title="权限校验",
+            content="后台鉴权逻辑说明。",
+            sort_order=1,
+            keywords="鉴权,后台",
+        ))
+        db.commit()
+
+        chunks = product_doc_service.get_relevant_chunks(
+            db=db,
+            product_code=product_code,
+            requirement_text="权限校验",
+            max_chunks=1,
+            matched_modules=["主要流程"],
+            related_modules=["权限校验"],
+        )
+        titles = [c.title for c in chunks]
+        # The related chunk has kw_score > 0 (title_overlap) so it should qualify;
+        # and top_chunks[0] IS a generic title, so the swap should happen.
+        assert "权限校验" in titles, (
+            "Related chunk with title-only keyword overlap should pass fallback threshold; got: {0}".format(titles)
+        )
+    finally:
+        db.close()
+
+
+def test_no_generic_title_no_forced_swap():
+    """When top_chunks has no generic-title items, related fallback must NOT replace the last item."""
+    db = SessionLocal()
+    try:
+        product_code = "no-swap-{0}".format(uuid4().hex[:8])
+        doc = ProductDoc(
+            product_code=product_code,
+            name="No Swap Test",
+            description="For no-forced-swap boundary test",
+        )
+        db.add(doc)
+        db.flush()
+
+        # Two non-generic matched chunks that will fill max_chunks=2
+        db.add(ProductDocChunk(
+            product_doc_id=doc.id,
+            stage_key="s0",
+            title="订单管理",
+            content="订单提交后进入待审核状态。",
+            sort_order=0,
+            keywords="订单,审核",
+        ))
+        db.add(ProductDocChunk(
+            product_doc_id=doc.id,
+            stage_key="s1",
+            title="支付模块",
+            content="支付成功后更新订单状态。",
+            sort_order=1,
+            keywords="支付,订单",
+        ))
+        # Related chunk outside top — has keyword overlap, should qualify
+        db.add(ProductDocChunk(
+            product_doc_id=doc.id,
+            stage_key="s2",
+            title="风控规则",
+            content="订单金额超限触发风控。",
+            sort_order=2,
+            keywords="风控,订单,金额",
+        ))
+        db.commit()
+
+        chunks = product_doc_service.get_relevant_chunks(
+            db=db,
+            product_code=product_code,
+            requirement_text="订单支付",
+            max_chunks=2,
+            matched_modules=["订单管理", "支付模块"],
+            related_modules=["风控规则"],
+        )
+        titles = [c.title for c in chunks]
+        # No generic title in top_chunks → should NOT swap out 支付模块
+        assert "订单管理" in titles, "First matched chunk should remain"
+        assert "支付模块" in titles, "Second matched chunk should remain — no forced swap"
+        assert "风控规则" not in titles, (
+            "Related chunk should NOT replace a non-generic item; got: {0}".format(titles)
+        )
+    finally:
+        db.close()

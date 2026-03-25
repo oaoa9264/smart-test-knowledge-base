@@ -132,8 +132,8 @@ def test_analyze_risks_merges_overlapping_requests(monkeypatch):
         },
     ]
 
-    def fake_call_llm_for_risks(raw_text, tree_nodes_text, llm_client=None, product_context=None, module_result=None):
-        del raw_text, tree_nodes_text, llm_client, product_context, module_result
+    def fake_call_llm_for_risks(raw_text, tree_nodes_text, llm_client=None, product_context=None, module_result=None, supplemental_inputs_text=None):
+        del raw_text, tree_nodes_text, llm_client, product_context, module_result, supplemental_inputs_text
         with call_count_lock:
             call_count["value"] += 1
             current_count = call_count["value"]
@@ -1331,3 +1331,170 @@ def test_prerelease_audit_summary_warns_when_blocking():
             assert "不建议提测" in result["closure_summary"]
     finally:
         db.close()
+
+
+def test_risk_build_product_context_uses_richer_query_and_evidence(monkeypatch):
+    """_build_product_context should use build_product_context_query_text (richer query)
+    and call get_relevant_evidence."""
+    requirement_id = _create_requirement_with_product_context(
+        raw_text="用户发起退款申请。",
+        extra_inputs=[
+            ("pm_addendum", "补充：退款需经过审核。", "pm"),
+        ],
+    )
+
+    db = SessionLocal()
+    try:
+        requirement = db.query(Requirement).filter(Requirement.id == requirement_id).first()
+        captured = {}
+
+        def _fake_evidence(db, product_code, requirement_text, module_names=None, matched_chains=None, evidence_types=None, max_items=10):
+            del db, product_code, evidence_types, max_items
+            captured["evidence_text"] = requirement_text
+            captured["evidence_called"] = True
+            return [
+                type(
+                    "Evidence",
+                    (),
+                    {"evidence_type": "state_rule", "status": "verified", "module_name": "退款", "statement": "退款需经过审核"},
+                )()
+            ]
+
+        def _fake_chunks(db, product_code, requirement_text, matched_chains=None, max_chunks=5, matched_modules=None, related_modules=None, use_evidence=True):
+            del db, product_code, max_chunks, use_evidence, matched_chains, matched_modules, related_modules
+            captured["chunk_text"] = requirement_text
+            return [type("Chunk", (), {"title": "退款流程", "content": "退款链路说明"})()]
+
+        monkeypatch.setattr(risk_service, "get_relevant_evidence", _fake_evidence)
+        monkeypatch.setattr(risk_service, "get_chain_aware_chunks", _fake_chunks)
+
+        context = risk_service._build_product_context(db, requirement)
+
+        assert captured.get("evidence_called"), "get_relevant_evidence should be called"
+        assert "【结构化产品证据】" in context
+        assert "### 退款流程" in context
+        # Richer query: includes supplemental input, not just raw_text
+        assert "补充：退款需经过审核。" in captured["evidence_text"]
+        assert "补充：退款需经过审核。" in captured["chunk_text"]
+    finally:
+        db.close()
+
+
+def test_risk_build_product_context_skips_module_analysis_with_chains(monkeypatch):
+    """When matched_chains is provided, module analysis should NOT run."""
+    requirement_id = _create_requirement_with_product_context(
+        raw_text="用户发起退款申请。",
+        matched_chains=["refund-flow"],
+    )
+
+    db = SessionLocal()
+    try:
+        requirement = db.query(Requirement).filter(Requirement.id == requirement_id).first()
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("module analysis should not run when matched_chains exist")
+
+        def _fake_evidence(db, product_code, requirement_text, module_names=None, matched_chains=None, evidence_types=None, max_items=10):
+            del db, product_code, evidence_types, max_items, requirement_text
+            assert matched_chains == ["refund-flow"]
+            assert module_names is None
+            return []
+
+        def _fake_chunks(db, product_code, requirement_text, matched_chains=None, max_chunks=5, matched_modules=None, related_modules=None, use_evidence=True):
+            del db, product_code, max_chunks, use_evidence, requirement_text
+            assert matched_chains == ["refund-flow"]
+            assert matched_modules is None
+            return [type("Chunk", (), {"title": "退款流程", "content": "退款链路说明"})()]
+
+        monkeypatch.setattr(risk_service, "analyze_requirement_modules", _boom)
+        monkeypatch.setattr(risk_service, "get_relevant_evidence", _fake_evidence)
+        monkeypatch.setattr(risk_service, "get_chain_aware_chunks", _fake_chunks)
+
+        context = risk_service._build_product_context(
+            db, requirement, matched_chains=["refund-flow"],
+        )
+        assert "### 退款流程" in context
+    finally:
+        db.close()
+
+
+def test_risk_call_llm_includes_supplemental_inputs(monkeypatch):
+    """_call_llm_for_risks should include supplemental inputs in prompt."""
+    monkeypatch.setenv("ANALYZER_PROVIDER", "llm")
+
+    captured_prompt = {}
+
+    class FakeLLM:
+        def chat_with_json(self, system_prompt, user_prompt):
+            captured_prompt["user"] = user_prompt
+            return {"risks": []}
+
+    risk_service._call_llm_for_risks(
+        raw_text="用户发起退款。",
+        tree_nodes_text="- [root] (root) 退款",
+        llm_client=FakeLLM(),
+        product_context="退款流程文档",
+        supplemental_inputs_text="[pm_addendum]（来源：pm）补充：退款需审核。",
+    )
+
+    assert "【正式补充输入】" in captured_prompt["user"]
+    assert "退款需审核" in captured_prompt["user"]
+
+
+def test_analyze_risks_once_skips_module_analysis_when_chains_present(monkeypatch):
+    """_analyze_risks_once should not call analyze_requirement_modules when matched_chains exist."""
+    requirement_id = _create_requirement_with_product_context(
+        raw_text="用户发起退款申请。",
+        matched_chains=["refund-flow"],
+    )
+    # Add a rule node so _analyze_risks_once doesn't raise
+    db = SessionLocal()
+    try:
+        db.add(RuleNode(
+            id="root-refund-{0}".format(uuid4().hex[:8]),
+            requirement_id=requirement_id,
+            parent_id=None,
+            node_type=NodeType.root,
+            content="退款",
+            risk_level=RiskLevel.medium,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("analyze_requirement_modules should not run when matched_chains exist")
+
+    monkeypatch.setattr(risk_service, "analyze_requirement_modules", _boom)
+    monkeypatch.setattr(risk_service, "_build_product_context", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        risk_service, "_call_llm_for_risks",
+        lambda *a, **kw: [],
+    )
+
+    db = SessionLocal()
+    try:
+        # Should not raise — _boom never called
+        risk_service._analyze_risks_once(db=db, requirement_id=requirement_id)
+    finally:
+        db.close()
+
+
+def test_risk_prompt_contains_product_knowledge_crosscheck_instruction():
+    """RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT must contain the cross-check instruction."""
+    from app.services.prompts.risk_analysis import RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT
+    assert "产品知识核对要求" in RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT
+    assert "逐条检查" in RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT
+    assert "已知历史包袱" in RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT
+    assert "副作用" in RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT
+    assert "多个入口或系统修改" in RISK_ANALYSIS_WITH_PRODUCT_SYSTEM_PROMPT
+
+
+def test_review_prompt_contains_product_knowledge_crosscheck_instruction():
+    """REVIEW_ANALYSIS_SYSTEM_PROMPT must contain the cross-check instruction."""
+    from app.services.prompts.effective_requirement import REVIEW_ANALYSIS_SYSTEM_PROMPT
+    assert "产品知识核对要求" in REVIEW_ANALYSIS_SYSTEM_PROMPT
+    assert "逐条检查" in REVIEW_ANALYSIS_SYSTEM_PROMPT
+    assert "已知历史包袱" in REVIEW_ANALYSIS_SYSTEM_PROMPT
+    assert "副作用" in REVIEW_ANALYSIS_SYSTEM_PROMPT
+    assert "多个入口或系统修改" in REVIEW_ANALYSIS_SYSTEM_PROMPT
