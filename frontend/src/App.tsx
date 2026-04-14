@@ -7,6 +7,7 @@ import {
   FileTextOutlined,
   FireOutlined,
   FolderOpenOutlined,
+  QuestionCircleOutlined,
   TableOutlined,
 } from "@ant-design/icons";
 import { fetchProjects, fetchRequirements } from "./api/projects";
@@ -17,6 +18,7 @@ import TestCasesPage from "./pages/TestCases";
 import CoveragePage from "./pages/Coverage";
 import RecommendationPage from "./pages/Recommendation";
 import ProductDocsPage from "./pages/ProductDocs";
+import ClarificationReviewPage from "./pages/ClarificationReview";
 
 const { Header, Sider, Content } = Layout;
 
@@ -27,6 +29,7 @@ const menuItems = [
   { key: "/coverage", label: <Link to="/coverage">覆盖矩阵</Link>, icon: <TableOutlined /> },
   { key: "/recommendation", label: <Link to="/recommendation">回归推荐</Link>, icon: <FireOutlined /> },
   { key: "/product-docs", label: <Link to="/product-docs">产品知识库</Link>, icon: <FileTextOutlined /> },
+  { key: "/clarification-review", label: <Link to="/clarification-review">追问分析</Link>, icon: <QuestionCircleOutlined /> },
 ];
 
 function AppShell() {
@@ -147,6 +150,7 @@ function AppShell() {
             <Route path="/coverage" element={<CoveragePage />} />
             <Route path="/recommendation" element={<RecommendationPage />} />
             <Route path="/product-docs" element={<ProductDocsPage />} />
+            <Route path="/clarification-review" element={<ClarificationReviewPage />} />
           </Routes>
         </Content>
       </Layout>

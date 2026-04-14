@@ -1,9 +1,9 @@
-import os
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test_knowledge_base.db")
+from app.core.config import DATABASE_URL
+
+SQLALCHEMY_DATABASE_URL = DATABASE_URL
 
 engine_kwargs = {}
 if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
