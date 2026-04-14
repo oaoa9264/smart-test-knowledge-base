@@ -313,6 +313,19 @@ class ArchitectureAnalysis(Base):
     requirement = relationship("Requirement", back_populates="architecture_analyses")
 
 
+class ClarificationReviewRecord(Base):
+    __tablename__ = "clarification_review_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    input_payload_json = Column(Text, nullable=False)
+    rule_text = Column(Text, nullable=False)
+    result_json = Column(Text, nullable=False)
+    llm_status = Column(String(20), nullable=False, default="failed")
+    llm_provider = Column(String(64), nullable=True)
+    llm_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class RecoRun(Base):
     __tablename__ = "reco_run"
 

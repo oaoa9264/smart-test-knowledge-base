@@ -35,14 +35,14 @@ class BaseLLMClient(ABC):
         if not self.provider_name:
             raise ValueError("provider_name must be defined in subclass")
 
-        normalized_key = (api_key or "").strip()
+        normalized_key = self._normalize_config_text(api_key)
         if not normalized_key:
             raise ValueError("api_key is required")
 
         self.api_key = normalized_key
-        self.api_url = (api_url or "").strip()
-        self.text_model = (text_model or "").strip()
-        self.vision_model = (vision_model or "").strip()
+        self.api_url = self._normalize_config_text(api_url)
+        self.text_model = self._normalize_config_text(text_model)
+        self.vision_model = self._normalize_config_text(vision_model)
         self.timeout = float(timeout)
         self.connect_timeout = float(connect_timeout)
         self.max_retries = int(max_retries)
@@ -72,7 +72,18 @@ class BaseLLMClient(ABC):
             ],
             response_format={"type": "json_object"},
         )
-        return self._parse_json_payload(content)
+        try:
+            return self._parse_json_payload(content)
+        except Exception as exc:
+            logger.error(
+                "LLM JSON parse failed (provider=%s, model=%s): %s: %s; content=%s",
+                self.provider_name,
+                self.text_model,
+                type(exc).__name__,
+                exc,
+                self._truncate_text(content, 800),
+            )
+            raise
 
     def chat_with_messages(self, messages: List[Dict[str, Any]], response_format: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {}
@@ -305,6 +316,16 @@ class BaseLLMClient(ABC):
         if len(text) <= max_len:
             return text
         return "{0}...<truncated>".format(text[:max_len])
+
+    @staticmethod
+    def _normalize_config_text(value: Any) -> str:
+        if value is None:
+            return ""
+
+        text = str(value).strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            return text[1:-1].strip()
+        return text
 
     @staticmethod
     def image_to_base64_url(file_path: str) -> str:

@@ -1,4 +1,7 @@
+import logging
+
 import httpx
+import pytest
 
 from app.services.base_llm_client import BaseLLMClient
 
@@ -90,6 +93,27 @@ class _RealStreamClient(BaseLLMClient):
         return _ErrorStreamHTTPClient(self.response)
 
 
+class _InvalidJSONClient(BaseLLMClient):
+    provider_name = "capture"
+
+    def __init__(self):
+        super().__init__(
+            api_key="key",
+            api_url="https://example.com/v1/chat/completions",
+            text_model="bad-json-model",
+            vision_model="vision-model",
+            timeout=10,
+            connect_timeout=2,
+            max_retries=0,
+            max_tokens=128,
+            temperature=0.2,
+            seed=None,
+        )
+
+    def _stream_chat_completion(self, payload):
+        return "", '{"items":[1 2]}'
+
+
 def test_base_llm_client_includes_seed_when_configured():
     client = _CaptureClient(seed=7)
 
@@ -116,3 +140,15 @@ def test_base_llm_client_non_200_stream_does_not_raise_response_not_read():
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "HTTP 403" in str(exc)
+
+
+def test_base_llm_client_logs_provider_and_model_when_json_parse_fails(caplog):
+    client = _InvalidJSONClient()
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(ValueError, match="Expecting ',' delimiter"):
+            client.chat_with_json(system_prompt="system", user_prompt="user")
+
+    assert "provider=capture" in caplog.text
+    assert "model=bad-json-model" in caplog.text
+    assert '{"items":[1 2]}' in caplog.text

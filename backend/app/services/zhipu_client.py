@@ -23,11 +23,11 @@ class ZhipuClient(BaseLLMClient):
         seed: Optional[int] = None,
         thinking_type: Optional[str] = None,
     ):
-        resolved_api_key = (api_key or os.getenv("ZHIPU_API_KEY", "")).strip()
+        resolved_api_key = self._normalize_config_text(api_key or os.getenv("ZHIPU_API_KEY", ""))
         if not resolved_api_key:
             raise ValueError("api_key is required")
 
-        self.provider_name = (provider_name or self.provider_name).strip()
+        self.provider_name = self._normalize_config_text(provider_name or self.provider_name)
 
         super().__init__(
             api_key=resolved_api_key,
@@ -42,7 +42,7 @@ class ZhipuClient(BaseLLMClient):
             seed=self._resolve_seed(seed),
         )
         resolved_thinking_type = thinking_type if thinking_type is not None else os.getenv("LLM_THINKING_TYPE", "disabled")
-        self.thinking_type = resolved_thinking_type.strip()
+        self.thinking_type = self._normalize_config_text(resolved_thinking_type)
 
     def _provider_payload(self) -> Dict[str, Any]:
         if not self.thinking_type:

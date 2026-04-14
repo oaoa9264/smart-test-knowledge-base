@@ -39,6 +39,6 @@ export async function previewImpact(payload: {
 }
 
 export async function aiParse(raw_text: string): Promise<AIParseResult> {
-  const { data } = await http.post<AIParseResult>("/api/ai/parse", { raw_text });
+  const { data } = await http.post<AIParseResult>("/api/ai/parse", { raw_text }, { timeout: 120_000 });
   return data;
 }

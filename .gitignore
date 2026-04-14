@@ -21,6 +21,7 @@ dist/
 
 # Env
 .env
+.env.production
 
 # IDE
 .idea/

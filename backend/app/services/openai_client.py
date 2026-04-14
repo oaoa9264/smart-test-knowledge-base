@@ -31,18 +31,18 @@ class OpenAIClient(BaseLLMClient):
         temperature: Optional[float] = None,
         seed: Optional[int] = None,
     ):
-        resolved_api_key = (api_key or os.getenv("OPENAI_API_KEY", "")).strip()
+        resolved_api_key = self._normalize_config_text(api_key or os.getenv("OPENAI_API_KEY", ""))
         if not resolved_api_key:
             raise ValueError("api_key is required")
 
         if OpenAI is None:
             raise RuntimeError("openai package is required for OpenAIClient")
 
-        self.provider_name = (provider_name or self.provider_name).strip()
+        self.provider_name = self._normalize_config_text(provider_name or self.provider_name)
         self.base_url = self._resolve_base_url(base_url=base_url)
         api_url = "{0}/chat/completions".format(self.base_url.rstrip("/"))
-        resolved_text_model = (text_model or os.getenv("OPENAI_TEXT_MODEL", "gpt-4o")).strip()
-        resolved_vision_model = (vision_model or os.getenv("OPENAI_VISION_MODEL", resolved_text_model)).strip()
+        resolved_text_model = self._normalize_config_text(text_model or os.getenv("OPENAI_TEXT_MODEL", "gpt-4o"))
+        resolved_vision_model = self._normalize_config_text(vision_model or os.getenv("OPENAI_VISION_MODEL", resolved_text_model))
 
         super().__init__(
             api_key=resolved_api_key,
@@ -60,12 +60,12 @@ class OpenAIClient(BaseLLMClient):
 
     @staticmethod
     def _resolve_base_url(*, base_url: Optional[str] = None) -> str:
-        resolved_base_url = (base_url or os.getenv("OPENAI_BASE_URL", "")).strip()
+        resolved_base_url = BaseLLMClient._normalize_config_text(base_url or os.getenv("OPENAI_BASE_URL", ""))
         if resolved_base_url:
             return resolved_base_url.rstrip("/")
 
         # Backward compatibility with existing OPENAI_API_URL setting.
-        api_url = os.getenv("OPENAI_API_URL", "").strip()
+        api_url = BaseLLMClient._normalize_config_text(os.getenv("OPENAI_API_URL", ""))
         if api_url:
             normalized = api_url.rstrip("/")
             suffix = "/chat/completions"

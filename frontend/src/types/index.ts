@@ -341,6 +341,79 @@ export interface ArchitectureImportResult {
   imported_rule_nodes: number;
 }
 
+export interface ClarificationReviewAnalyzeRequest {
+  requirement_text: string;
+  current_surface_flow: string;
+  involved_modules: string;
+  known_background: string;
+  unknowns: string;
+  rule_text: string;
+}
+
+export interface ClarificationReviewQuestionItem {
+  question: string;
+  why_ask: string;
+  risk_if_unasked: string;
+}
+
+export interface ClarificationReviewRuleItem {
+  rule: string;
+  reason: string;
+}
+
+export interface ClarificationReviewMissingRuleItem {
+  rule: string;
+  why_missing: string;
+  impact: string;
+}
+
+export interface ClarificationReviewGapItem {
+  gap: string;
+  reason: string;
+  impact: string;
+}
+
+export interface ClarificationReviewAssumptionItem {
+  assumption: string;
+  basis: string;
+  risk: string;
+}
+
+export interface ClarificationReviewRoleDescriptorItem {
+  key: string;
+  source: string;
+}
+
+export interface ClarificationReviewResult extends LLMExecutionMeta {
+  likely_historical_rules: ClarificationReviewRuleItem[];
+  missing_critical_rules: ClarificationReviewMissingRuleItem[];
+  priority_questions_by_role: Record<string, ClarificationReviewQuestionItem[]>;
+  configured_roles: string[];
+  role_descriptors: ClarificationReviewRoleDescriptorItem[];
+  known_requirement_gaps: ClarificationReviewGapItem[];
+  risk_assumptions: ClarificationReviewAssumptionItem[];
+  summary_markdown: string;
+}
+
+export interface ClarificationReviewRecordSummary {
+  id: number;
+  llm_status: LLMStatus;
+  llm_provider: string | null;
+  created_at: string;
+  requirement_text_preview: string;
+}
+
+export interface ClarificationReviewRecord {
+  id: number;
+  input_payload: Omit<ClarificationReviewAnalyzeRequest, "rule_text">;
+  rule_text: string;
+  result: ClarificationReviewResult;
+  llm_status: LLMStatus;
+  llm_provider: string | null;
+  llm_message: string | null;
+  created_at: string;
+}
+
 export type RiskCategory =
   | "input_validation"
   | "flow_gap"
