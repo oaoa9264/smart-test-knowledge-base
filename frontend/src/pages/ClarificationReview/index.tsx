@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -22,24 +22,40 @@ import {
   BugOutlined,
   CodeOutlined,
   DeleteOutlined,
+  DownloadOutlined,
+  FilePdfOutlined,
   ShopOutlined,
   TeamOutlined,
+  UploadOutlined,
 } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   analyzeClarificationReview,
+  createClarificationReviewPdfDraft,
   deleteClarificationReviewRecord,
   fetchClarificationReviewRecord,
   fetchClarificationReviewRecords,
+  inferClarificationReviewPdfDraft,
 } from "../../api/clarificationReview";
 import { getErrorMessage } from "../../api/client";
+import {
+  buildExportFileName,
+  buildExportMarkdown,
+  downloadMarkdown,
+  formatGapType,
+  getClarificationRoleDescriptors,
+  isClarificationReviewResultV2,
+} from "./exportMarkdown";
 import type {
   ClarificationReviewAnalyzeRequest,
+  ClarificationReviewPdfDraft,
+  ClarificationReviewPdfField,
+  ClarificationReviewPdfResult,
   ClarificationReviewQuestionItem,
-  ClarificationReviewRoleDescriptorItem,
   ClarificationReviewRecord,
   ClarificationReviewRecordSummary,
+  ClarificationReviewSourceMeta,
 } from "../../types";
 
 
@@ -83,6 +99,25 @@ type QuestionGroup = RoleMeta & {
   source: string;
   isExtra: boolean;
 };
+
+type PdfFieldKey =
+  | "requirement_text"
+  | "current_surface_flow"
+  | "involved_modules"
+  | "known_background"
+  | "unknowns";
+
+type DraftApplyMode = "keep" | "replace" | "append";
+
+const PDF_FIELD_META: Record<PdfFieldKey, { label: string }> = {
+  requirement_text: { label: "需求原文" },
+  current_surface_flow: { label: "当前表面流程" },
+  involved_modules: { label: "涉及模块" },
+  known_background: { label: "已知背景" },
+  unknowns: { label: "我暂时不知道的内容" },
+};
+
+const PDF_FIELD_KEYS = Object.keys(PDF_FIELD_META) as PdfFieldKey[];
 
 const KNOWN_ROLE_META: Record<string, RoleMeta> = {
   产品: {
@@ -154,6 +189,102 @@ function ProviderTag({ provider }: { provider: string | null }) {
   return <Tag color={color}>{`LLM: ${provider}`}</Tag>;
 }
 
+function DraftStatusTag({ status }: { status: ClarificationReviewPdfDraft["status"] }) {
+  const color =
+    status === "success"
+      ? "green"
+      : status === "partial_success"
+        ? "gold"
+        : status === "failed"
+          ? "red"
+          : "blue";
+  return <Tag color={color}>{status}</Tag>;
+}
+
+function SourceMetaTag({ sourceMeta }: { sourceMeta: ClarificationReviewSourceMeta | null }) {
+  if (!sourceMeta) return <Tag>手填</Tag>;
+  return <Tag color={sourceMeta.draft_expired ? "gold" : "blue"}>{sourceMeta.draft_expired ? "PDF 导入(已过期)" : "PDF 导入"}</Tag>;
+}
+
+function getDraftResultToApply(draft: ClarificationReviewPdfDraft | null): ClarificationReviewPdfResult | null {
+  if (!draft) return null;
+  return draft.inference_result || draft.strict_result;
+}
+
+function normalizeFieldValue(field: ClarificationReviewPdfField | undefined): ClarificationReviewPdfField {
+  return {
+    value: String(field?.value || ""),
+    evidence: String(field?.evidence || ""),
+  };
+}
+
+function PdfResultBlock({
+  title,
+  result,
+  accentColor,
+}: {
+  title: string;
+  result: ClarificationReviewPdfResult | null;
+  accentColor: string;
+}) {
+  return (
+    <Card
+      size="small"
+      title={title}
+      style={{ borderRadius: 16, borderColor: `${accentColor}33` }}
+      bodyStyle={{ padding: 16 }}
+    >
+      {!result ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无结果" />
+      ) : (
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          {PDF_FIELD_KEYS.map((fieldKey) => {
+            const field = normalizeFieldValue(result.fields[fieldKey]);
+            return (
+              <div
+                key={fieldKey}
+                style={{
+                  border: `1px solid ${accentColor}22`,
+                  borderRadius: 12,
+                  padding: 12,
+                  background: `${accentColor}08`,
+                }}
+              >
+                <Typography.Text strong>{PDF_FIELD_META[fieldKey].label}</Typography.Text>
+                <Typography.Paragraph style={{ marginTop: 8, marginBottom: 8, whiteSpace: "pre-wrap" }}>
+                  {field.value || "未提取到内容"}
+                </Typography.Paragraph>
+                {hasMeaningfulText(field.evidence) ? (
+                  <Typography.Text type="secondary">{`证据：${field.evidence}`}</Typography.Text>
+                ) : null}
+              </div>
+            );
+          })}
+          {result.conflicts.length > 0 ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="检测到文档冲突"
+              description={
+                <Space direction="vertical" size={8}>
+                  {result.conflicts.map((item, index) => (
+                    <div key={`${item.field}-${index}`}>
+                      <Typography.Text strong>{item.description}</Typography.Text>
+                      <div>
+                        <Typography.Text type="secondary">{`${item.field} · ${item.evidence || "无证据说明"}`}</Typography.Text>
+                      </div>
+                    </div>
+                  ))}
+                </Space>
+              }
+            />
+          ) : null}
+        </Space>
+      )}
+    </Card>
+  );
+}
+
 function getRoleMeta(roleKey: string, index: number): RoleMeta {
   const knownMeta = KNOWN_ROLE_META[roleKey];
   if (knownMeta) return knownMeta;
@@ -169,32 +300,6 @@ function getRoleMeta(roleKey: string, index: number): RoleMeta {
     emptyText: `当前没有${roleKey}待确认问题`,
     icon: <TeamOutlined />,
   };
-}
-
-function getRoleDescriptors(record: ClarificationReviewRecord | null): ClarificationReviewRoleDescriptorItem[] {
-  const result = record?.result;
-  if (!result) return [];
-
-  const configuredRoles = result.configured_roles || [];
-  const descriptors = [...(result.role_descriptors || [])];
-  const seen = new Set(descriptors.map((item) => item.key));
-
-  configuredRoles.forEach((roleKey) => {
-    if (seen.has(roleKey)) return;
-    descriptors.push({ key: roleKey, source: "rule_text" });
-    seen.add(roleKey);
-  });
-
-  Object.keys(result.priority_questions_by_role || {}).forEach((roleKey) => {
-    if (seen.has(roleKey)) return;
-    descriptors.push({
-      key: roleKey,
-      source: configuredRoles.includes(roleKey) ? "rule_text" : "llm_extra",
-    });
-    seen.add(roleKey);
-  });
-
-  return descriptors;
 }
 
 function QuestionMetaRow({
@@ -291,6 +396,8 @@ function RoleQuestionSection({
                 <Typography.Text strong style={{ fontSize: 16, lineHeight: 1.6 }}>
                   {item.question}
                 </Typography.Text>
+                <QuestionMetaRow label="必须产出" value={item.required_output || ""} accentColor={meta.color} />
+                <QuestionMetaRow label="答案形式" value={formatAnswerFormatLabel(item.answer_format)} accentColor={meta.color} />
                 <QuestionMetaRow label="为什么要问" value={item.why_ask} accentColor={meta.color} />
                 <QuestionMetaRow label="不问风险" value={item.risk_if_unasked} accentColor={meta.color} />
               </Space>
@@ -315,6 +422,11 @@ const RULE_LIKE_THEMES: Record<string, RuleLikeTheme> = {
   assumption: { color: "#7c3aed", softColor: "#f5f3ff", borderColor: "#ddd6fe" },
 };
 
+const GAP_PRIORITY_META = {
+  P0: { title: "P0 阻塞级缺陷", emptyText: "当前未发现阻塞级缺陷", themeKey: "gap" },
+  P1: { title: "P1 高风险缺陷", emptyText: "当前未发现高风险缺陷", themeKey: "missing" },
+  P2: { title: "P2 补充级缺陷", emptyText: "当前未发现补充级缺陷", themeKey: "history" },
+} as const;
 type RuleLikeMetaField = { label: string; value: string };
 
 function RuleLikeList<T extends object>({
@@ -436,11 +548,31 @@ function RuleLikeList<T extends object>({
   );
 }
 
+function formatAnswerFormatLabel(value: string | undefined): string {
+  if (value === "table") return "表格";
+  if (value === "flow") return "流程";
+  return "文本";
+}
+
+function formatSourceTypeLabel(value: string | undefined): string {
+  if (value === "input_text") return "输入信息";
+  if (value === "pdf_draft") return "PDF 草稿";
+  return "模型推断";
+}
+
 export default function ClarificationReviewPage() {
   const [form] = Form.useForm<ClarificationReviewFormValues>();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [inferLoading, setInferLoading] = useState(false);
+  const [activeDraftId, setActiveDraftId] = useState<number | null>(null);
+  const [activeDraft, setActiveDraft] = useState<ClarificationReviewPdfDraft | null>(null);
+  const [applyModalOpen, setApplyModalOpen] = useState(false);
+  const [draftApplyModes, setDraftApplyModes] = useState<Partial<Record<PdfFieldKey, DraftApplyMode>>>({});
+  const [draftAppliedSnapshot, setDraftAppliedSnapshot] = useState<Partial<Record<PdfFieldKey, string>>>({});
   const [records, setRecords] = useState<ClarificationReviewRecordSummary[]>([]);
   const [activeRecord, setActiveRecord] = useState<ClarificationReviewRecord | null>(null);
   const [expandedRoles, setExpandedRoles] = useState<string[]>([]);
@@ -456,6 +588,14 @@ export default function ClarificationReviewPage() {
     });
     void loadRecords();
   }, [form]);
+
+  const resetDraftState = () => {
+    setActiveDraftId(null);
+    setActiveDraft(null);
+    setDraftAppliedSnapshot({});
+    setDraftApplyModes({});
+    setApplyModalOpen(false);
+  };
 
   const loadRecords = async (nextActiveId?: number) => {
     setHistoryLoading(true);
@@ -478,6 +618,7 @@ export default function ClarificationReviewPage() {
   const loadRecordDetail = async (recordId: number) => {
     setDetailLoading(true);
     try {
+      resetDraftState();
       const record = await fetchClarificationReviewRecord(recordId);
       setActiveRecord(record);
       form.setFieldsValue({
@@ -504,13 +645,120 @@ export default function ClarificationReviewPage() {
           message.success("删除成功");
           if (activeRecord?.id === recordId) {
             setActiveRecord(null);
+            setHistoryLoading(true);
+            try {
+              const data = await fetchClarificationReviewRecords(20);
+              setRecords(data);
+            } finally {
+              setHistoryLoading(false);
+            }
+          } else {
+            await loadRecords();
           }
-          await loadRecords();
         } catch (error) {
           message.error(getErrorMessage(error, "删除失败"));
         }
       },
     });
+  };
+
+  const requestReplaceDraft = async (): Promise<boolean> =>
+    new Promise((resolve) => {
+      Modal.confirm({
+        title: "替换当前 PDF 草稿",
+        content: "当前已有一份 PDF 草稿，继续导入会替换它。是否继续？",
+        okText: "替换",
+        cancelText: "取消",
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      });
+    });
+
+  const handleImportPdf = async (file: File) => {
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      message.warning("仅支持上传 PDF 文件");
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      message.warning("PDF 体积不能超过 20MB");
+      return;
+    }
+    if (activeDraftId) {
+      const confirmed = await requestReplaceDraft();
+      if (!confirmed) return;
+    }
+
+    setDraftLoading(true);
+    try {
+      const draft = await createClarificationReviewPdfDraft(file);
+      setActiveDraftId(draft.id);
+      setActiveDraft(draft);
+      setDraftAppliedSnapshot({});
+      setDraftApplyModes({});
+      message.success("PDF 草稿已生成");
+    } catch (error) {
+      message.error(getErrorMessage(error, "PDF 导入失败"));
+    } finally {
+      setDraftLoading(false);
+    }
+  };
+
+  const handleOpenApplyModal = () => {
+    const result = getDraftResultToApply(activeDraft);
+    if (!result) {
+      message.warning("当前没有可应用的草稿内容");
+      return;
+    }
+
+    const currentValues = form.getFieldsValue();
+    const nextModes: Partial<Record<PdfFieldKey, DraftApplyMode>> = {};
+    PDF_FIELD_KEYS.forEach((fieldKey) => {
+      const currentValue = String(currentValues[fieldKey] || "").trim();
+      const draftValue = normalizeFieldValue(result.fields[fieldKey]).value.trim();
+      if (!currentValue && !draftValue) return;
+      nextModes[fieldKey] = !currentValue && draftValue ? "replace" : "keep";
+    });
+    setDraftApplyModes(nextModes);
+    setApplyModalOpen(true);
+  };
+
+  const handleApplyDraftToForm = () => {
+    const result = getDraftResultToApply(activeDraft);
+    if (!result) return;
+
+    const currentValues = form.getFieldsValue();
+    const nextValues: Partial<ClarificationReviewFormValues> = {};
+    const snapshot: Partial<Record<PdfFieldKey, string>> = {};
+
+    PDF_FIELD_KEYS.forEach((fieldKey) => {
+      const mode = draftApplyModes[fieldKey] || "keep";
+      const currentValue = String(currentValues[fieldKey] || "").trim();
+      const draftValue = normalizeFieldValue(result.fields[fieldKey]).value.trim();
+      if (!draftValue || mode === "keep") return;
+
+      const mergedValue = mode === "append" && currentValue ? `${currentValue}\n${draftValue}` : draftValue;
+      nextValues[fieldKey] = mergedValue;
+      snapshot[fieldKey] = mergedValue;
+    });
+
+    form.setFieldsValue(nextValues);
+    setDraftAppliedSnapshot(snapshot);
+    setApplyModalOpen(false);
+    message.success("草稿内容已回填到表单");
+  };
+
+  const handleInferDraft = async () => {
+    if (!activeDraftId) return;
+    setInferLoading(true);
+    try {
+      const draft = await inferClarificationReviewPdfDraft(activeDraftId);
+      setActiveDraft(draft);
+      message.success("补充推断已更新");
+    } catch (error) {
+      message.error(getErrorMessage(error, "补充推断失败"));
+    } finally {
+      setInferLoading(false);
+    }
   };
 
   const handleSubmit = async () => {
@@ -530,6 +778,11 @@ export default function ClarificationReviewPage() {
 
     setSubmitting(true);
     try {
+      const appliedFields = PDF_FIELD_KEYS.filter((fieldKey) => {
+        const snapshotValue = draftAppliedSnapshot[fieldKey];
+        if (!snapshotValue) return false;
+        return String(values[fieldKey] || "").trim() === snapshotValue.trim();
+      });
       const record = await analyzeClarificationReview({
         requirement_text: values.requirement_text.trim(),
         current_surface_flow: values.current_surface_flow.trim(),
@@ -537,8 +790,11 @@ export default function ClarificationReviewPage() {
         known_background: values.known_background.trim(),
         unknowns: values.unknowns.trim(),
         rule_text: values.rule_text.trim(),
+        source_draft_id: activeDraftId || undefined,
+        applied_fields: appliedFields,
       });
       setActiveRecord(record);
+      resetDraftState();
       await loadRecords(record.id);
       if (record.llm_status === "failed") {
         message.warning(record.llm_message || "模型调用失败，已保存空结果记录");
@@ -553,15 +809,25 @@ export default function ClarificationReviewPage() {
   };
 
   const summaryMarkdown = useMemo(() => activeRecord?.result.summary_markdown || "", [activeRecord]);
+  const isResultV2 = useMemo(() => isClarificationReviewResultV2(activeRecord), [activeRecord]);
   const questionGroups = useMemo(
     () =>
-      getRoleDescriptors(activeRecord).map((descriptor, index) => ({
+      getClarificationRoleDescriptors(activeRecord).map((descriptor, index) => ({
         roleKey: descriptor.key,
         ...getRoleMeta(descriptor.key, index),
         items: activeRecord?.result.priority_questions_by_role[descriptor.key] || [],
         source: descriptor.source,
         isExtra: descriptor.source === "llm_extra",
       })),
+    [activeRecord],
+  );
+  const groupedV2Gaps = useMemo(
+    () => ({
+      P0: activeRecord?.result.known_requirement_gaps.filter((item) => item.priority === "P0") || [],
+      P1: activeRecord?.result.known_requirement_gaps.filter((item) => item.priority === "P1") || [],
+      P2:
+        activeRecord?.result.known_requirement_gaps.filter((item) => !item.priority || item.priority === "P2") || [],
+    }),
     [activeRecord],
   );
 
@@ -583,6 +849,22 @@ export default function ClarificationReviewPage() {
     message.success("摘要已复制");
   };
 
+  const handleExportMarkdown = () => {
+    if (!activeRecord || activeRecord.llm_status !== "success") {
+      message.warning("暂无可导出的分析结果");
+      return;
+    }
+
+    try {
+      const content = buildExportMarkdown(activeRecord);
+      const fileName = buildExportFileName(activeRecord);
+      downloadMarkdown(fileName, content);
+      message.success("Markdown 已开始下载");
+    } catch (error) {
+      message.error(getErrorMessage(error, "导出 Markdown 失败"));
+    }
+  };
+
   const handleRoleExpandChange = (keys: string | string[]) => {
     const nextKeys = Array.isArray(keys) ? keys : [keys];
     setExpandedRoles(nextKeys);
@@ -594,6 +876,19 @@ export default function ClarificationReviewPage() {
 
   return (
     <div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".pdf,application/pdf"
+        style={{ display: "none" }}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) {
+            void handleImportPdf(file);
+          }
+          event.target.value = "";
+        }}
+      />
       <Typography.Title level={4} style={{ marginTop: 0 }}>
         追问分析
       </Typography.Title>
@@ -627,6 +922,7 @@ export default function ClarificationReviewPage() {
                         <Space wrap size={4}>
                           <Typography.Text strong>{`#${item.id}`}</Typography.Text>
                           <Tag color={item.llm_status === "success" ? "blue" : "red"}>{item.llm_status}</Tag>
+                          <SourceMetaTag sourceMeta={item.source_meta} />
                           <ProviderTag provider={item.llm_provider} />
                         </Space>
                         <Button
@@ -657,6 +953,13 @@ export default function ClarificationReviewPage() {
             title="输入信息"
             extra={
               <Space>
+                <Button
+                  icon={<UploadOutlined />}
+                  loading={draftLoading}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  导入 PDF
+                </Button>
                 <Button
                   onClick={() =>
                     form.setFieldValue("rule_text", DEFAULT_RULE_TEXT)
@@ -694,6 +997,54 @@ export default function ClarificationReviewPage() {
                 <TextArea rows={15} placeholder="可编辑默认规则模板" />
               </Form.Item>
             </Form>
+
+            {activeDraft ? (
+              <Card
+                size="small"
+                title={
+                  <Space wrap>
+                    <FilePdfOutlined />
+                    <Typography.Text strong>PDF 拆解草稿</Typography.Text>
+                    <DraftStatusTag status={activeDraft.status} />
+                    <ProviderTag provider={activeDraft.llm_provider} />
+                  </Space>
+                }
+                extra={
+                  <Space wrap>
+                    {(activeDraft.status === "success" || activeDraft.status === "partial_success") ? (
+                      <Button onClick={() => void handleInferDraft()} loading={inferLoading}>
+                        LLM 补充推断
+                      </Button>
+                    ) : null}
+                    <Button type="primary" onClick={handleOpenApplyModal}>
+                      应用到表单
+                    </Button>
+                  </Space>
+                }
+                style={{ borderRadius: 16 }}
+                bodyStyle={{ padding: 16 }}
+              >
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  <Space wrap>
+                    <Typography.Text>{activeDraft.file_name}</Typography.Text>
+                    <Typography.Text type="secondary">{`${activeDraft.page_count} 页`}</Typography.Text>
+                    <Typography.Text type="secondary">{toDateTimeText(activeDraft.created_at)}</Typography.Text>
+                  </Space>
+                  {activeDraft.llm_message ? (
+                    <Alert type="warning" showIcon message={activeDraft.llm_message} />
+                  ) : null}
+                  <PdfResultBlock title="严格提取" result={activeDraft.strict_result} accentColor="#1d4ed8" />
+                  {activeDraft.inference_result ? (
+                    <PdfResultBlock title="推断补充" result={activeDraft.inference_result} accentColor="#0f766e" />
+                  ) : null}
+                  {Object.keys(draftAppliedSnapshot).length > 0 ? (
+                    <Typography.Text type="secondary">
+                      {`已应用字段：${Object.keys(draftAppliedSnapshot).map((key) => PDF_FIELD_META[key as PdfFieldKey].label).join("、")}`}
+                    </Typography.Text>
+                  ) : null}
+                </Space>
+              </Card>
+            ) : null}
           </Card>
         </Col>
 
@@ -708,6 +1059,11 @@ export default function ClarificationReviewPage() {
                   </Tag>
                   <ProviderTag provider={activeRecord.llm_provider} />
                   <Typography.Text type="secondary">{toDateTimeText(activeRecord.created_at)}</Typography.Text>
+                  {activeRecord.llm_status === "success" ? (
+                    <Button size="small" icon={<DownloadOutlined />} onClick={handleExportMarkdown}>
+                      导出
+                    </Button>
+                  ) : null}
                 </Space>
               ) : null
             }
@@ -717,7 +1073,7 @@ export default function ClarificationReviewPage() {
             ) : !activeRecord ? (
               <Empty description="提交分析后在此查看结构化结果" />
             ) : (
-              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
                 {activeRecord.llm_status === "failed" ? (
                   <Alert
                     type="warning"
@@ -727,28 +1083,66 @@ export default function ClarificationReviewPage() {
                   />
                 ) : null}
 
-                <RuleLikeList
-                  title="推测的历史规则与隐含约束"
-                  emptyText="暂无识别结果"
-                  themeKey="history"
-                  items={activeRecord.result.likely_historical_rules}
-                  getTitle={(item) => item.rule || "-"}
-                  getMetaFields={(item) => [
-                    { label: "判断依据", value: item.reason || "-" },
-                  ]}
-                />
+                {activeRecord.source_meta ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message={activeRecord.source_meta.draft_expired ? "本次分析来源于已过期的 PDF 草稿" : "本次分析来源于 PDF 草稿"}
+                    description={`应用字段：${activeRecord.source_meta.applied_fields.length > 0 ? activeRecord.source_meta.applied_fields.map((field) => PDF_FIELD_META[field as PdfFieldKey]?.label || field).join("、") : "无"}`}
+                  />
+                ) : null}
+                {isResultV2 ? (
+                  <>
+                    <RuleLikeList
+                      title="合理推断"
+                      emptyText="暂无合理推断"
+                      themeKey="history"
+                      items={activeRecord.result.inferred_items || []}
+                      getTitle={(item) => item.statement || "-"}
+                      getMetaFields={(item) => [
+                        { label: "依据", value: item.evidence || "-" },
+                        { label: "来源", value: formatSourceTypeLabel(item.source_type) },
+                      ]}
+                    />
 
-                <RuleLikeList
-                  title="关键缺失规则"
-                  emptyText="暂无缺失规则"
-                  themeKey="missing"
-                  items={activeRecord.result.missing_critical_rules}
-                  getTitle={(item) => item.rule || "-"}
-                  getMetaFields={(item) => [
-                    { label: "缺失原因", value: item.why_missing || "-" },
-                    { label: "影响", value: item.impact || "-" },
-                  ]}
-                />
+                    <RuleLikeList
+                      title="风险假设"
+                      emptyText="暂无风险假设"
+                      themeKey="assumption"
+                      items={activeRecord.result.assumption_items || []}
+                      getTitle={(item) => item.assumption || "-"}
+                      getMetaFields={(item) => [
+                        { label: "依据", value: item.basis || "-" },
+                        { label: "风险", value: item.risk || "-" },
+                      ]}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <RuleLikeList
+                      title="推测的历史规则与隐含约束"
+                      emptyText="暂无识别结果"
+                      themeKey="history"
+                      items={activeRecord.result.likely_historical_rules}
+                      getTitle={(item) => item.rule || "-"}
+                      getMetaFields={(item) => [
+                        { label: "判断依据", value: item.reason || "-" },
+                      ]}
+                    />
+
+                    <RuleLikeList
+                      title="关键缺失规则"
+                      emptyText="暂无缺失规则"
+                      themeKey="missing"
+                      items={activeRecord.result.missing_critical_rules}
+                      getTitle={(item) => item.rule || "-"}
+                      getMetaFields={(item) => [
+                        { label: "缺失原因", value: item.why_missing || "-" },
+                        { label: "影响", value: item.impact || "-" },
+                      ]}
+                    />
+                  </>
+                )}
 
                 <Typography.Title level={5} style={{ margin: "4px 0 0" }}>
                   必须优先确认的问题清单
@@ -889,29 +1283,75 @@ export default function ClarificationReviewPage() {
                   }))}
                 />
 
-                <RuleLikeList
-                  title="目前已识别的需求缺陷"
-                  emptyText="暂无缺陷"
-                  themeKey="gap"
-                  items={activeRecord.result.known_requirement_gaps}
-                  getTitle={(item) => item.gap || "-"}
-                  getMetaFields={(item) => [
-                    { label: "原因", value: item.reason || "-" },
-                    { label: "影响", value: item.impact || "-" },
-                  ]}
-                />
+                {isResultV2 ? (
+                  <>
+                    <RuleLikeList
+                      title={GAP_PRIORITY_META.P0.title}
+                      emptyText={GAP_PRIORITY_META.P0.emptyText}
+                      themeKey={GAP_PRIORITY_META.P0.themeKey}
+                      items={groupedV2Gaps.P0}
+                      getTitle={(item) => item.gap || "-"}
+                      getMetaFields={(item) => [
+                        { label: "类型", value: formatGapType(item.gap_type) },
+                        { label: "原因", value: item.reason || "-" },
+                        { label: "影响", value: item.impact || "-" },
+                        { label: "阻塞说明", value: item.blocking_reason || "-" },
+                      ]}
+                    />
 
-                <RuleLikeList
-                  title="风险假设"
-                  emptyText="暂无风险假设"
-                  themeKey="assumption"
-                  items={activeRecord.result.risk_assumptions}
-                  getTitle={(item) => item.assumption || "-"}
-                  getMetaFields={(item) => [
-                    { label: "依据", value: item.basis || "-" },
-                    { label: "风险", value: item.risk || "-" },
-                  ]}
-                />
+                    <RuleLikeList
+                      title={GAP_PRIORITY_META.P1.title}
+                      emptyText={GAP_PRIORITY_META.P1.emptyText}
+                      themeKey={GAP_PRIORITY_META.P1.themeKey}
+                      items={groupedV2Gaps.P1}
+                      getTitle={(item) => item.gap || "-"}
+                      getMetaFields={(item) => [
+                        { label: "类型", value: formatGapType(item.gap_type) },
+                        { label: "原因", value: item.reason || "-" },
+                        { label: "影响", value: item.impact || "-" },
+                      ]}
+                    />
+
+                    <RuleLikeList
+                      title={GAP_PRIORITY_META.P2.title}
+                      emptyText={GAP_PRIORITY_META.P2.emptyText}
+                      themeKey={GAP_PRIORITY_META.P2.themeKey}
+                      items={groupedV2Gaps.P2}
+                      getTitle={(item) => item.gap || "-"}
+                      getMetaFields={(item) => [
+                        { label: "类型", value: formatGapType(item.gap_type) },
+                        { label: "原因", value: item.reason || "-" },
+                        { label: "影响", value: item.impact || "-" },
+                      ]}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <RuleLikeList
+                      title="目前已识别的需求缺陷"
+                      emptyText="暂无缺陷"
+                      themeKey="gap"
+                      items={activeRecord.result.known_requirement_gaps}
+                      getTitle={(item) => item.gap || "-"}
+                      getMetaFields={(item) => [
+                        { label: "原因", value: item.reason || "-" },
+                        { label: "影响", value: item.impact || "-" },
+                      ]}
+                    />
+
+                    <RuleLikeList
+                      title="风险假设"
+                      emptyText="暂无风险假设"
+                      themeKey="assumption"
+                      items={activeRecord.result.risk_assumptions}
+                      getTitle={(item) => item.assumption || "-"}
+                      getMetaFields={(item) => [
+                        { label: "依据", value: item.basis || "-" },
+                        { label: "风险", value: item.risk || "-" },
+                      ]}
+                    />
+                  </>
+                )}
 
                 <Card
                   size="small"
@@ -929,6 +1369,63 @@ export default function ClarificationReviewPage() {
           </Card>
         </Col>
       </Row>
+
+      <Modal
+        title="选择如何应用 PDF 草稿"
+        open={applyModalOpen}
+        onOk={handleApplyDraftToForm}
+        onCancel={() => setApplyModalOpen(false)}
+        okText="确认应用"
+        cancelText="取消"
+        width={860}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          {PDF_FIELD_KEYS.map((fieldKey) => {
+            const result = getDraftResultToApply(activeDraft);
+            const draftField = normalizeFieldValue(result?.fields[fieldKey]);
+            const currentValue = String(form.getFieldValue(fieldKey) || "").trim();
+            if (!currentValue && !draftField.value.trim()) return null;
+            return (
+              <Card key={fieldKey} size="small" style={{ borderRadius: 12 }}>
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Space wrap style={{ justifyContent: "space-between", width: "100%" }}>
+                    <Typography.Text strong>{PDF_FIELD_META[fieldKey].label}</Typography.Text>
+                    <select
+                      value={draftApplyModes[fieldKey] || "keep"}
+                      onChange={(event) =>
+                        setDraftApplyModes((current) => ({
+                          ...current,
+                          [fieldKey]: event.target.value as DraftApplyMode,
+                        }))
+                      }
+                      style={{ padding: "6px 8px", borderRadius: 8, borderColor: "#d9d9d9" }}
+                    >
+                      <option value="keep">保留当前</option>
+                      <option value="replace">使用 PDF</option>
+                      <option value="append">追加合并</option>
+                    </select>
+                  </Space>
+                  <div>
+                    <Typography.Text type="secondary">当前值</Typography.Text>
+                    <Typography.Paragraph style={{ marginBottom: 8, whiteSpace: "pre-wrap" }}>
+                      {currentValue || "空"}
+                    </Typography.Paragraph>
+                  </div>
+                  <div>
+                    <Typography.Text type="secondary">PDF 值</Typography.Text>
+                    <Typography.Paragraph style={{ marginBottom: 4, whiteSpace: "pre-wrap" }}>
+                      {draftField.value || "空"}
+                    </Typography.Paragraph>
+                    {hasMeaningfulText(draftField.evidence) ? (
+                      <Typography.Text type="secondary">{`证据：${draftField.evidence}`}</Typography.Text>
+                    ) : null}
+                  </div>
+                </Space>
+              </Card>
+            );
+          })}
+        </Space>
+      </Modal>
     </div>
   );
 }

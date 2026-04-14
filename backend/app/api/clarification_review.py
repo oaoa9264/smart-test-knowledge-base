@@ -9,13 +9,7 @@ from app.schemas.clarification_review import (
     ClarificationReviewRecordRead,
     ClarificationReviewRecordSummaryRead,
 )
-from app.services.clarification_review_service import (
-    analyze_clarification_review,
-    delete_clarification_review_record,
-    get_clarification_review_record,
-    list_clarification_review_records,
-    normalize_clarification_review_result,
-)
+from app.services import clarification_review_service
 
 
 router = APIRouter(prefix="/api/ai/clarification-review", tags=["clarification-review"])
@@ -41,15 +35,20 @@ def analyze_clarification_review_endpoint(
     ):
         raise HTTPException(status_code=400, detail="at least one known info field is required")
 
-    record = analyze_clarification_review(db=db, payload=payload)
+    record = clarification_review_service.analyze_clarification_review(db=db, payload=payload)
     return ClarificationReviewRecordRead(
         id=record.id,
         input_payload=record.input_payload_json,
         rule_text=record.rule_text,
-        result=normalize_clarification_review_result(json.loads(record.result_json), record.rule_text),
+        result=clarification_review_service.normalize_clarification_review_result(
+            json.loads(record.result_json),
+            record.rule_text,
+            allow_pdf_source=record.source_draft_id is not None,
+        ),
         llm_status=record.llm_status,
         llm_provider=record.llm_provider,
         llm_message=record.llm_message,
+        source_meta=record.source_meta_json,
         created_at=record.created_at,
     )
 
@@ -59,7 +58,7 @@ def list_clarification_review_records_endpoint(
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    records = list_clarification_review_records(db=db, limit=limit)
+    records = clarification_review_service.list_clarification_review_records(db=db, limit=limit)
     result = []
     for record in records:
         payload = json.loads(record.input_payload_json)
@@ -70,6 +69,7 @@ def list_clarification_review_records_endpoint(
                 llm_provider=record.llm_provider,
                 created_at=record.created_at,
                 requirement_text_preview=str(payload.get("requirement_text", "") or "")[:80],
+                source_meta=record.source_meta_json,
             )
         )
     return result
@@ -77,7 +77,7 @@ def list_clarification_review_records_endpoint(
 
 @router.delete("/records/{record_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_clarification_review_record_endpoint(record_id: int, db: Session = Depends(get_db)):
-    deleted = delete_clarification_review_record(db=db, record_id=record_id)
+    deleted = clarification_review_service.delete_clarification_review_record(db=db, record_id=record_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="record not found")
     return None
@@ -85,16 +85,21 @@ def delete_clarification_review_record_endpoint(record_id: int, db: Session = De
 
 @router.get("/records/{record_id}", response_model=ClarificationReviewRecordRead)
 def get_clarification_review_record_endpoint(record_id: int, db: Session = Depends(get_db)):
-    record = get_clarification_review_record(db=db, record_id=record_id)
+    record = clarification_review_service.get_clarification_review_record(db=db, record_id=record_id)
     if not record:
         raise HTTPException(status_code=404, detail="record not found")
     return ClarificationReviewRecordRead(
         id=record.id,
         input_payload=record.input_payload_json,
         rule_text=record.rule_text,
-        result=normalize_clarification_review_result(json.loads(record.result_json), record.rule_text),
+        result=clarification_review_service.normalize_clarification_review_result(
+            json.loads(record.result_json),
+            record.rule_text,
+            allow_pdf_source=record.source_draft_id is not None,
+        ),
         llm_status=record.llm_status,
         llm_provider=record.llm_provider,
         llm_message=record.llm_message,
+        source_meta=record.source_meta_json,
         created_at=record.created_at,
     )

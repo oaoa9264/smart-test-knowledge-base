@@ -323,7 +323,35 @@ class ClarificationReviewRecord(Base):
     llm_status = Column(String(20), nullable=False, default="failed")
     llm_provider = Column(String(64), nullable=True)
     llm_message = Column(Text, nullable=True)
+    source_draft_id = Column(Integer, nullable=True, index=True)
+    source_meta_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ClarificationReviewPdfDraft(Base):
+    __tablename__ = "clarification_review_pdf_drafts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_name = Column(String(255), nullable=False)
+    file_size_bytes = Column(Integer, nullable=False)
+    page_count = Column(Integer, nullable=False)
+    status = Column(String(32), nullable=False, default="pending", index=True)
+    llm_status = Column(String(20), nullable=False, default="failed")
+    llm_provider = Column(String(64), nullable=True)
+    llm_message = Column(Text, nullable=True)
+    infer_llm_status = Column(String(20), nullable=True)
+    infer_llm_provider = Column(String(64), nullable=True)
+    infer_llm_message = Column(Text, nullable=True)
+    full_text_json = Column(Text, nullable=True)
+    page_text_stats_json = Column(Text, nullable=True)
+    selected_page_indexes_json = Column(Text, nullable=True)
+    rendered_page_paths_json = Column(Text, nullable=True)
+    vision_notes_json = Column(Text, nullable=True)
+    strict_result_json = Column(Text, nullable=True)
+    inference_result_json = Column(Text, nullable=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
 class RecoRun(Base):

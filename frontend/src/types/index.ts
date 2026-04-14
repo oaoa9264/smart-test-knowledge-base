@@ -3,6 +3,7 @@ export type NodeType = "root" | "condition" | "branch" | "action" | "exception";
 export type NodeStatus = "active" | "modified" | "deleted";
 export type TestCaseStatus = "active" | "needs_review" | "invalidated";
 export type LLMStatus = "success" | "failed";
+export type DraftStatus = "pending" | "extracting" | "partial_success" | "success" | "failed";
 
 export interface LLMExecutionMeta {
   llm_status?: LLMStatus | null;
@@ -348,12 +349,16 @@ export interface ClarificationReviewAnalyzeRequest {
   known_background: string;
   unknowns: string;
   rule_text: string;
+  source_draft_id?: number;
+  applied_fields?: string[];
 }
 
 export interface ClarificationReviewQuestionItem {
   question: string;
   why_ask: string;
   risk_if_unasked: string;
+  required_output?: string;
+  answer_format?: "table" | "flow" | "text" | "";
 }
 
 export interface ClarificationReviewRuleItem {
@@ -371,6 +376,9 @@ export interface ClarificationReviewGapItem {
   gap: string;
   reason: string;
   impact: string;
+  gap_type?: "rule_missing" | "logic_gap" | "boundary_undefined" | "data_missing" | "process_gap" | "";
+  priority?: "P0" | "P1" | "P2" | "";
+  blocking_reason?: string;
 }
 
 export interface ClarificationReviewAssumptionItem {
@@ -379,12 +387,21 @@ export interface ClarificationReviewAssumptionItem {
   risk: string;
 }
 
+export interface ClarificationReviewInferredItem {
+  statement: string;
+  evidence: string;
+  source_type: "input_text" | "llm_inference" | "pdf_draft";
+}
+
 export interface ClarificationReviewRoleDescriptorItem {
   key: string;
   source: string;
 }
 
 export interface ClarificationReviewResult extends LLMExecutionMeta {
+  result_version?: number | null;
+  inferred_items?: ClarificationReviewInferredItem[];
+  assumption_items?: ClarificationReviewAssumptionItem[];
   likely_historical_rules: ClarificationReviewRuleItem[];
   missing_critical_rules: ClarificationReviewMissingRuleItem[];
   priority_questions_by_role: Record<string, ClarificationReviewQuestionItem[]>;
@@ -395,22 +412,68 @@ export interface ClarificationReviewResult extends LLMExecutionMeta {
   summary_markdown: string;
 }
 
+export interface ClarificationReviewSourceMeta {
+  source_kind: "pdf_draft";
+  draft_id: number;
+  file_name: string | null;
+  draft_created_at: string | null;
+  draft_expired: boolean;
+  applied_fields: string[];
+}
+
+export interface ClarificationReviewPdfField {
+  value: string;
+  evidence: string;
+}
+
+export interface ClarificationReviewPdfConflict {
+  field: string;
+  description: string;
+  evidence: string;
+}
+
+export interface ClarificationReviewPdfResult {
+  fields: Record<string, ClarificationReviewPdfField>;
+  conflicts: ClarificationReviewPdfConflict[];
+}
+
+export interface ClarificationReviewPdfDraft {
+  id: number;
+  file_name: string;
+  file_size_bytes: number;
+  page_count: number;
+  status: DraftStatus;
+  llm_status: LLMStatus | null;
+  llm_provider: string | null;
+  llm_message: string | null;
+  infer_llm_status: LLMStatus | null;
+  infer_llm_provider: string | null;
+  infer_llm_message: string | null;
+  strict_result: ClarificationReviewPdfResult | null;
+  inference_result: ClarificationReviewPdfResult | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ClarificationReviewRecordSummary {
   id: number;
   llm_status: LLMStatus;
   llm_provider: string | null;
   created_at: string;
   requirement_text_preview: string;
+  source_meta: ClarificationReviewSourceMeta | null;
 }
 
 export interface ClarificationReviewRecord {
   id: number;
-  input_payload: Omit<ClarificationReviewAnalyzeRequest, "rule_text">;
+  input_payload: Omit<ClarificationReviewAnalyzeRequest, "rule_text" | "source_draft_id" | "applied_fields">;
   rule_text: string;
   result: ClarificationReviewResult;
   llm_status: LLMStatus;
   llm_provider: string | null;
   llm_message: string | null;
+  source_meta: ClarificationReviewSourceMeta | null;
   created_at: string;
 }
 

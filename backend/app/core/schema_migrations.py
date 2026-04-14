@@ -196,3 +196,24 @@ def ensure_hierarchical_knowledge_columns(engine: Engine) -> None:
                 "ON product_doc_chunks (chain_key)"
             )
         )
+
+
+def ensure_clarification_review_source_columns(engine: Engine) -> None:
+    _ensure_additive_columns(
+        engine,
+        "clarification_review_records",
+        {
+            "source_draft_id": "source_draft_id INTEGER",
+            "source_meta_json": "source_meta_json TEXT",
+        },
+    )
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "clarification_review_records" not in inspector.get_table_names():
+            return
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_clarification_review_records_source_draft_id "
+                "ON clarification_review_records (source_draft_id)"
+            )
+        )

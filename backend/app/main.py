@@ -56,6 +56,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.architecture import BACKEND_DIR, router as architecture_router
 from app.api.ai_parse import router as ai_router
 from app.api.clarification_review import router as clarification_review_router
+from app.api.clarification_review_pdf import router as clarification_review_pdf_router
 from app.api.coverage import router as coverage_router
 from app.api.effective_requirements import router as effective_requirements_router
 from app.api.evidence_blocks import router as evidence_blocks_router
@@ -75,6 +76,7 @@ from app.api.testcases import router as testcase_router
 from app.api.tree_diff import router as tree_diff_router
 from app.core.database import SessionLocal, engine
 from app.core.schema_migrations import (
+    ensure_clarification_review_source_columns,
     ensure_requirement_source_type_values,
     ensure_product_knowledge_columns,
     ensure_hierarchical_knowledge_columns,
@@ -92,6 +94,7 @@ from app.models.entities import (
     RuleTreeSession,
     RuleTreeSessionStatus,
 )
+from app.services.pdf_draft_service import cleanup_expired_drafts
 
 Base.metadata.create_all(bind=engine)
 ensure_requirements_versioning_columns(engine)
@@ -102,6 +105,7 @@ ensure_risk_analysis_task_columns(engine)
 ensure_product_knowledge_columns(engine)
 ensure_risk_convergence_columns(engine)
 ensure_hierarchical_knowledge_columns(engine)
+ensure_clarification_review_source_columns(engine)
 
 app = FastAPI(title="Test Knowledge Base MVP", version="0.1.0")
 app.state.ready = False
@@ -213,6 +217,8 @@ def _startup() -> None:
     recover_interrupted_rule_tree_sessions()
     recover_interrupted_risk_analysis_tasks()
     recover_interrupted_normalized_requirement_doc_tasks()
+    with SessionLocal() as db:
+        cleanup_expired_drafts(db)
 
     # 2. Sync knowledge base
     from app.services.knowledge_base_importer import import_all_domains
@@ -272,6 +278,7 @@ app.include_router(coverage_router)
 app.include_router(recommendation_router)
 app.include_router(ai_router)
 app.include_router(clarification_review_router)
+app.include_router(clarification_review_pdf_router)
 app.include_router(architecture_router)
 app.include_router(risk_router)
 app.include_router(test_plan_router)
