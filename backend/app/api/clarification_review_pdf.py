@@ -20,6 +20,8 @@ def create_pdf_draft_endpoint(
         draft = pdf_draft_service.create_pdf_draft(db=db, file=file)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise _runtime_dependency_http_error(exc) from exc
     return _serialize_pdf_draft(draft)
 
 
@@ -40,6 +42,8 @@ def infer_pdf_draft_endpoint(draft_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="pdf draft not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise _runtime_dependency_http_error(exc) from exc
     return _serialize_pdf_draft(draft)
 
 
@@ -70,3 +74,7 @@ def _decode_result(value):
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+def _runtime_dependency_http_error(exc: RuntimeError) -> HTTPException:
+    return HTTPException(status_code=503, detail=str(exc))

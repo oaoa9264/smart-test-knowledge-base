@@ -184,6 +184,24 @@ def test_pdf_draft_create_degrades_when_vision_fails(monkeypatch):
     assert resp.json()["llm_status"] == "success"
 
 
+def test_pdf_draft_create_returns_503_when_pdf_dependency_is_missing(monkeypatch):
+    from app.services import pdf_draft_service
+
+    def _fake_create(db, file):
+        del db, file
+        raise RuntimeError("pypdf is required for PDF validation")
+
+    monkeypatch.setattr(pdf_draft_service, "create_pdf_draft", _fake_create)
+
+    resp = client.post(
+        "/api/ai/clarification-review/pdf-drafts",
+        files=_multipart_upload("clarification.pdf", _build_pdf_bytes(page_count=1)),
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "pypdf is required for PDF validation"
+
+
 def test_pdf_draft_infer_returns_inference_result(monkeypatch):
     from app.services import pdf_draft_service
 
