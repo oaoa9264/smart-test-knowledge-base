@@ -12,3 +12,4 @@ xmindparser==1.0.9
 pypdf==6.10.0
 pypdfium2==5.7.0
 Pillow==11.3.0
+APScheduler==3.10.4

@@ -11,6 +11,10 @@ class ClarificationReviewQuestionItem(BaseModel):
     risk_if_unasked: str
     required_output: str = ""
     answer_format: str = ""
+    resolution_status: Optional[str] = None
+    resolution_note: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
 
 
 class ClarificationReviewRuleItem(BaseModel):
@@ -31,12 +35,20 @@ class ClarificationReviewGapItem(BaseModel):
     gap_type: str = ""
     priority: str = ""
     blocking_reason: str = ""
+    resolution_status: Optional[str] = None
+    resolution_note: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
 
 
 class ClarificationReviewAssumptionItem(BaseModel):
     assumption: str
     basis: str
     risk: str
+    resolution_status: Optional[str] = None
+    resolution_note: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
 
 
 class ClarificationReviewInferredItem(BaseModel):
@@ -48,6 +60,13 @@ class ClarificationReviewInferredItem(BaseModel):
 class ClarificationReviewRoleDescriptorItem(BaseModel):
     key: str
     source: str
+
+
+class LLMErrorDetail(BaseModel):
+    code: str
+    message: str
+    retryable: bool
+    detail_url: Optional[str] = None
 
 
 class ClarificationReviewResult(BaseModel):
@@ -65,6 +84,7 @@ class ClarificationReviewResult(BaseModel):
     llm_status: Optional[str] = None
     llm_provider: Optional[str] = None
     llm_message: Optional[str] = None
+    llm_error: Optional[LLMErrorDetail] = None
 
 
 class ClarificationReviewAnalyzeRequest(BaseModel):
@@ -92,7 +112,10 @@ class ClarificationReviewRecordSummaryRead(BaseModel):
     llm_provider: Optional[str] = None
     created_at: datetime
     requirement_text_preview: str
+    task_status: str = "completed"
+    progress_percent: Optional[int] = None
     source_meta: Optional["ClarificationReviewSourceMeta"] = None
+    generated_requirement_id: Optional[int] = None
 
     @validator("source_meta", pre=True)
     def _parse_source_meta(cls, v):
@@ -109,7 +132,11 @@ class ClarificationReviewRecordRead(BaseModel):
     llm_status: str
     llm_provider: Optional[str] = None
     llm_message: Optional[str] = None
+    task_status: str = "completed"
+    progress_message: Optional[str] = None
+    progress_percent: Optional[int] = None
     source_meta: Optional["ClarificationReviewSourceMeta"] = None
+    generated_requirement_id: Optional[int] = None
     created_at: datetime
 
     @validator("input_payload", pre=True)
@@ -145,3 +172,21 @@ class ClarificationReviewSourceMeta(BaseModel):
 
 ClarificationReviewRecordSummaryRead.update_forward_refs()
 ClarificationReviewRecordRead.update_forward_refs()
+
+
+class ClarificationReviewItemResolutionUpdate(BaseModel):
+    item_type: str  # "gap" | "assumption" | "question"
+    role: Optional[str] = None  # required when item_type="question"
+    index: int
+    resolution_status: str  # "pending" | "confirmed" | "assume_and_proceed" | "dismissed"
+    resolution_note: str = ""
+    resolved_by: str = ""
+
+
+class ClarificationReviewItemResolutionBatchRequest(BaseModel):
+    updates: List[ClarificationReviewItemResolutionUpdate]
+
+
+class CreateRequirementFromReviewRequest(BaseModel):
+    project_id: int
+    title: str = ""

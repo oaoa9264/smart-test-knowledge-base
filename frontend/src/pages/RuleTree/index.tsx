@@ -5,6 +5,7 @@ import {
   Divider,
   Drawer,
   Dropdown,
+  Empty,
   Form,
   Input,
   InputNumber,
@@ -52,6 +53,8 @@ import {
 import { createRuleNode, deleteRuleNode, fetchRuleTree, updateRuleNode } from "../../api/rules";
 import { deleteDiffRecord, fetchDiffHistory, fetchSemanticDiff } from "../../api/treeDiff";
 import { useAppStore } from "../../stores/appStore";
+import TaskProgressBar from "../../components/TaskProgressBar";
+import { trackEvent } from "../../utils/telemetry";
 import type {
   DiffRecordRead,
   DecisionTreeNode,
@@ -1348,6 +1351,7 @@ export default function RuleTreePage() {
     }
 
     setSessionLoading(true);
+    trackEvent("ruletree.generate.start", { session_id: selectedSessionId });
     try {
       const rawFile = sessionImageFile[0]?.originFileObj as File | undefined;
       const accepted = await generateRuleTreeSession(selectedSessionId, {
@@ -1365,8 +1369,13 @@ export default function RuleTreePage() {
       setSessionConfirmed(false);
       await loadSessionDetail(selectedSessionId);
       message.success("已开始后台生成规则树");
+      trackEvent("ruletree.generate.complete", { session_id: selectedSessionId });
     } catch (error) {
       message.error(getErrorMessage(error, "会话生成失败"));
+      trackEvent("ruletree.generate.failure", {
+        session_id: selectedSessionId,
+        message: getErrorMessage(error, ""),
+      });
     } finally {
       setSessionLoading(false);
     }
@@ -1894,7 +1903,61 @@ export default function RuleTreePage() {
       )}
 
       {!activeRequirementId ? (
-        <Alert type="info" message="请先在顶部选择需求" />
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            border: "1px dashed #d7e2ee",
+            borderRadius: 12,
+            background: "#fafcff",
+          }}
+        >
+          <Empty
+            description={
+              <Space direction="vertical" size={4} style={{ textAlign: "center" }}>
+                <Typography.Text strong>请先在顶部选择需求版本</Typography.Text>
+                <Typography.Text type="secondary">
+                  如果当前项目下还没有需求，请先到「项目与需求」页面创建需求，或在「追问分析」中通过澄清结果一键生成需求。
+                </Typography.Text>
+              </Space>
+            }
+          />
+        </div>
+      ) : domainNodes.length === 0 && !versionLoading ? (
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            border: "1px dashed #d7e2ee",
+            borderRadius: 12,
+            background: "#fafcff",
+          }}
+        >
+          <Empty
+            description={
+              <Space direction="vertical" size={8} style={{ textAlign: "center" }}>
+                <Typography.Text strong>当前需求还没有规则树节点</Typography.Text>
+                <Typography.Text type="secondary">
+                  可以通过「AI 生成规则树」快速生成，也可以点击「新增节点」手动搭建。
+                </Typography.Text>
+                <Space>
+                  {!isReadonlyVersion && (
+                    <Button type="primary" onClick={() => setCreateOpen(true)}>
+                      新增节点
+                    </Button>
+                  )}
+                  <Button icon={<RobotOutlined />} onClick={openSessionPanel}>
+                    AI 生成规则树
+                  </Button>
+                </Space>
+              </Space>
+            }
+          />
+        </div>
       ) : (
         <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
           <div
@@ -2246,11 +2309,13 @@ export default function RuleTreePage() {
             )}
 
             {currentRuleTreeSessionInProgress && (
-              <Alert
-                type="info"
-                showIcon
+              <TaskProgressBar
+                title="规则树生成中"
+                description="页面会自动轮询最新状态，刷新或重新进入会话可恢复进度。"
                 message={currentRuleTreeSession.progress_message || "后台正在生成规则树"}
-                description="页面会自动轮询最新状态，刷新后重新进入会话也可以恢复当前进度。"
+                percent={currentRuleTreeSession.progress_percent ?? undefined}
+                indeterminate={currentRuleTreeSession.progress_percent == null}
+                status="running"
               />
             )}
 

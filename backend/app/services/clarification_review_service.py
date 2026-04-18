@@ -1,14 +1,21 @@
 import json
 import logging
 import re
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from app.models.entities import ClarificationReviewPdfDraft, ClarificationReviewRecord
+from app.core.database import SessionLocal
+from app.models.entities import ClarificationReviewPdfDraft, ClarificationReviewRecord, InputType, Project, Requirement, RequirementInput, SourceType
 from app.schemas.clarification_review import ClarificationReviewAnalyzeRequest
-from app.services.llm_result_helpers import build_llm_failure_meta, build_llm_success_meta
+from app.services.llm_result_helpers import (
+    DEFAULT_LLM_FAILURE_MESSAGE as DEFAULT_LLM_FAILURE_MESSAGE_FALLBACK,
+    build_llm_failure_meta,
+    build_llm_success_meta,
+    classify_llm_exception,
+)
 from app.services.llm_client import LLMClient
 from app.services.pdf_draft_service import PdfDraftNotFoundError, get_pdf_draft
 from app.services.prompts.clarification_review import (
@@ -72,6 +79,19 @@ GAP_TYPES = {"rule_missing", "logic_gap", "boundary_undefined", "data_missing", 
 GAP_FALLBACK_TYPE = "logic_gap"
 GAP_PRIORITIES = {"P0", "P1", "P2"}
 
+RESOLUTION_STATUSES = {"pending", "confirmed", "assume_and_proceed", "dismissed"}
+RESOLUTION_KEYS = ("resolution_status", "resolution_note", "resolved_by", "resolved_at")
+
+
+def _copy_resolution_fields(source: Dict[str, Any], target: Dict[str, str]) -> None:
+    """Copy resolution tracking fields from source dict to target, if present."""
+    status = str(source.get("resolution_status", "") or "").strip()
+    if status and status in RESOLUTION_STATUSES:
+        target["resolution_status"] = status
+        target["resolution_note"] = str(source.get("resolution_note", "") or "")
+        target["resolved_by"] = str(source.get("resolved_by", "") or "")
+        target["resolved_at"] = str(source.get("resolved_at", "") or "")
+
 
 def analyze_clarification_review(
     db: Session,
@@ -86,54 +106,116 @@ def analyze_clarification_review(
         "unknowns": payload.unknowns,
     }
     configured_roles = _extract_configured_roles(payload.rule_text)
-    result = _empty_result(configured_roles, result_version=RESULT_VERSION_V2)
-    meta = build_llm_failure_meta()
+    empty = _empty_result(configured_roles, result_version=RESULT_VERSION_V2)
 
-    if _has_any_input(input_payload):
-        try:
-            llm = llm_client or LLMClient()
-            user_prompt = CLARIFICATION_REVIEW_USER_TEMPLATE.format(
-                rule_text=payload.rule_text,
-                **input_payload,
-            )
-            draft = _get_valid_pdf_draft_or_none(db, payload.source_draft_id)
-            pdf_supplement = _build_pdf_supplement(draft=draft, applied_fields=payload.applied_fields or [])
-            if pdf_supplement:
-                user_prompt = "{0}\n\n{1}".format(user_prompt, pdf_supplement)
-            result = llm.chat_with_json(
-                system_prompt=build_clarification_review_system_prompt(configured_roles),
-                user_prompt=user_prompt,
-            )
-            provider = _resolve_provider_from_llm(llm)
-            meta = build_llm_success_meta(provider)
-        except Exception as exc:
-            logger.warning("clarification review llm failed: %s", exc)
-            result = _empty_result(configured_roles, result_version=RESULT_VERSION_V2)
-            meta = build_llm_failure_meta(str(exc) or None)
-
-    result = _normalize_result(
-        result,
-        meta,
-        configured_roles,
-        force_result_version=RESULT_VERSION_V2,
-        allow_pdf_source=payload.source_draft_id is not None,
-    )
     record = ClarificationReviewRecord(
         input_payload_json=json.dumps(input_payload, ensure_ascii=False),
         rule_text=payload.rule_text,
-        result_json=json.dumps(result, ensure_ascii=False),
-        llm_status=result["llm_status"],
-        llm_provider=result["llm_provider"],
-        llm_message=result["llm_message"],
+        result_json=json.dumps(empty, ensure_ascii=False),
+        llm_status="failed",
+        llm_provider=None,
+        llm_message=None,
         source_draft_id=payload.source_draft_id,
         source_meta_json=json.dumps(_build_source_meta(db, payload), ensure_ascii=False)
         if payload.source_draft_id is not None
         else None,
+        task_status="queued",
+        progress_message="已接受追问分析任务，等待开始执行",
+        progress_percent=5,
     )
     db.add(record)
     db.commit()
     db.refresh(record)
+
+    _launch_analyze_worker(record.id)
     return record
+
+
+def _launch_analyze_worker(record_id: int) -> None:
+    worker = threading.Thread(
+        target=_run_analyze_task,
+        kwargs={"record_id": record_id},
+        daemon=True,
+    )
+    worker.start()
+
+
+def _run_analyze_task(record_id: int) -> None:
+    db = SessionLocal()
+    try:
+        record = db.query(ClarificationReviewRecord).filter(ClarificationReviewRecord.id == record_id).first()
+        if not record:
+            return
+
+        record.task_status = "running"
+        record.progress_message = "正在执行追问分析"
+        record.progress_percent = 30
+        record.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(record)
+
+        payload_dict = json.loads(record.input_payload_json)
+        configured_roles = _extract_configured_roles(record.rule_text)
+        result = _empty_result(configured_roles, result_version=RESULT_VERSION_V2)
+        meta = build_llm_failure_meta()
+
+        if _has_any_input(payload_dict):
+            try:
+                llm = LLMClient()
+                user_prompt = CLARIFICATION_REVIEW_USER_TEMPLATE.format(
+                    rule_text=record.rule_text,
+                    **payload_dict,
+                )
+                draft = _get_valid_pdf_draft_or_none(db, record.source_draft_id)
+                applied_fields = []
+                if record.source_meta_json:
+                    source_meta = json.loads(record.source_meta_json)
+                    applied_fields = source_meta.get("applied_fields", [])
+                pdf_supplement = _build_pdf_supplement(draft=draft, applied_fields=applied_fields)
+                if pdf_supplement:
+                    user_prompt = "{0}\n\n{1}".format(user_prompt, pdf_supplement)
+                result = llm.chat_with_json(
+                    system_prompt=build_clarification_review_system_prompt(configured_roles),
+                    user_prompt=user_prompt,
+                )
+                provider = _resolve_provider_from_llm(llm)
+                meta = build_llm_success_meta(provider)
+            except Exception as exc:
+                logger.warning("clarification review llm failed: %s", exc)
+                result = _empty_result(configured_roles, result_version=RESULT_VERSION_V2)
+                meta = build_llm_failure_meta(
+                    message=str(exc) or DEFAULT_LLM_FAILURE_MESSAGE_FALLBACK,
+                    code=classify_llm_exception(exc),
+                )
+
+        result = _normalize_result(
+            result,
+            meta,
+            configured_roles,
+            force_result_version=RESULT_VERSION_V2,
+            allow_pdf_source=record.source_draft_id is not None,
+        )
+        record.result_json = json.dumps(result, ensure_ascii=False)
+        record.llm_status = result["llm_status"]
+        record.llm_provider = result["llm_provider"]
+        record.llm_message = result["llm_message"]
+        record.task_status = "completed"
+        record.progress_message = "追问分析完成"
+        record.progress_percent = 100
+        record.updated_at = datetime.utcnow()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        record = db.query(ClarificationReviewRecord).filter(ClarificationReviewRecord.id == record_id).first()
+        if record:
+            record.task_status = "failed"
+            record.progress_message = "追问分析执行失败"
+            record.progress_percent = 100
+            record.llm_message = str(exc)
+            record.updated_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
 
 
 def list_clarification_review_records(db: Session, limit: int = 20):
@@ -157,6 +239,237 @@ def delete_clarification_review_record(db: Session, record_id: int) -> bool:
     db.delete(record)
     db.commit()
     return True
+
+
+class ItemResolutionError(Exception):
+    pass
+
+
+def update_item_resolutions(db: Session, record_id: int, updates: List[Dict[str, Any]]) -> ClarificationReviewRecord:
+    record = db.query(ClarificationReviewRecord).filter(ClarificationReviewRecord.id == record_id).first()
+    if not record:
+        raise ItemResolutionError("record not found")
+
+    result = json.loads(record.result_json) if record.result_json else {}
+    now = datetime.utcnow().isoformat()
+
+    for update in updates:
+        item_type = update.get("item_type")
+        index = update.get("index")
+        role = update.get("role")
+        status = update.get("resolution_status", "pending")
+
+        if status not in RESOLUTION_STATUSES:
+            raise ItemResolutionError("invalid resolution_status: {0}".format(status))
+
+        if item_type == "gap":
+            items = result.get("known_requirement_gaps", [])
+        elif item_type == "assumption":
+            items = result.get("assumption_items", [])
+        elif item_type == "question":
+            if not role:
+                raise ItemResolutionError("role is required for question items")
+            role_questions = result.get("priority_questions_by_role", {})
+            items = role_questions.get(role, [])
+        else:
+            raise ItemResolutionError("invalid item_type: {0}".format(item_type))
+
+        if not isinstance(index, int) or index < 0 or index >= len(items):
+            raise ItemResolutionError("index {0} out of range for {1}".format(index, item_type))
+
+        items[index]["resolution_status"] = status
+        items[index]["resolution_note"] = str(update.get("resolution_note", "") or "")
+        items[index]["resolved_by"] = str(update.get("resolved_by", "") or "")
+        items[index]["resolved_at"] = now
+
+    record.result_json = json.dumps(result, ensure_ascii=False)
+    record.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+class CreateRequirementError(Exception):
+    pass
+
+
+def create_requirement_from_review(
+    db: Session,
+    record_id: int,
+    project_id: int,
+    title: str = "",
+) -> Requirement:
+    record = db.query(ClarificationReviewRecord).filter(ClarificationReviewRecord.id == record_id).first()
+    if not record:
+        raise CreateRequirementError("record not found")
+    if record.task_status != "completed":
+        raise CreateRequirementError("record task is not completed")
+    if record.generated_requirement_id is not None:
+        raise CreateRequirementError("requirement already created for this record")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise CreateRequirementError("project not found")
+
+    input_payload = json.loads(record.input_payload_json) if record.input_payload_json else {}
+    result = json.loads(record.result_json) if record.result_json else {}
+
+    requirement_text = str(input_payload.get("requirement_text", "") or "")
+    current_surface_flow = str(input_payload.get("current_surface_flow", "") or "")
+    involved_modules = str(input_payload.get("involved_modules", "") or "")
+    known_background = str(input_payload.get("known_background", "") or "")
+    unknowns = str(input_payload.get("unknowns", "") or "")
+
+    # Build raw_text sections
+    sections = []
+    sections.append("## 需求原文\n{0}".format(requirement_text or "（无）"))
+    if current_surface_flow.strip():
+        sections.append("## 当前表面流程\n{0}".format(current_surface_flow))
+    if involved_modules.strip():
+        sections.append("## 涉及模块\n{0}".format(involved_modules))
+    if known_background.strip():
+        sections.append("## 已知背景\n{0}".format(known_background))
+    if unknowns.strip():
+        sections.append("## 暂时不知道的内容\n{0}".format(unknowns))
+
+    # Inferred items
+    inferred_items = result.get("inferred_items", [])
+    if inferred_items:
+        lines = []
+        for item in inferred_items:
+            statement = str(item.get("statement", "") or "").strip()
+            evidence = str(item.get("evidence", "") or "").strip()
+            if statement:
+                lines.append("- {0}（依据：{1}）".format(statement, evidence or "无"))
+        if lines:
+            sections.append("## 合理推断（来自追问分析）\n{0}".format("\n".join(lines)))
+
+    # Collect items by resolution_status
+    confirmed_lines = []
+    assumption_lines = []
+    pending_lines = []
+
+    for gap in result.get("known_requirement_gaps", []):
+        status = str(gap.get("resolution_status", "") or "").strip()
+        text = str(gap.get("gap", "") or "").strip()
+        note = str(gap.get("resolution_note", "") or "").strip()
+        label = "缺陷：{0}".format(text)
+        if note:
+            label = "{0}（备注：{1}）".format(label, note)
+        if status == "confirmed":
+            confirmed_lines.append("- {0}".format(label))
+        elif status == "assume_and_proceed":
+            assumption_lines.append("- {0}".format(label))
+        elif status == "pending" or not status:
+            pending_lines.append("- {0}".format(label))
+
+    for assumption in result.get("assumption_items", []):
+        status = str(assumption.get("resolution_status", "") or "").strip()
+        text = str(assumption.get("assumption", "") or "").strip()
+        note = str(assumption.get("resolution_note", "") or "").strip()
+        label = "假设：{0}".format(text)
+        if note:
+            label = "{0}（备注：{1}）".format(label, note)
+        if status == "confirmed":
+            confirmed_lines.append("- {0}".format(label))
+        elif status == "assume_and_proceed":
+            assumption_lines.append("- {0}".format(label))
+        elif status == "pending" or not status:
+            pending_lines.append("- {0}".format(label))
+
+    for role, questions in result.get("priority_questions_by_role", {}).items():
+        for q in questions:
+            status = str(q.get("resolution_status", "") or "").strip()
+            text = str(q.get("question", "") or "").strip()
+            note = str(q.get("resolution_note", "") or "").strip()
+            label = "追问（{0}）：{1}".format(role, text)
+            if note:
+                label = "{0}（备注：{1}）".format(label, note)
+            if status == "confirmed":
+                confirmed_lines.append("- {0}".format(label))
+            elif status == "assume_and_proceed":
+                assumption_lines.append("- {0}".format(label))
+            elif status == "pending" or not status:
+                pending_lines.append("- {0}".format(label))
+
+    if confirmed_lines:
+        sections.append("## 已确认的澄清结论\n{0}".format("\n".join(confirmed_lines)))
+    if assumption_lines:
+        sections.append("## 按假设推进的项目\n{0}".format(
+            "\n".join("{0} ⚠️ 假设".format(line) for line in assumption_lines)
+        ))
+
+    raw_text = "\n\n".join(sections)
+
+    # Generate title
+    if not title.strip():
+        title = requirement_text[:60].strip() or "追问分析 #{0}".format(record_id)
+
+    # Create Requirement
+    requirement = Requirement(
+        project_id=project_id,
+        title=title,
+        raw_text=raw_text,
+        source_type=SourceType.prd,
+    )
+    db.add(requirement)
+    db.flush()
+
+    # Create RequirementInput: raw_requirement
+    db.add(RequirementInput(
+        requirement_id=requirement.id,
+        input_type=InputType.raw_requirement,
+        content=raw_text,
+        source_label="requirement.raw_text",
+    ))
+
+    # Create RequirementInputs by resolution_status
+    source_label = "追问分析 #{0}".format(record_id)
+    created_by = "system/clarification_review"
+
+    if confirmed_lines:
+        db.add(RequirementInput(
+            requirement_id=requirement.id,
+            input_type=InputType.clarification_confirmed,
+            content="\n".join(confirmed_lines),
+            source_label=source_label,
+            created_by=created_by,
+        ))
+    if assumption_lines:
+        db.add(RequirementInput(
+            requirement_id=requirement.id,
+            input_type=InputType.clarification_assumption,
+            content="\n".join(assumption_lines),
+            source_label=source_label,
+            created_by=created_by,
+        ))
+    if pending_lines:
+        db.add(RequirementInput(
+            requirement_id=requirement.id,
+            input_type=InputType.clarification_pending,
+            content="\n".join(pending_lines),
+            source_label=source_label,
+            created_by=created_by,
+        ))
+
+    # Link record to requirement
+    record.generated_requirement_id = requirement.id
+    record.updated_at = datetime.utcnow()
+
+    # Also link the originating PDF draft (if any) so orphan cleanup spares it.
+    if record.source_draft_id is not None:
+        draft = (
+            db.query(ClarificationReviewPdfDraft)
+            .filter(ClarificationReviewPdfDraft.id == record.source_draft_id)
+            .first()
+        )
+        if draft is not None:
+            draft.generated_requirement_id = requirement.id
+            draft.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(requirement)
+    return requirement
 
 
 def normalize_clarification_review_result(result: Any, rule_text: str, allow_pdf_source: bool = False) -> Dict[str, Any]:
@@ -398,11 +711,18 @@ def _normalize_list_of_dicts(payload: Any, keys) -> list:
 
 
 def _normalize_question_items(payload: Any) -> List[Dict[str, str]]:
-    items = _normalize_list_of_dicts(payload, ("question", "why_ask", "risk_if_unasked", "required_output", "answer_format"))
-    for item in items:
+    if not isinstance(payload, list):
+        return []
+    items = []
+    for raw_item in payload:
+        if not isinstance(raw_item, dict):
+            continue
+        item = {key: str(raw_item.get(key, "") or "") for key in ("question", "why_ask", "risk_if_unasked", "required_output", "answer_format")}
         answer_format = str(item.get("answer_format", "") or "").strip()
         item["answer_format"] = answer_format if answer_format in QUESTION_ANSWER_FORMATS else "text"
         item["required_output"] = str(item.get("required_output", "") or "")
+        _copy_resolution_fields(raw_item, item)
+        items.append(item)
     return items
 
 
@@ -424,47 +744,55 @@ def _normalize_inferred_items(payload: Any, allow_pdf_source: bool) -> List[Dict
 
 
 def _normalize_assumption_items(payload: Any) -> List[Dict[str, str]]:
-    items = _normalize_list_of_dicts(payload, ("assumption", "basis", "risk"))
-    return [
-        {
-            "assumption": str(item.get("assumption", "") or "").strip(),
-            "basis": str(item.get("basis", "") or "").strip(),
-            "risk": str(item.get("risk", "") or "").strip(),
-        }
-        for item in items
-        if any(str(item.get(key, "") or "").strip() for key in ("assumption", "basis", "risk"))
-    ]
+    if not isinstance(payload, list):
+        return []
+    normalized: List[Dict[str, str]] = []
+    for raw_item in payload:
+        if not isinstance(raw_item, dict):
+            continue
+        assumption = str(raw_item.get("assumption", "") or "").strip()
+        basis = str(raw_item.get("basis", "") or "").strip()
+        risk = str(raw_item.get("risk", "") or "").strip()
+        if not any((assumption, basis, risk)):
+            continue
+        item: Dict[str, str] = {"assumption": assumption, "basis": basis, "risk": risk}
+        _copy_resolution_fields(raw_item, item)
+        normalized.append(item)
+    return normalized
 
 
 def _normalize_gap_items(payload: Any) -> List[Dict[str, str]]:
-    items = _normalize_list_of_dicts(payload, ("gap", "gap_type", "reason", "impact", "priority", "blocking_reason"))
+    if not isinstance(payload, list):
+        return []
     normalized: List[Dict[str, str]] = []
-    for item in items:
-        gap = str(item.get("gap", "") or "").strip()
-        reason = str(item.get("reason", "") or "").strip()
-        impact = str(item.get("impact", "") or "").strip()
+    for raw_item in payload:
+        if not isinstance(raw_item, dict):
+            continue
+        gap = str(raw_item.get("gap", "") or "").strip()
+        reason = str(raw_item.get("reason", "") or "").strip()
+        impact = str(raw_item.get("impact", "") or "").strip()
         if not gap and not reason and not impact:
             continue
-        gap_type = str(item.get("gap_type", "") or "").strip()
+        gap_type = str(raw_item.get("gap_type", "") or "").strip()
         if gap_type not in GAP_TYPES:
             gap_type = GAP_FALLBACK_TYPE
-        priority = str(item.get("priority", "") or "").strip()
+        priority = str(raw_item.get("priority", "") or "").strip()
         if priority not in GAP_PRIORITIES:
             priority = "P1"
-        blocking_reason = str(item.get("blocking_reason", "") or "").strip()
+        blocking_reason = str(raw_item.get("blocking_reason", "") or "").strip()
         if priority == "P0" and (not blocking_reason or len(blocking_reason) < 10 or blocking_reason == reason):
             priority = "P1"
             blocking_reason = ""
-        normalized.append(
-            {
-                "gap": gap,
-                "gap_type": gap_type,
-                "reason": reason,
-                "impact": impact,
-                "priority": priority,
-                "blocking_reason": blocking_reason,
-            }
-        )
+        item: Dict[str, str] = {
+            "gap": gap,
+            "gap_type": gap_type,
+            "reason": reason,
+            "impact": impact,
+            "priority": priority,
+            "blocking_reason": blocking_reason,
+        }
+        _copy_resolution_fields(raw_item, item)
+        normalized.append(item)
     return normalized
 
 

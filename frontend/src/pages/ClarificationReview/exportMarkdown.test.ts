@@ -71,7 +71,11 @@ const sampleRecord: ClarificationReviewRecord = {
   llm_status: "success",
   llm_provider: "openai",
   llm_message: null,
+  task_status: "completed",
+  progress_message: null,
+  progress_percent: null,
   source_meta: null,
+  generated_requirement_id: null,
   created_at: "2026-04-14T10:20:30.000Z",
 };
 

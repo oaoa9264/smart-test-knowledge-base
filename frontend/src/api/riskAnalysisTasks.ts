@@ -1,5 +1,5 @@
 import { http } from "./client";
-import type { AnalysisStage, RiskAnalysisTask, RiskAnalysisTaskStartResponse, RiskAnalysisTaskSummary } from "../types";
+import type { AnalysisStage, RiskAnalysisTask, RiskAnalysisTaskStartResponse, RiskAnalysisTaskSummary, UnifiedRiskAnalysisStartResponse } from "../types";
 
 export async function startRiskAnalysisTask(
   requirementId: number,
@@ -7,6 +7,15 @@ export async function startRiskAnalysisTask(
 ): Promise<RiskAnalysisTaskStartResponse> {
   const { data } = await http.post<RiskAnalysisTaskStartResponse>(
     `/api/requirements/${requirementId}/analysis-tasks/${stage}`,
+  );
+  return data;
+}
+
+export async function startUnifiedRiskAnalysis(
+  requirementId: number,
+): Promise<UnifiedRiskAnalysisStartResponse> {
+  const { data } = await http.post<UnifiedRiskAnalysisStartResponse>(
+    `/api/requirements/${requirementId}/analysis-tasks/unified`,
   );
   return data;
 }

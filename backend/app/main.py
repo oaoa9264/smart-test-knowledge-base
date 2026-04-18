@@ -76,6 +76,9 @@ from app.api.testcases import router as testcase_router
 from app.api.tree_diff import router as tree_diff_router
 from app.core.database import SessionLocal, engine
 from app.core.schema_migrations import (
+    clear_dangling_clarification_review_requirement_links,
+    ensure_clarification_review_async_columns,
+    ensure_clarification_review_requirement_link,
     ensure_clarification_review_source_columns,
     ensure_requirement_source_type_values,
     ensure_product_knowledge_columns,
@@ -88,13 +91,15 @@ from app.core.schema_migrations import (
 )
 from app.models.entities import (
     Base,
+    ClarificationReviewPdfDraft,
+    ClarificationReviewRecord,
     NormalizedRequirementDocTask,
     RiskAnalysisTask,
     RiskAnalysisTaskStatus,
     RuleTreeSession,
     RuleTreeSessionStatus,
 )
-from app.services.pdf_draft_service import cleanup_expired_drafts
+from app.services.pdf_draft_service import cleanup_expired_drafts, cleanup_orphan_drafts
 
 Base.metadata.create_all(bind=engine)
 ensure_requirements_versioning_columns(engine)
@@ -106,6 +111,9 @@ ensure_product_knowledge_columns(engine)
 ensure_risk_convergence_columns(engine)
 ensure_hierarchical_knowledge_columns(engine)
 ensure_clarification_review_source_columns(engine)
+ensure_clarification_review_async_columns(engine)
+ensure_clarification_review_requirement_link(engine)
+clear_dangling_clarification_review_requirement_links(engine)
 
 app = FastAPI(title="Test Knowledge Base MVP", version="0.1.0")
 app.state.ready = False
@@ -210,6 +218,63 @@ def recover_interrupted_normalized_requirement_doc_tasks() -> int:
         db.close()
 
 
+def recover_interrupted_clarification_review_tasks() -> int:
+    db = SessionLocal()
+    try:
+        interrupted_at = datetime.utcnow()
+        count = 0
+
+        records = (
+            db.query(ClarificationReviewRecord)
+            .filter(ClarificationReviewRecord.task_status.in_(["queued", "running"]))
+            .all()
+        )
+        for record in records:
+            record.task_status = "interrupted"
+            record.progress_message = "服务重启导致任务中断，请重新发起分析"
+            record.updated_at = interrupted_at
+        count += len(records)
+
+        drafts = (
+            db.query(ClarificationReviewPdfDraft)
+            .filter(ClarificationReviewPdfDraft.status.in_(["queued", "extracting"]))
+            .all()
+        )
+        for draft in drafts:
+            draft.status = "failed"
+            draft.progress_message = "服务重启导致任务中断"
+            draft.updated_at = interrupted_at
+        count += len(drafts)
+
+        infer_drafts = (
+            db.query(ClarificationReviewPdfDraft)
+            .filter(ClarificationReviewPdfDraft.infer_task_status.in_(["queued", "running"]))
+            .all()
+        )
+        for draft in infer_drafts:
+            draft.infer_task_status = "failed"
+            draft.progress_message = "服务重启导致推断任务中断"
+            draft.updated_at = interrupted_at
+        count += len(infer_drafts)
+
+        db.commit()
+        return count
+    finally:
+        db.close()
+
+
+_pdf_cleanup_scheduler = None
+
+
+def _run_orphan_draft_cleanup() -> None:
+    """Entry point for APScheduler's daily orphan draft sweep."""
+    with SessionLocal() as db:
+        try:
+            cleanup_orphan_drafts(db)
+        except Exception:
+            logging.getLogger(__name__).exception("Orphan pdf draft cleanup failed")
+
+
 @app.on_event("startup")
 def _startup() -> None:
     """Single startup handler: recover interrupted tasks, sync knowledge base, then mark ready."""
@@ -217,8 +282,34 @@ def _startup() -> None:
     recover_interrupted_rule_tree_sessions()
     recover_interrupted_risk_analysis_tasks()
     recover_interrupted_normalized_requirement_doc_tasks()
+    recover_interrupted_clarification_review_tasks()
     with SessionLocal() as db:
         cleanup_expired_drafts(db)
+        cleanup_orphan_drafts(db)
+
+    # 1b. Register daily PDF orphan draft cleanup (Batch 4 plan)
+    global _pdf_cleanup_scheduler
+    if _pdf_cleanup_scheduler is None:
+        try:
+            from apscheduler.schedulers.background import BackgroundScheduler
+
+            _pdf_cleanup_scheduler = BackgroundScheduler(daemon=True)
+            _pdf_cleanup_scheduler.add_job(
+                _run_orphan_draft_cleanup,
+                trigger="cron",
+                hour=3,
+                minute=0,
+                id="cleanup_orphan_pdf_drafts",
+                replace_existing=True,
+            )
+            _pdf_cleanup_scheduler.start()
+            logging.getLogger(__name__).info(
+                "Scheduled daily orphan pdf draft cleanup at 03:00"
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to start pdf draft cleanup scheduler; falling back to startup-only cleanup"
+            )
 
     # 2. Sync knowledge base
     from app.services.knowledge_base_importer import import_all_domains
@@ -239,6 +330,17 @@ def _startup() -> None:
 
     # 3. Mark service as ready
     app.state.ready = True
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    global _pdf_cleanup_scheduler
+    if _pdf_cleanup_scheduler is not None:
+        try:
+            _pdf_cleanup_scheduler.shutdown(wait=False)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to stop pdf draft cleanup scheduler")
+        _pdf_cleanup_scheduler = None
 
 
 @app.get("/health")

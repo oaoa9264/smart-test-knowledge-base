@@ -408,8 +408,20 @@ def _format_supplemental_inputs(
     requirement: Requirement,
     inputs: List[RequirementInput],
 ) -> Optional[str]:
-    """Format supplemental inputs for prompt display (deduplicated, lightweight)."""
-    lines = []
+    """Format supplemental inputs for prompt display (deduplicated, lightweight).
+
+    Clarification_* type inputs are presented with status labels so the LLM
+    can treat confirmed items as constraints, assumptions as tentative, and
+    pending items as open risks requiring deeper analysis.
+    """
+    _CLARIFICATION_TYPES = {"clarification_confirmed", "clarification_assumption", "clarification_pending"}
+    _CLARIFICATION_STATUS_LABELS = {
+        "clarification_confirmed": "✅ 已确认",
+        "clarification_assumption": "⚠️ 按假设推进",
+        "clarification_pending": "❓ 待确认",
+    }
+    regular_lines = []
+    clarification_lines = []
     raw_text_stripped = (requirement.raw_text or "").strip()
     for item in inputs:
         content = (item.content or "").strip()
@@ -417,12 +429,35 @@ def _format_supplemental_inputs(
             continue
         label = item.source_label or ""
         input_type = item.input_type.value if hasattr(item.input_type, "value") else item.input_type
-        lines.append("[{type}]{label_part} {content}".format(
-            type=input_type,
-            label_part="（来源：{0}）".format(label) if label else "",
-            content=content,
-        ))
-    return "\n".join(lines) if lines else None
+        if input_type in _CLARIFICATION_TYPES:
+            status_label = _CLARIFICATION_STATUS_LABELS.get(input_type, input_type)
+            line = "[{status}]{label_part} {content}".format(
+                status=status_label,
+                label_part="（来源：{0}）".format(label) if label else "",
+                content=content,
+            )
+            clarification_lines.append(line)
+        else:
+            line = "[{type}]{label_part} {content}".format(
+                type=input_type,
+                label_part="（来源：{0}）".format(label) if label else "",
+                content=content,
+            )
+            regular_lines.append(line)
+
+    sections = []
+    if regular_lines:
+        sections.append("\n".join(regular_lines))
+    if clarification_lines:
+        sections.append(
+            "【追问分析结论 — 请基于以下结论做深入风险分析】\n"
+            "以下是追问分析阶段已梳理的结论，请将其作为重要上下文：\n"
+            "- 已确认的结论视为硬性约束，分析是否存在遗漏的配套风险\n"
+            "- 按假设推进的项目重点关注假设不成立时的影响\n"
+            "- 待确认的问题直接作为风险输出，并给出具体建议\n\n"
+            + "\n".join(clarification_lines)
+        )
+    return "\n\n".join(sections) if sections else None
 
 
 def _call_llm_for_risks(

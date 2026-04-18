@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
+  Affix,
   Alert,
   Button,
   Card,
@@ -10,7 +12,9 @@ import {
   Input,
   List,
   Modal,
+  Progress,
   Row,
+  Select,
   Space,
   Spin,
   Tag,
@@ -24,6 +28,8 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   FilePdfOutlined,
+  LinkOutlined,
+  PlusOutlined,
   ShopOutlined,
   TeamOutlined,
   UploadOutlined,
@@ -33,11 +39,15 @@ import remarkGfm from "remark-gfm";
 import {
   analyzeClarificationReview,
   createClarificationReviewPdfDraft,
+  createRequirementFromReview,
   deleteClarificationReviewRecord,
+  fetchClarificationReviewPdfDraft,
   fetchClarificationReviewRecord,
   fetchClarificationReviewRecords,
   inferClarificationReviewPdfDraft,
+  updateClarificationReviewItemResolutions,
 } from "../../api/clarificationReview";
+import type { ItemResolutionUpdate } from "../../api/clarificationReview";
 import { getErrorMessage } from "../../api/client";
 import {
   buildExportFileName,
@@ -47,7 +57,14 @@ import {
   getClarificationRoleDescriptors,
   isClarificationReviewResultV2,
 } from "./exportMarkdown";
+import { useAppStore } from "../../stores/appStore";
+import { isFeatureEnabled } from "../../utils/featureFlags";
+import { fetchRiskAnalysisTaskSummary, startUnifiedRiskAnalysis } from "../../api/riskAnalysisTasks";
+import TaskProgressBar, { type TaskStatus } from "../../components/TaskProgressBar";
+import { trackEvent } from "../../utils/telemetry";
+import { getFriendlyLLMErrorCopy, isRetryableLLMError } from "../../utils/llmErrors";
 import type {
+  AnalysisStage,
   ClarificationReviewAnalyzeRequest,
   ClarificationReviewPdfDraft,
   ClarificationReviewPdfField,
@@ -56,6 +73,7 @@ import type {
   ClarificationReviewRecord,
   ClarificationReviewRecordSummary,
   ClarificationReviewSourceMeta,
+  ResolutionStatus,
 } from "../../types";
 
 
@@ -186,8 +204,17 @@ function ProviderTag({ provider }: { provider: string | null }) {
   if (!provider) return null;
   const normalized = provider.trim().toLowerCase();
   const color = normalized === "openai" ? "geekblue" : normalized === "zhipu" ? "cyan" : "default";
-  return <Tag color={color}>{`LLM: ${provider}`}</Tag>;
+  return <Tag color={color}>{`模型: ${provider}`}</Tag>;
 }
+
+const DRAFT_STATUS_LABELS: Record<string, string> = {
+  pending: "待处理",
+  queued: "排队中",
+  extracting: "提取中",
+  success: "成功",
+  partial_success: "部分成功",
+  failed: "失败",
+};
 
 function DraftStatusTag({ status }: { status: ClarificationReviewPdfDraft["status"] }) {
   const color =
@@ -198,7 +225,7 @@ function DraftStatusTag({ status }: { status: ClarificationReviewPdfDraft["statu
         : status === "failed"
           ? "red"
           : "blue";
-  return <Tag color={color}>{status}</Tag>;
+  return <Tag color={color}>{DRAFT_STATUS_LABELS[status] || status}</Tag>;
 }
 
 function SourceMetaTag({ sourceMeta }: { sourceMeta: ClarificationReviewSourceMeta | null }) {
@@ -342,8 +369,10 @@ function QuestionMetaRow({
 
 function RoleQuestionSection({
   group,
+  renderExtra,
 }: {
   group: QuestionGroup;
+  renderExtra?: (item: ClarificationReviewQuestionItem, index: number) => React.ReactNode;
 }) {
   const meta = group;
   const items = group.items;
@@ -400,6 +429,7 @@ function RoleQuestionSection({
                 <QuestionMetaRow label="答案形式" value={formatAnswerFormatLabel(item.answer_format)} accentColor={meta.color} />
                 <QuestionMetaRow label="为什么要问" value={item.why_ask} accentColor={meta.color} />
                 <QuestionMetaRow label="不问风险" value={item.risk_if_unasked} accentColor={meta.color} />
+                {renderExtra?.(item, index)}
               </Space>
             </div>
           ))}
@@ -436,6 +466,7 @@ function RuleLikeList<T extends object>({
   items,
   getTitle,
   getMetaFields,
+  renderExtra,
 }: {
   title: string;
   emptyText: string;
@@ -443,6 +474,7 @@ function RuleLikeList<T extends object>({
   items: T[];
   getTitle: (item: T) => string;
   getMetaFields: (item: T) => RuleLikeMetaField[];
+  renderExtra?: (item: T, index: number) => React.ReactNode;
 }) {
   const theme = RULE_LIKE_THEMES[themeKey] || RULE_LIKE_THEMES.history;
 
@@ -539,6 +571,7 @@ function RuleLikeList<T extends object>({
                     </div>
                   ) : null,
                 )}
+                {renderExtra?.(item, index)}
               </Space>
             </div>
           ))}
@@ -560,7 +593,116 @@ function formatSourceTypeLabel(value: string | undefined): string {
   return "模型推断";
 }
 
+const RESOLUTION_OPTIONS: { value: ResolutionStatus; label: string; color: string }[] = [
+  { value: "pending", label: "待确认", color: "gold" },
+  { value: "confirmed", label: "已确认", color: "green" },
+  { value: "assume_and_proceed", label: "按假设推进", color: "blue" },
+  { value: "dismissed", label: "不再追问", color: "default" },
+];
+
+function ResolutionTag({ status }: { status: ResolutionStatus | undefined }) {
+  const option = RESOLUTION_OPTIONS.find((o) => o.value === status);
+  if (!option || status === "pending") return null;
+  return <Tag color={option.color}>{option.label}</Tag>;
+}
+
+function ResolutionControls({
+  status,
+  note,
+  resolvedBy,
+  onSave,
+  saving,
+}: {
+  status: ResolutionStatus | undefined;
+  note: string | undefined;
+  resolvedBy: string | undefined;
+  onSave: (status: ResolutionStatus, note: string, resolvedBy: string) => Promise<void> | void;
+  saving: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [localStatus, setLocalStatus] = useState<ResolutionStatus>(status || "pending");
+  const [localNote, setLocalNote] = useState(note || "");
+  const [localResolvedBy, setLocalResolvedBy] = useState(resolvedBy || "");
+
+  useEffect(() => {
+    setLocalStatus(status || "pending");
+    setLocalNote(note || "");
+    setLocalResolvedBy(resolvedBy || "");
+  }, [status, note, resolvedBy]);
+
+  if (!editing) {
+    return (
+      <Space size={4} wrap style={{ marginTop: 4 }}>
+        <ResolutionTag status={status} />
+        {note ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>{note}</Typography.Text> : null}
+        {resolvedBy ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>({resolvedBy})</Typography.Text> : null}
+        <Button type="link" size="small" onClick={() => setEditing(true)} style={{ padding: 0 }}>
+          {status && status !== "pending" ? "修改" : "标记状态"}
+        </Button>
+      </Space>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 8, padding: 10, background: "#fafafa", borderRadius: 8, border: "1px solid #f0f0f0" }}>
+      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+        <Space wrap>
+          <Select
+            size="small"
+            style={{ width: 140 }}
+            value={localStatus}
+            onChange={setLocalStatus}
+            options={RESOLUTION_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+          />
+          <Input
+            size="small"
+            style={{ width: 100 }}
+            placeholder="确认人"
+            value={localResolvedBy}
+            onChange={(e) => setLocalResolvedBy(e.target.value)}
+          />
+        </Space>
+        <Input.TextArea
+          size="small"
+          rows={2}
+          placeholder="备注（如：产品确认的结论、假设依据等）"
+          value={localNote}
+          onChange={(e) => setLocalNote(e.target.value)}
+        />
+        <Space>
+          <Button
+            type="primary"
+            size="small"
+            loading={saving}
+            onClick={async () => {
+              await onSave(localStatus, localNote, localResolvedBy);
+              setEditing(false);
+            }}
+          >
+            保存
+          </Button>
+          <Button size="small" onClick={() => setEditing(false)}>取消</Button>
+        </Space>
+      </Space>
+    </div>
+  );
+}
+
+function isRecordTaskInProgress(record: ClarificationReviewRecord | null): boolean {
+  return record?.task_status === "queued" || record?.task_status === "running";
+}
+
+function isDraftInProgress(draft: ClarificationReviewPdfDraft | null): boolean {
+  return draft?.status === "queued" || draft?.status === "extracting";
+}
+
+function isInferInProgress(draft: ClarificationReviewPdfDraft | null): boolean {
+  return draft?.infer_task_status === "queued" || draft?.infer_task_status === "running";
+}
+
 export default function ClarificationReviewPage() {
+  const navigate = useNavigate();
+  const { projects, setSelectedProjectId, setSelectedRequirementId } = useAppStore();
   const [form] = Form.useForm<ClarificationReviewFormValues>();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -576,6 +718,43 @@ export default function ClarificationReviewPage() {
   const [records, setRecords] = useState<ClarificationReviewRecordSummary[]>([]);
   const [activeRecord, setActiveRecord] = useState<ClarificationReviewRecord | null>(null);
   const [expandedRoles, setExpandedRoles] = useState<string[]>([]);
+
+  // Create requirement modal state
+  const [createReqModalOpen, setCreateReqModalOpen] = useState(false);
+  const [createReqLoading, setCreateReqLoading] = useState(false);
+  const [createReqProjectId, setCreateReqProjectId] = useState<number | null>(null);
+  const [createReqTitle, setCreateReqTitle] = useState("");
+  const [createdRequirement, setCreatedRequirement] = useState<{ id: number; project_id: number; title: string } | null>(null);
+
+  // One-click 分析模式（高级模式下才显示切换按钮）
+  const oneClickFlagEnabled = useMemo(() => isFeatureEnabled("oneClickAnalysis"), []);
+  const [analysisMode, setAnalysisMode] = useState<"standard" | "oneclick">(() => {
+    const stored = typeof window !== "undefined" ? window.localStorage.getItem("clarification_analysis_mode") : null;
+    return stored === "oneclick" ? "oneclick" : "standard";
+  });
+  const [oneClickProjectId, setOneClickProjectId] = useState<number | null>(null);
+  const [oneClickRunning, setOneClickRunning] = useState(false);
+  const [oneClickStage, setOneClickStage] = useState<"idle" | "pdf" | "analyzing" | "creating" | "risk" | "ruletree" | "done" | "error">("idle");
+  const [oneClickMessage, setOneClickMessage] = useState<string>("");
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("clarification_analysis_mode", analysisMode);
+    }
+  }, [analysisMode]);
+  useEffect(() => {
+    if (oneClickProjectId === null && projects.length > 0) {
+      setOneClickProjectId(projects[0].id);
+    }
+  }, [projects, oneClickProjectId]);
+
+  const analyzePollTimerRef = useRef<number | null>(null);
+  const analyzePollDelayRef = useRef(2000);
+  const analyzePollTickRef = useRef(0);
+  const [analyzePollTick, setAnalyzePollTick] = useState(0);
+  const draftPollTimerRef = useRef<number | null>(null);
+  const draftPollDelayRef = useRef(2000);
+  const draftPollTickRef = useRef(0);
+  const [draftPollTick, setDraftPollTick] = useState(0);
 
   useEffect(() => {
     form.setFieldsValue({
@@ -596,6 +775,125 @@ export default function ClarificationReviewPage() {
     setDraftApplyModes({});
     setApplyModalOpen(false);
   };
+
+  const handleNewAnalysis = () => {
+    setActiveRecord(null);
+    resetDraftState();
+    form.setFieldsValue({
+      requirement_text: "",
+      current_surface_flow: "",
+      involved_modules: "",
+      known_background: "",
+      unknowns: "",
+      rule_text: DEFAULT_RULE_TEXT,
+    });
+  };
+
+  // Polling: analyze task
+  useEffect(() => {
+    if (analyzePollTimerRef.current) {
+      window.clearTimeout(analyzePollTimerRef.current);
+      analyzePollTimerRef.current = null;
+    }
+    if (!activeRecord?.id || !isRecordTaskInProgress(activeRecord)) {
+      analyzePollDelayRef.current = 2000;
+      return;
+    }
+
+    const recordId = activeRecord.id;
+    const delay = analyzePollDelayRef.current;
+    analyzePollTimerRef.current = window.setTimeout(() => {
+      fetchClarificationReviewRecord(recordId)
+        .then((nextRecord) => {
+          setActiveRecord(nextRecord);
+          if (isRecordTaskInProgress(nextRecord)) {
+            analyzePollDelayRef.current = Math.min(analyzePollDelayRef.current + 1000, 5000);
+            setAnalyzePollTick((t) => t + 1);
+          } else {
+            analyzePollDelayRef.current = 2000;
+            if (nextRecord.task_status === "completed") {
+              if (nextRecord.llm_status === "failed") {
+                message.warning(nextRecord.llm_message || "模型调用失败，已保存空结果记录");
+              } else {
+                message.success("追问分析完成");
+              }
+              void loadRecords(nextRecord.id);
+            } else {
+              message.error(nextRecord.progress_message || "追问分析失败");
+              void loadRecords(nextRecord.id);
+            }
+          }
+        })
+        .catch(() => {
+          analyzePollDelayRef.current = Math.min(analyzePollDelayRef.current + 1000, 5000);
+          setAnalyzePollTick((t) => t + 1);
+        });
+    }, delay);
+
+    return () => {
+      if (analyzePollTimerRef.current) {
+        window.clearTimeout(analyzePollTimerRef.current);
+        analyzePollTimerRef.current = null;
+      }
+    };
+  }, [activeRecord?.id, activeRecord?.task_status, analyzePollTick]);
+
+  // Polling: draft create + infer
+  useEffect(() => {
+    if (draftPollTimerRef.current) {
+      window.clearTimeout(draftPollTimerRef.current);
+      draftPollTimerRef.current = null;
+    }
+    if (!activeDraftId || (!isDraftInProgress(activeDraft) && !isInferInProgress(activeDraft))) {
+      draftPollDelayRef.current = 2000;
+      return;
+    }
+
+    const draftId = activeDraftId;
+    const prevDraftStatus = activeDraft?.status;
+    const prevInferStatus = activeDraft?.infer_task_status;
+    const delay = draftPollDelayRef.current;
+    draftPollTimerRef.current = window.setTimeout(() => {
+      fetchClarificationReviewPdfDraft(draftId)
+        .then((nextDraft) => {
+          setActiveDraft(nextDraft);
+          const stillInProgress = isDraftInProgress(nextDraft) || isInferInProgress(nextDraft);
+          if (stillInProgress) {
+            draftPollDelayRef.current = Math.min(draftPollDelayRef.current + 1000, 5000);
+            setDraftPollTick((t) => t + 1);
+          } else {
+            draftPollDelayRef.current = 2000;
+          }
+          // Draft creation finished
+          if (isDraftInProgress({ status: prevDraftStatus } as ClarificationReviewPdfDraft) && !isDraftInProgress(nextDraft)) {
+            if (nextDraft.status === "success" || nextDraft.status === "partial_success") {
+              message.success("PDF 草稿已生成");
+            } else if (nextDraft.status === "failed") {
+              message.error(nextDraft.llm_message || "PDF 导入失败");
+            }
+          }
+          // Infer finished
+          if (isInferInProgress({ infer_task_status: prevInferStatus } as ClarificationReviewPdfDraft) && !isInferInProgress(nextDraft)) {
+            if (nextDraft.infer_task_status === "completed") {
+              message.success("补充推断已更新");
+            } else if (nextDraft.infer_task_status === "failed") {
+              message.error(nextDraft.infer_llm_message || "补充推断失败");
+            }
+          }
+        })
+        .catch(() => {
+          draftPollDelayRef.current = Math.min(draftPollDelayRef.current + 1000, 5000);
+          setDraftPollTick((t) => t + 1);
+        });
+    }, delay);
+
+    return () => {
+      if (draftPollTimerRef.current) {
+        window.clearTimeout(draftPollTimerRef.current);
+        draftPollTimerRef.current = null;
+      }
+    };
+  }, [activeDraftId, activeDraft?.status, activeDraft?.infer_task_status, draftPollTick]);
 
   const loadRecords = async (nextActiveId?: number) => {
     setHistoryLoading(true);
@@ -689,15 +987,35 @@ export default function ClarificationReviewPage() {
     }
 
     setDraftLoading(true);
+    const startedAt = Date.now();
+    trackEvent("clarification.pdf.upload.start", {
+      file_size: file.size,
+      file_name: file.name,
+      start_ts: startedAt,
+    });
     try {
       const draft = await createClarificationReviewPdfDraft(file);
       setActiveDraftId(draft.id);
       setActiveDraft(draft);
       setDraftAppliedSnapshot({});
       setDraftApplyModes({});
-      message.success("PDF 草稿已生成");
+      trackEvent("clarification.pdf.upload.success", {
+        draft_id: draft.id,
+        file_size: file.size,
+        start_ts: startedAt,
+        end_ts: Date.now(),
+        duration_ms: Date.now() - startedAt,
+      });
     } catch (error) {
       message.error(getErrorMessage(error, "PDF 导入失败"));
+      trackEvent("clarification.pdf.upload.failure", {
+        file_size: file.size,
+        file_name: file.name,
+        start_ts: startedAt,
+        end_ts: Date.now(),
+        duration_ms: Date.now() - startedAt,
+        message: getErrorMessage(error, ""),
+      });
     } finally {
       setDraftLoading(false);
     }
@@ -745,17 +1063,36 @@ export default function ClarificationReviewPage() {
     setDraftAppliedSnapshot(snapshot);
     setApplyModalOpen(false);
     message.success("草稿内容已回填到表单");
+    trackEvent("clarification.pdf.apply", {
+      draft_id: activeDraftId,
+      applied_field_count: Object.keys(snapshot).length,
+      ts: Date.now(),
+    });
   };
 
   const handleInferDraft = async () => {
     if (!activeDraftId) return;
     setInferLoading(true);
+    const startedAt = Date.now();
+    trackEvent("clarification.pdf.infer.start", { draft_id: activeDraftId, start_ts: startedAt });
     try {
       const draft = await inferClarificationReviewPdfDraft(activeDraftId);
       setActiveDraft(draft);
-      message.success("补充推断已更新");
+      trackEvent("clarification.pdf.infer.success", {
+        draft_id: activeDraftId,
+        start_ts: startedAt,
+        end_ts: Date.now(),
+        duration_ms: Date.now() - startedAt,
+      });
     } catch (error) {
       message.error(getErrorMessage(error, "补充推断失败"));
+      trackEvent("clarification.pdf.infer.failure", {
+        draft_id: activeDraftId,
+        start_ts: startedAt,
+        end_ts: Date.now(),
+        duration_ms: Date.now() - startedAt,
+        message: getErrorMessage(error, ""),
+      });
     } finally {
       setInferLoading(false);
     }
@@ -777,6 +1114,7 @@ export default function ClarificationReviewPage() {
     }
 
     setSubmitting(true);
+    trackEvent("clarification.analyze.submit", { mode: "standard", has_pdf: !!activeDraftId });
     try {
       const appliedFields = PDF_FIELD_KEYS.filter((fieldKey) => {
         const snapshotValue = draftAppliedSnapshot[fieldKey];
@@ -795,16 +1133,174 @@ export default function ClarificationReviewPage() {
       });
       setActiveRecord(record);
       resetDraftState();
-      await loadRecords(record.id);
-      if (record.llm_status === "failed") {
-        message.warning(record.llm_message || "模型调用失败，已保存空结果记录");
-      } else {
-        message.success("追问分析完成");
-      }
+      trackEvent("clarification.analyze.success", { record_id: record.id });
     } catch (error) {
       message.error(getErrorMessage(error, "追问分析失败"));
+      trackEvent("clarification.analyze.failure", { message: getErrorMessage(error, "") });
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const stageOrder = ["idle", "pdf", "analyzing", "creating", "risk", "ruletree", "done"] as const;
+  type OneClickStage = (typeof stageOrder)[number] | "error";
+  const stageStatus = (current: OneClickStage, target: OneClickStage, terminal = false): TaskStatus => {
+    if (current === "error") {
+      const currentIdx = stageOrder.indexOf(current as (typeof stageOrder)[number]);
+      const targetIdx = stageOrder.indexOf(target as (typeof stageOrder)[number]);
+      if (targetIdx < currentIdx) return "success";
+      if (targetIdx === currentIdx) return "error";
+      return "idle";
+    }
+    const currentIdx = stageOrder.indexOf(current as (typeof stageOrder)[number]);
+    const targetIdx = stageOrder.indexOf(target as (typeof stageOrder)[number]);
+    if (targetIdx < 0) return "idle";
+    if (currentIdx === stageOrder.indexOf("done")) return "success";
+    if (targetIdx < currentIdx) return "success";
+    if (targetIdx === currentIdx) return terminal && current === "done" ? "success" : "running";
+    return "idle";
+  };
+
+  const pollRecordUntilDone = async (recordId: number, timeoutMs = 180_000): Promise<ClarificationReviewRecord> => {
+    const start = Date.now();
+    let delay = 2000;
+    while (Date.now() - start < timeoutMs) {
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
+      const fetched = await fetchClarificationReviewRecord(recordId);
+      if (fetched.task_status !== "queued" && fetched.task_status !== "running") {
+        return fetched;
+      }
+      delay = Math.min(delay * 1.5, 6000);
+    }
+    throw new Error("追问分析超时，请稍后到高级模式查看结果");
+  };
+
+  const handleOneClickAnalyze = async () => {
+    if (oneClickRunning) return;
+    if (!oneClickProjectId) {
+      message.warning("请先选择目标项目");
+      return;
+    }
+    const values = await form.validateFields();
+    const knownFields = [
+      values.requirement_text,
+      values.current_surface_flow,
+      values.involved_modules,
+      values.known_background,
+      values.unknowns,
+    ];
+    if (!knownFields.some((item) => (item || "").trim())) {
+      message.warning("请至少填写一项已知信息");
+      return;
+    }
+
+    setOneClickRunning(true);
+    const oneClickStartedAt = Date.now();
+    const pdfDraftPresent = Boolean(activeDraftId);
+    setOneClickStage(pdfDraftPresent ? "pdf" : "analyzing");
+    setOneClickMessage(pdfDraftPresent ? "已加载 PDF 拆解草稿，正在运行追问分析…" : "正在运行追问分析…");
+    trackEvent("clarification.oneclick.start", {
+      project_id: oneClickProjectId,
+      has_pdf_draft: pdfDraftPresent,
+    });
+    try {
+      const appliedFields = PDF_FIELD_KEYS.filter((fieldKey) => {
+        const snapshotValue = draftAppliedSnapshot[fieldKey];
+        if (!snapshotValue) return false;
+        return String(values[fieldKey] || "").trim() === snapshotValue.trim();
+      });
+      if (pdfDraftPresent) {
+        // Brief transition so the user sees the pdf step highlighted before analyze kicks in
+        setOneClickStage("analyzing");
+        setOneClickMessage("PDF 内容已就绪，正在运行追问分析…");
+      }
+      const record = await analyzeClarificationReview({
+        requirement_text: values.requirement_text.trim(),
+        current_surface_flow: values.current_surface_flow.trim(),
+        involved_modules: values.involved_modules.trim(),
+        known_background: values.known_background.trim(),
+        unknowns: values.unknowns.trim(),
+        rule_text: values.rule_text.trim(),
+        source_draft_id: activeDraftId || undefined,
+        applied_fields: appliedFields,
+      });
+      setActiveRecord(record);
+      resetDraftState();
+
+      const completed = await pollRecordUntilDone(record.id);
+      setActiveRecord(completed);
+      if (completed.llm_status !== "success") {
+        throw new Error(completed.llm_message || "追问分析失败");
+      }
+
+      setOneClickStage("creating");
+      setOneClickMessage("分析完成，正在创建需求并沉淀结论…");
+      const titleFromReq = (values.requirement_text || "").slice(0, 60).trim();
+      const createResp = await createRequirementFromReview(completed.id, oneClickProjectId, titleFromReq);
+      setActiveRecord(createResp.record);
+      setCreatedRequirement(createResp.requirement);
+      void loadRecords(completed.id);
+
+      setOneClickStage("risk");
+      setOneClickMessage("正在启动风险分析…");
+      let riskCompleted = false;
+      try {
+        await startUnifiedRiskAnalysis(createResp.requirement.id);
+        setOneClickMessage("风险分析进行中，等待后端汇总结果…");
+        const riskStart = Date.now();
+        const riskTimeout = 180_000;
+        let delay = 2000;
+        while (Date.now() - riskStart < riskTimeout) {
+          await new Promise((resolve) => window.setTimeout(resolve, delay));
+          const summary = await fetchRiskAnalysisTaskSummary(createResp.requirement.id);
+          const stages: AnalysisStage[] = ["review", "pre_dev", "pre_release"];
+          const activeTasks = stages
+            .map((stage) => summary[stage])
+            .filter((task): task is NonNullable<typeof task> => Boolean(task));
+          if (activeTasks.length === 0) {
+            break;
+          }
+          const anyInProgress = activeTasks.some(
+            (task) => task.status === "queued" || task.status === "running",
+          );
+          if (!anyInProgress) {
+            riskCompleted = true;
+            break;
+          }
+          delay = Math.min(delay * 1.5, 6000);
+        }
+      } catch (err) {
+        // 风险分析启动/等待失败不阻断流程，允许用户到规则树页继续操作
+        message.warning(getErrorMessage(err, "风险分析启动失败，可进入规则树页面手动触发"));
+      }
+
+      setOneClickStage("ruletree");
+      setOneClickMessage(
+        riskCompleted ? "风险分析完成，正在跳转规则树页面…" : "后台仍在处理风险分析，可在规则树页面继续查看进度。",
+      );
+      // Brief pause so users see the ruletree step highlighted before navigation
+      await new Promise((resolve) => window.setTimeout(resolve, 400));
+
+      setOneClickStage("done");
+      setOneClickMessage("全部就绪，已进入规则树页面，可在风险面板中查看进度。");
+      message.success("一键分析完成，已跳转到规则树页面");
+      trackEvent("clarification.oneclick.complete", {
+        record_id: completed.id,
+        requirement_id: createResp.requirement.id,
+        risk_completed: riskCompleted,
+        duration_ms: Date.now() - oneClickStartedAt,
+      });
+      setSelectedProjectId(createResp.requirement.project_id);
+      setSelectedRequirementId(createResp.requirement.id);
+      navigate("/rule-tree");
+    } catch (error) {
+      setOneClickStage("error");
+      const msg = getErrorMessage(error, "一键分析失败");
+      setOneClickMessage(msg);
+      message.error(msg);
+      trackEvent("clarification.oneclick.failure", { message: msg });
+    } finally {
+      setOneClickRunning(false);
     }
   };
 
@@ -836,6 +1332,22 @@ export default function ClarificationReviewPage() {
     setExpandedRoles(firstRoleWithQuestions ? [firstRoleWithQuestions] : []);
   }, [questionGroups]);
 
+  const [resolutionSaving, setResolutionSaving] = useState(false);
+
+  const handleSaveResolution = async (update: ItemResolutionUpdate) => {
+    if (!activeRecord) return;
+    setResolutionSaving(true);
+    try {
+      const updated = await updateClarificationReviewItemResolutions(activeRecord.id, [update]);
+      setActiveRecord(updated);
+      message.success("状态已保存");
+    } catch (error) {
+      message.error(getErrorMessage(error, "保存失败"));
+    } finally {
+      setResolutionSaving(false);
+    }
+  };
+
   const copySummary = async () => {
     if (!summaryMarkdown.trim()) {
       message.warning("暂无可复制的摘要");
@@ -849,6 +1361,48 @@ export default function ClarificationReviewPage() {
     message.success("摘要已复制");
   };
 
+  const handleOpenCreateReqModal = () => {
+    const reqText = activeRecord?.input_payload?.requirement_text || "";
+    setCreateReqTitle(reqText.slice(0, 60).trim());
+    setCreateReqProjectId(projects.length > 0 ? projects[0].id : null);
+    setCreatedRequirement(null);
+    setCreateReqModalOpen(true);
+  };
+
+  const handleCreateRequirement = async () => {
+    if (!activeRecord || !createReqProjectId) return;
+    setCreateReqLoading(true);
+    trackEvent("clarification.create_requirement.submit", {
+      record_id: activeRecord.id,
+      project_id: createReqProjectId,
+    });
+    try {
+      const resp = await createRequirementFromReview(activeRecord.id, createReqProjectId, createReqTitle);
+      setCreatedRequirement(resp.requirement);
+      setActiveRecord(resp.record);
+      void loadRecords(activeRecord.id);
+      message.success("需求创建成功");
+      trackEvent("clarification.create_requirement.success", {
+        requirement_id: resp.requirement.id,
+      });
+    } catch (error) {
+      message.error(getErrorMessage(error, "创建需求失败"));
+      trackEvent("clarification.create_requirement.failure", {
+        message: getErrorMessage(error, ""),
+      });
+    } finally {
+      setCreateReqLoading(false);
+    }
+  };
+
+  const handleGoToRuleTree = () => {
+    if (!createdRequirement) return;
+    setSelectedProjectId(createdRequirement.project_id);
+    setSelectedRequirementId(createdRequirement.id);
+    setCreateReqModalOpen(false);
+    navigate("/rule-tree");
+  };
+
   const handleExportMarkdown = () => {
     if (!activeRecord || activeRecord.llm_status !== "success") {
       message.warning("暂无可导出的分析结果");
@@ -859,7 +1413,7 @@ export default function ClarificationReviewPage() {
       const content = buildExportMarkdown(activeRecord);
       const fileName = buildExportFileName(activeRecord);
       downloadMarkdown(fileName, content);
-      message.success("Markdown 已开始下载");
+      message.success("文件已开始下载");
     } catch (error) {
       message.error(getErrorMessage(error, "导出 Markdown 失败"));
     }
@@ -889,12 +1443,99 @@ export default function ClarificationReviewPage() {
           event.target.value = "";
         }}
       />
-      <Typography.Title level={4} style={{ marginTop: 0 }}>
-        追问分析
-      </Typography.Title>
-      <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
-        用于老项目规则不完整时的追问梳理，不接入项目/需求上下文，直接按自由输入分析。
-      </Typography.Paragraph>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <Typography.Title level={4} style={{ marginTop: 0, marginBottom: 0 }}>
+            追问分析
+          </Typography.Title>
+          <Typography.Paragraph type="secondary" style={{ marginTop: 4, marginBottom: 0 }}>
+            用于老项目规则不完整时的追问梳理，不接入项目/需求上下文，直接按自由输入分析。
+          </Typography.Paragraph>
+        </div>
+        {oneClickFlagEnabled ? (
+          <Space size={8} align="center">
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>分析模式：</Typography.Text>
+            <Select
+              size="small"
+              style={{ width: 150 }}
+              value={analysisMode}
+              onChange={(value) => setAnalysisMode(value as "standard" | "oneclick")}
+              options={[
+                { label: "高级模式（分步）", value: "standard" },
+                { label: "一键分析（推荐）", value: "oneclick" },
+              ]}
+            />
+          </Space>
+        ) : null}
+      </div>
+
+      {oneClickFlagEnabled && analysisMode === "oneclick" ? (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginTop: 12, marginBottom: 12 }}
+          message="一键分析模式"
+          description={
+            <Space direction="vertical" size={6} style={{ width: "100%" }}>
+              <Typography.Text style={{ fontSize: 13 }}>
+                提交表单后，系统会自动执行：追问分析 → 创建需求 → 风险分析 → 跳转规则树。
+              </Typography.Text>
+              <Space size={8} wrap>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>目标项目：</Typography.Text>
+                <Select
+                  size="small"
+                  style={{ width: 220 }}
+                  value={oneClickProjectId ?? undefined}
+                  onChange={(value) => setOneClickProjectId(value)}
+                  placeholder="选择目标项目"
+                  showSearch
+                  optionFilterProp="label"
+                  options={projects.map((p) => ({ label: p.name, value: p.id }))}
+                />
+                <Button
+                  type="primary"
+                  size="small"
+                  loading={oneClickRunning}
+                  onClick={() => void handleOneClickAnalyze()}
+                  disabled={!oneClickProjectId}
+                >
+                  开始一键分析
+                </Button>
+              </Space>
+              {oneClickRunning || oneClickStage !== "idle" ? (
+                <TaskProgressBar
+                  style={{ marginTop: 4 }}
+                  compact={false}
+                  title="一键分析进度"
+                  percent={
+                    oneClickStage === "pdf" ? 15
+                      : oneClickStage === "analyzing" ? 35
+                      : oneClickStage === "creating" ? 55
+                      : oneClickStage === "risk" ? 75
+                      : oneClickStage === "ruletree" ? 90
+                      : oneClickStage === "done" ? 100
+                      : oneClickStage === "error" ? 100
+                      : 10
+                  }
+                  status={
+                    oneClickStage === "error" ? "error" :
+                    oneClickStage === "done" ? "success" :
+                    oneClickRunning ? "running" : "idle"
+                  }
+                  message={oneClickMessage || "准备就绪"}
+                  steps={[
+                    { key: "pdf", label: "PDF 提取 / 信息推断", status: stageStatus(oneClickStage, "pdf") },
+                    { key: "analyze", label: "追问分析", status: stageStatus(oneClickStage, "analyzing") },
+                    { key: "create", label: "创建需求", status: stageStatus(oneClickStage, "creating") },
+                    { key: "risk", label: "风险分析", status: stageStatus(oneClickStage, "risk") },
+                    { key: "ruletree", label: "跳转规则树", status: stageStatus(oneClickStage, "ruletree", true) },
+                  ]}
+                />
+              ) : null}
+            </Space>
+          }
+        />
+      ) : null}
 
       <Row gutter={16} align="top">
         <Col span={5}>
@@ -921,7 +1562,11 @@ export default function ClarificationReviewPage() {
                       <Space wrap style={{ justifyContent: "space-between", width: "100%" }}>
                         <Space wrap size={4}>
                           <Typography.Text strong>{`#${item.id}`}</Typography.Text>
-                          <Tag color={item.llm_status === "success" ? "blue" : "red"}>{item.llm_status}</Tag>
+                          {item.task_status === "queued" || item.task_status === "running" ? (
+                            <Tag color="processing">分析中</Tag>
+                          ) : (
+                            <Tag color={item.llm_status === "success" ? "blue" : "red"}>{item.llm_status === "success" ? "成功" : "失败"}</Tag>
+                          )}
                           <SourceMetaTag sourceMeta={item.source_meta} />
                           <ProviderTag provider={item.llm_provider} />
                         </Space>
@@ -953,9 +1598,10 @@ export default function ClarificationReviewPage() {
             title="输入信息"
             extra={
               <Space>
+                <Button onClick={handleNewAnalysis}>新建分析</Button>
                 <Button
                   icon={<UploadOutlined />}
-                  loading={draftLoading}
+                  loading={draftLoading || isDraftInProgress(activeDraft)}
                   onClick={() => fileInputRef.current?.click()}
                 >
                   导入 PDF
@@ -967,12 +1613,87 @@ export default function ClarificationReviewPage() {
                 >
                   恢复默认规则
                 </Button>
-                <Button type="primary" loading={submitting} onClick={() => void handleSubmit()}>
+                <Button type="primary" loading={submitting || isRecordTaskInProgress(activeRecord)} onClick={() => void handleSubmit()}>
                   开始分析
                 </Button>
               </Space>
             }
           >
+            {activeDraft ? (
+              <Card
+                size="small"
+                title={
+                  <Space wrap>
+                    <FilePdfOutlined />
+                    <Typography.Text strong>PDF 拆解草稿</Typography.Text>
+                    <DraftStatusTag status={activeDraft.status} />
+                    <ProviderTag provider={activeDraft.llm_provider} />
+                  </Space>
+                }
+                extra={
+                  <Space wrap>
+                    {(activeDraft.status === "success" || activeDraft.status === "partial_success") ? (
+                      <Button onClick={() => void handleInferDraft()} loading={inferLoading || isInferInProgress(activeDraft)}>
+                        LLM 补充推断
+                      </Button>
+                    ) : null}
+                    <Button type="primary" onClick={handleOpenApplyModal}>
+                      应用到表单
+                    </Button>
+                  </Space>
+                }
+                style={{ borderRadius: 16, marginBottom: 16 }}
+                bodyStyle={{ padding: 16 }}
+              >
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  <Space wrap>
+                    <Typography.Text>{activeDraft.file_name}</Typography.Text>
+                    <Typography.Text type="secondary">{`${activeDraft.page_count} 页`}</Typography.Text>
+                    <Typography.Text type="secondary">{toDateTimeText(activeDraft.created_at)}</Typography.Text>
+                  </Space>
+                  {isDraftInProgress(activeDraft) ? (
+                    <div style={{ textAlign: "center", padding: 24 }}>
+                      <Progress
+                        percent={activeDraft.progress_percent ?? 0}
+                        status="active"
+                        style={{ maxWidth: 280, margin: "0 auto" }}
+                      />
+                      <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>
+                        {activeDraft.progress_message || "PDF 处理中..."}
+                      </Typography.Paragraph>
+                    </div>
+                  ) : (
+                    <>
+                      {activeDraft.llm_message ? (
+                        <Alert type="warning" showIcon message={activeDraft.llm_message} />
+                      ) : null}
+                      <PdfResultBlock title="严格提取" result={activeDraft.strict_result} accentColor="#1d4ed8" />
+                      {activeDraft.inference_result ? (
+                        <PdfResultBlock title="推断补充" result={activeDraft.inference_result} accentColor="#0f766e" />
+                      ) : null}
+                      {isInferInProgress(activeDraft) ? (
+                        <div style={{ textAlign: "center", padding: 16 }}>
+                          <Progress
+                            percent={activeDraft.progress_percent ?? 0}
+                            size="small"
+                            status="active"
+                            style={{ maxWidth: 240, margin: "0 auto" }}
+                          />
+                          <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>
+                            {activeDraft.progress_message || "补充推断中..."}
+                          </Typography.Paragraph>
+                        </div>
+                      ) : null}
+                      {Object.keys(draftAppliedSnapshot).length > 0 ? (
+                        <Typography.Text type="secondary">
+                          {`已应用字段：${Object.keys(draftAppliedSnapshot).map((key) => PDF_FIELD_META[key as PdfFieldKey].label).join("、")}`}
+                        </Typography.Text>
+                      ) : null}
+                    </>
+                  )}
+                </Space>
+              </Card>
+            ) : null}
             <Form layout="vertical" form={form}>
               <Form.Item name="requirement_text" label="需求原文">
                 <TextArea rows={4} placeholder="贴入原始需求描述" />
@@ -991,60 +1712,23 @@ export default function ClarificationReviewPage() {
               </Form.Item>
               <Form.Item
                 name="rule_text"
-                label="分析规则"
+                label={
+                  <Space size={6}>
+                    <span>分析规则</span>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      (默认收起 6 行，向下拖拽可展开)
+                    </Typography.Text>
+                  </Space>
+                }
                 rules={[{ required: true, message: "请输入分析规则" }]}
               >
-                <TextArea rows={15} placeholder="可编辑默认规则模板" />
+                <TextArea
+                  rows={6}
+                  autoSize={{ minRows: 6, maxRows: 20 }}
+                  placeholder="可编辑默认规则模板"
+                />
               </Form.Item>
             </Form>
-
-            {activeDraft ? (
-              <Card
-                size="small"
-                title={
-                  <Space wrap>
-                    <FilePdfOutlined />
-                    <Typography.Text strong>PDF 拆解草稿</Typography.Text>
-                    <DraftStatusTag status={activeDraft.status} />
-                    <ProviderTag provider={activeDraft.llm_provider} />
-                  </Space>
-                }
-                extra={
-                  <Space wrap>
-                    {(activeDraft.status === "success" || activeDraft.status === "partial_success") ? (
-                      <Button onClick={() => void handleInferDraft()} loading={inferLoading}>
-                        LLM 补充推断
-                      </Button>
-                    ) : null}
-                    <Button type="primary" onClick={handleOpenApplyModal}>
-                      应用到表单
-                    </Button>
-                  </Space>
-                }
-                style={{ borderRadius: 16 }}
-                bodyStyle={{ padding: 16 }}
-              >
-                <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                  <Space wrap>
-                    <Typography.Text>{activeDraft.file_name}</Typography.Text>
-                    <Typography.Text type="secondary">{`${activeDraft.page_count} 页`}</Typography.Text>
-                    <Typography.Text type="secondary">{toDateTimeText(activeDraft.created_at)}</Typography.Text>
-                  </Space>
-                  {activeDraft.llm_message ? (
-                    <Alert type="warning" showIcon message={activeDraft.llm_message} />
-                  ) : null}
-                  <PdfResultBlock title="严格提取" result={activeDraft.strict_result} accentColor="#1d4ed8" />
-                  {activeDraft.inference_result ? (
-                    <PdfResultBlock title="推断补充" result={activeDraft.inference_result} accentColor="#0f766e" />
-                  ) : null}
-                  {Object.keys(draftAppliedSnapshot).length > 0 ? (
-                    <Typography.Text type="secondary">
-                      {`已应用字段：${Object.keys(draftAppliedSnapshot).map((key) => PDF_FIELD_META[key as PdfFieldKey].label).join("、")}`}
-                    </Typography.Text>
-                  ) : null}
-                </Space>
-              </Card>
-            ) : null}
           </Card>
         </Col>
 
@@ -1054,12 +1738,16 @@ export default function ClarificationReviewPage() {
             extra={
               activeRecord ? (
                 <Space wrap>
-                  <Tag color={activeRecord.llm_status === "success" ? "blue" : "red"}>
-                    {activeRecord.llm_status === "success" ? "分析成功" : "分析失败"}
-                  </Tag>
-                  <ProviderTag provider={activeRecord.llm_provider} />
+                  {isRecordTaskInProgress(activeRecord) ? (
+                    <Tag color="processing">分析中</Tag>
+                  ) : (
+                    <Tag color={activeRecord.llm_status === "success" ? "blue" : "red"}>
+                      {activeRecord.llm_status === "success" ? "分析成功" : "分析失败"}
+                    </Tag>
+                  )}
+                  {!isRecordTaskInProgress(activeRecord) ? <ProviderTag provider={activeRecord.llm_provider} /> : null}
                   <Typography.Text type="secondary">{toDateTimeText(activeRecord.created_at)}</Typography.Text>
-                  {activeRecord.llm_status === "success" ? (
+                  {activeRecord.llm_status === "success" && !isRecordTaskInProgress(activeRecord) ? (
                     <Button size="small" icon={<DownloadOutlined />} onClick={handleExportMarkdown}>
                       导出
                     </Button>
@@ -1072,14 +1760,68 @@ export default function ClarificationReviewPage() {
               <Spin style={{ display: "block", padding: 32 }} />
             ) : !activeRecord ? (
               <Empty description="提交分析后在此查看结构化结果" />
+            ) : isRecordTaskInProgress(activeRecord) ? (
+              <div style={{ padding: "24px 16px" }}>
+                <TaskProgressBar
+                  title="追问分析进行中"
+                  description="页面会自动刷新最新进度，预计 20~60 秒完成，不需要手动点击。"
+                  message={activeRecord.progress_message || "分析进行中..."}
+                  percent={activeRecord.progress_percent ?? undefined}
+                  indeterminate={activeRecord.progress_percent == null}
+                  status="running"
+                />
+              </div>
             ) : (
                 <Space direction="vertical" size={12} style={{ width: "100%" }}>
                 {activeRecord.llm_status === "failed" ? (
                   <Alert
-                    type="warning"
+                    type="error"
                     showIcon
-                    message="模型调用失败"
-                    description={activeRecord.llm_message || "未生成有效结果，已保存失败记录。"}
+                    message="模型调用失败，已为你兜底保存空结果"
+                    description={
+                      <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          {getFriendlyLLMErrorCopy(
+                            activeRecord.result?.llm_error,
+                            activeRecord.llm_message || "模型返回异常或超时，可以调整输入后重试。",
+                          )}
+                        </Typography.Text>
+                        {activeRecord.result?.llm_error?.code ? (
+                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                            错误码：{activeRecord.result.llm_error.code}
+                          </Typography.Text>
+                        ) : null}
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          当前表单内容已保留，点击「重试分析」会重新提交。
+                        </Typography.Text>
+                      </Space>
+                    }
+                    action={
+                      <Space>
+                        {activeRecord.result?.llm_error?.detail_url ? (
+                          <Button
+                            size="small"
+                            type="link"
+                            onClick={() => {
+                              if (activeRecord.result?.llm_error?.detail_url) {
+                                window.open(activeRecord.result.llm_error.detail_url, "_blank");
+                              }
+                            }}
+                          >
+                            查看详情
+                          </Button>
+                        ) : null}
+                        <Button
+                          size="small"
+                          type="primary"
+                          onClick={() => void handleSubmit()}
+                          loading={submitting || isRecordTaskInProgress(activeRecord)}
+                          disabled={!isRetryableLLMError(activeRecord.result?.llm_error)}
+                        >
+                          重试分析
+                        </Button>
+                      </Space>
+                    }
                   />
                 ) : null}
 
@@ -1089,6 +1831,44 @@ export default function ClarificationReviewPage() {
                     showIcon
                     message={activeRecord.source_meta.draft_expired ? "本次分析来源于已过期的 PDF 草稿" : "本次分析来源于 PDF 草稿"}
                     description={`应用字段：${activeRecord.source_meta.applied_fields.length > 0 ? activeRecord.source_meta.applied_fields.map((field) => PDF_FIELD_META[field as PdfFieldKey]?.label || field).join("、") : "无"}`}
+                  />
+                ) : null}
+
+                {activeRecord.task_status === "completed" && activeRecord.generated_requirement_id == null ? (
+                  <Affix offsetTop={80}>
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="追问分析已完成"
+                      description="确认完关键结论和假设后，可一键写入项目生成需求，结论/假设/待确认项会作为需求输入同步至后续风险分析与规则树生成。"
+                      action={
+                        <Button type="primary" size="small" icon={<PlusOutlined />} onClick={handleOpenCreateReqModal}>
+                          创建需求
+                        </Button>
+                      }
+                    />
+                  </Affix>
+                ) : null}
+                {activeRecord.generated_requirement_id != null ? (
+                  <Alert
+                    type="success"
+                    showIcon
+                    icon={<LinkOutlined />}
+                    message={`已关联需求 #${activeRecord.generated_requirement_id}`}
+                    action={
+                      <Button
+                        size="small"
+                        onClick={() => {
+                          if (createdRequirement && createdRequirement.id === activeRecord.generated_requirement_id) {
+                            setSelectedProjectId(createdRequirement.project_id);
+                          }
+                          setSelectedRequirementId(activeRecord.generated_requirement_id!);
+                          navigate("/rule-tree");
+                        }}
+                      >
+                        去规则树
+                      </Button>
+                    }
                   />
                 ) : null}
                 {isResultV2 ? (
@@ -1115,6 +1895,17 @@ export default function ClarificationReviewPage() {
                         { label: "依据", value: item.basis || "-" },
                         { label: "风险", value: item.risk || "-" },
                       ]}
+                      renderExtra={(item, index) => (
+                        <ResolutionControls
+                          status={item.resolution_status}
+                          note={item.resolution_note}
+                          resolvedBy={item.resolved_by}
+                          saving={resolutionSaving}
+                          onSave={(status, note, resolvedBy) =>
+                            handleSaveResolution({ item_type: "assumption", index, resolution_status: status, resolution_note: note, resolved_by: resolvedBy })
+                          }
+                        />
+                      )}
                     />
                   </>
                 ) : (
@@ -1279,7 +2070,20 @@ export default function ClarificationReviewPage() {
                       borderColor: group.borderColor,
                       background: "#ffffff",
                     },
-                    children: <RoleQuestionSection group={group} />,
+                    children: <RoleQuestionSection
+                      group={group}
+                      renderExtra={(item, index) => (
+                        <ResolutionControls
+                          status={item.resolution_status}
+                          note={item.resolution_note}
+                          resolvedBy={item.resolved_by}
+                          saving={resolutionSaving}
+                          onSave={(status, note, resolvedBy) =>
+                            handleSaveResolution({ item_type: "question", role: group.roleKey, index, resolution_status: status, resolution_note: note, resolved_by: resolvedBy })
+                          }
+                        />
+                      )}
+                    />,
                   }))}
                 />
 
@@ -1297,6 +2101,21 @@ export default function ClarificationReviewPage() {
                         { label: "影响", value: item.impact || "-" },
                         { label: "阻塞说明", value: item.blocking_reason || "-" },
                       ]}
+                      renderExtra={(item) => {
+                        const originalIndex = (activeRecord?.result.known_requirement_gaps || []).indexOf(item);
+                        if (originalIndex < 0) return null;
+                        return (
+                          <ResolutionControls
+                            status={item.resolution_status}
+                            note={item.resolution_note}
+                            resolvedBy={item.resolved_by}
+                            saving={resolutionSaving}
+                            onSave={(status, note, resolvedBy) =>
+                              handleSaveResolution({ item_type: "gap", index: originalIndex, resolution_status: status, resolution_note: note, resolved_by: resolvedBy })
+                            }
+                          />
+                        );
+                      }}
                     />
 
                     <RuleLikeList
@@ -1310,6 +2129,21 @@ export default function ClarificationReviewPage() {
                         { label: "原因", value: item.reason || "-" },
                         { label: "影响", value: item.impact || "-" },
                       ]}
+                      renderExtra={(item) => {
+                        const originalIndex = (activeRecord?.result.known_requirement_gaps || []).indexOf(item);
+                        if (originalIndex < 0) return null;
+                        return (
+                          <ResolutionControls
+                            status={item.resolution_status}
+                            note={item.resolution_note}
+                            resolvedBy={item.resolved_by}
+                            saving={resolutionSaving}
+                            onSave={(status, note, resolvedBy) =>
+                              handleSaveResolution({ item_type: "gap", index: originalIndex, resolution_status: status, resolution_note: note, resolved_by: resolvedBy })
+                            }
+                          />
+                        );
+                      }}
                     />
 
                     <RuleLikeList
@@ -1323,6 +2157,21 @@ export default function ClarificationReviewPage() {
                         { label: "原因", value: item.reason || "-" },
                         { label: "影响", value: item.impact || "-" },
                       ]}
+                      renderExtra={(item) => {
+                        const originalIndex = (activeRecord?.result.known_requirement_gaps || []).indexOf(item);
+                        if (originalIndex < 0) return null;
+                        return (
+                          <ResolutionControls
+                            status={item.resolution_status}
+                            note={item.resolution_note}
+                            resolvedBy={item.resolved_by}
+                            saving={resolutionSaving}
+                            onSave={(status, note, resolvedBy) =>
+                              handleSaveResolution({ item_type: "gap", index: originalIndex, resolution_status: status, resolution_note: note, resolved_by: resolvedBy })
+                            }
+                          />
+                        );
+                      }}
                     />
                   </>
                 ) : (
@@ -1337,6 +2186,17 @@ export default function ClarificationReviewPage() {
                         { label: "原因", value: item.reason || "-" },
                         { label: "影响", value: item.impact || "-" },
                       ]}
+                      renderExtra={(item, index) => (
+                        <ResolutionControls
+                          status={item.resolution_status}
+                          note={item.resolution_note}
+                          resolvedBy={item.resolved_by}
+                          saving={resolutionSaving}
+                          onSave={(status, note, resolvedBy) =>
+                            handleSaveResolution({ item_type: "gap", index, resolution_status: status, resolution_note: note, resolved_by: resolvedBy })
+                          }
+                        />
+                      )}
                     />
 
                     <RuleLikeList
@@ -1349,13 +2209,24 @@ export default function ClarificationReviewPage() {
                         { label: "依据", value: item.basis || "-" },
                         { label: "风险", value: item.risk || "-" },
                       ]}
+                      renderExtra={(item, index) => (
+                        <ResolutionControls
+                          status={item.resolution_status}
+                          note={item.resolution_note}
+                          resolvedBy={item.resolved_by}
+                          saving={resolutionSaving}
+                          onSave={(status, note, resolvedBy) =>
+                            handleSaveResolution({ item_type: "assumption", index, resolution_status: status, resolution_note: note, resolved_by: resolvedBy })
+                          }
+                        />
+                      )}
                     />
                   </>
                 )}
 
                 <Card
                   size="small"
-                  title="摘要 Markdown"
+                  title="摘要"
                   extra={<Button size="small" onClick={() => void copySummary()}>复制</Button>}
                 >
                   {summaryMarkdown.trim() ? (
@@ -1364,6 +2235,25 @@ export default function ClarificationReviewPage() {
                     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无摘要" />
                   )}
                 </Card>
+
+                {activeRecord.task_status === "completed" && activeRecord.generated_requirement_id == null ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "flex-end",
+                      gap: 8,
+                      padding: "12px 0",
+                      borderTop: "1px dashed #e6edf5",
+                    }}
+                  >
+                    <Button icon={<DownloadOutlined />} onClick={handleExportMarkdown}>
+                      导出 Markdown
+                    </Button>
+                    <Button type="primary" icon={<PlusOutlined />} onClick={handleOpenCreateReqModal}>
+                      一键创建需求
+                    </Button>
+                  </div>
+                ) : null}
               </Space>
             )}
           </Card>
@@ -1425,6 +2315,74 @@ export default function ClarificationReviewPage() {
             );
           })}
         </Space>
+      </Modal>
+
+      <Modal
+        title={createdRequirement ? "需求创建成功" : "从追问分析创建需求"}
+        open={createReqModalOpen}
+        onCancel={() => setCreateReqModalOpen(false)}
+        footer={
+          createdRequirement ? (
+            <Space>
+              <Button onClick={() => setCreateReqModalOpen(false)}>留在当前页面</Button>
+              <Button type="primary" onClick={handleGoToRuleTree}>去规则树页面</Button>
+            </Space>
+          ) : (
+            <Space>
+              <Button onClick={() => setCreateReqModalOpen(false)}>取消</Button>
+              <Button
+                type="primary"
+                loading={createReqLoading}
+                disabled={!createReqProjectId}
+                onClick={() => void handleCreateRequirement()}
+              >
+                确认创建
+              </Button>
+            </Space>
+          )
+        }
+        width={520}
+      >
+        {createdRequirement ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Alert
+              type="success"
+              showIcon
+              message={`需求 #${createdRequirement.id} 已创建`}
+              description={createdRequirement.title}
+            />
+            <Typography.Text type="secondary">
+              追问分析的已确认结论、假设和待确认项已自动写入需求输入。你可以前往规则树页面继续后续分析。
+            </Typography.Text>
+          </Space>
+        ) : (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <div>
+              <Typography.Text strong>选择项目</Typography.Text>
+              <Select
+                style={{ width: "100%", marginTop: 8 }}
+                placeholder="搜索或选择目标项目"
+                value={createReqProjectId}
+                onChange={setCreateReqProjectId}
+                showSearch
+                optionFilterProp="label"
+                filterOption={(input, option) =>
+                  ((option?.label as string) || "").toLowerCase().includes(input.toLowerCase())
+                }
+                options={projects.map((p) => ({ value: p.id, label: p.name }))}
+              />
+            </div>
+            <div>
+              <Typography.Text strong>需求标题</Typography.Text>
+              <Input
+                style={{ marginTop: 8 }}
+                placeholder="不填则自动从需求原文截取前 60 字"
+                value={createReqTitle}
+                onChange={(e) => setCreateReqTitle(e.target.value)}
+              />
+            </div>
+          </Space>
+        )}
       </Modal>
     </div>
   );

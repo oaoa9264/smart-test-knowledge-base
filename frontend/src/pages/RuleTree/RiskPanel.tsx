@@ -5,7 +5,6 @@ import {
   Button,
   Checkbox,
   Collapse,
-  Divider,
   Empty,
   Form,
   Input,
@@ -25,23 +24,18 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   ScanOutlined,
-  BookOutlined,
-  BranchesOutlined,
 } from "@ant-design/icons";
-import { getErrorDetailCode, getErrorMessage } from "../../api/client";
+import { getErrorMessage } from "../../api/client";
 import type {
   AnalysisStage,
   EffectiveSnapshot,
-  PrereleaseAuditResponse,
   PredevAnalysisResponse,
   RequirementInput,
   ReviewSnapshotResponse,
   RiskAnalysisTask,
   RiskAnalysisTaskSummary,
-  RiskCategory,
   RiskDecisionType,
   RiskItem,
-  RiskSource,
   RiskValidity,
 } from "../../types";
 import { analyzeRisks, clarifyRisk, decideRisk, deleteRisk, fetchRisks } from "../../api/risks";
@@ -50,28 +44,12 @@ import {
   getLatestSnapshot,
   listRequirementInputs,
 } from "../../api/effectiveRequirements";
-import { fetchRiskAnalysisTask, fetchRiskAnalysisTaskSummary, startRiskAnalysisTask } from "../../api/riskAnalysisTasks";
+import { fetchRiskAnalysisTask, fetchRiskAnalysisTaskSummary, startUnifiedRiskAnalysis } from "../../api/riskAnalysisTasks";
 import { fetchProductDocs, suggestDocUpdate } from "../../api/productDocs";
 import { useAppStore } from "../../stores/appStore";
 import { getRequirementInputTypeLabel, getRiskAnalysisTaskStatusLabel } from "../../utils/enumLabels";
-
-const categoryLabels: Record<RiskCategory, string> = {
-  input_validation: "输入校验",
-  flow_gap: "流程缺口",
-  data_integrity: "数据完整性",
-  boundary: "边界条件",
-  security: "安全风险",
-  product_knowledge: "产品知识",
-};
-
-const categoryColors: Record<RiskCategory, string> = {
-  input_validation: "orange",
-  flow_gap: "red",
-  data_integrity: "purple",
-  boundary: "blue",
-  security: "volcano",
-  product_knowledge: "cyan",
-};
+import TaskProgressBar, { type TaskStatus } from "../../components/TaskProgressBar";
+import { trackEvent } from "../../utils/telemetry";
 
 const riskLevelColors: Record<string, string> = {
   critical: "#ff4d4f",
@@ -93,14 +71,10 @@ const decisionIcons: Record<RiskDecisionType, React.ReactNode> = {
   ignored: <CloseCircleOutlined style={{ color: "#d9d9d9" }} />,
 };
 
-const sourceLabels: Record<RiskSource, string> = {
-  rule_tree: "技术风险",
-  product_knowledge: "产品知识风险",
-};
-
-const sourceIcons: Record<RiskSource, React.ReactNode> = {
-  rule_tree: <BranchesOutlined />,
-  product_knowledge: <BookOutlined />,
+const stageLabels: Record<string, string> = {
+  review: "评审",
+  pre_dev: "开发前",
+  pre_release: "提测前",
 };
 
 const validityLabels: Record<RiskValidity, string> = {
@@ -115,12 +89,6 @@ const validityTagColors: Record<RiskValidity, string> = {
   superseded: "default",
   reopened: "orange",
   resolved: "blue",
-};
-
-const stageLabels: Record<AnalysisStage, string> = {
-  review: "评审",
-  pre_dev: "开发前",
-  pre_release: "提测前",
 };
 
 const snapshotFieldLabels: Record<string, string> = {
@@ -194,16 +162,14 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [autoCreateNode, setAutoCreateNode] = useState(true);
-  const [stageActionLoading, setStageActionLoading] = useState<AnalysisStage | null>(null);
+  const [unifiedLoading, setUnifiedLoading] = useState(false);
   const [latestSnapshot, setLatestSnapshot] = useState<EffectiveSnapshot | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [requirementInputs, setRequirementInputs] = useState<RequirementInput[]>([]);
   const [inputsLoading, setInputsLoading] = useState(false);
   const [validityFilter, setValidityFilter] = useState<RiskValidity | "all">("all");
-  const [analysisStageFilter, setAnalysisStageFilter] = useState<AnalysisStage | "all">("all");
   const [reviewResult, setReviewResult] = useState<ReviewSnapshotResponse | null>(null);
   const [predevResult, setPredevResult] = useState<PredevAnalysisResponse | null>(null);
-  const [auditResult, setAuditResult] = useState<PrereleaseAuditResponse | null>(null);
   const [stageTasks, setStageTasks] = useState<RiskAnalysisTaskSummary>(EMPTY_TASK_SUMMARY);
   const [activeStage, setActiveStage] = useState<AnalysisStage | null>(null);
 
@@ -314,12 +280,7 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       if (!parsed) return;
       setPredevResult(parsed);
       if (parsed.snapshot) setLatestSnapshot(parsed.snapshot);
-      return;
     }
-
-    const parsed = parseRiskAnalysisTaskResult<PrereleaseAuditResponse>(task);
-    if (!parsed) return;
-    setAuditResult(parsed);
   }, []);
 
   const getPreferredActiveStage = useCallback(
@@ -376,7 +337,6 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     void loadTaskSummary();
     setReviewResult(null);
     setPredevResult(null);
-    setAuditResult(null);
     setStageTasks(EMPTY_TASK_SUMMARY);
     setActiveStage(null);
     stagePollDelayRef.current = 2000;
@@ -386,44 +346,38 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       pre_release: null,
     };
     setValidityFilter("all");
-    setAnalysisStageFilter("all");
   }, [loadLatestSnapshot, loadRequirementInputs, loadTaskSummary]);
 
   const filteredRisks = useMemo(() => {
     return risks.filter((risk) => {
       const validityMatches = validityFilter === "all" || (risk.validity || "active") === validityFilter;
-      const stageMatches = analysisStageFilter === "all" || risk.analysis_stage === analysisStageFilter;
-      return validityMatches && stageMatches;
+      return validityMatches;
     });
-  }, [analysisStageFilter, risks, validityFilter]);
+  }, [risks, validityFilter]);
 
-  const groupedBySource = useMemo(() => {
-    const groups: Record<RiskSource, Record<string, RiskItem[]>> = {
-      rule_tree: {},
-      product_knowledge: {},
+  const stageGroupedRisks = useMemo(() => {
+    const groups: Record<string, RiskItem[]> = {
+      review: [],
+      pre_dev: [],
+      pre_release: [],
+      other: [],
     };
     for (const risk of filteredRisks) {
-      const source = risk.risk_source || "rule_tree";
-      const cat = risk.category;
-      if (!groups[source]) groups[source] = {};
-      if (!groups[source][cat]) groups[source][cat] = [];
-      groups[source][cat].push(risk);
+      const stage = (risk.analysis_stage || "") as string;
+      if (stage === "review" || stage === "pre_dev" || stage === "pre_release") {
+        groups[stage].push(risk);
+      } else {
+        groups.other.push(risk);
+      }
     }
     return groups;
   }, [filteredRisks]);
 
-  const [activeKeys, setActiveKeys] = useState<string[]>([]);
-  const latestSnapshotStale = latestSnapshot?.is_stale === true;
+  const anyTaskInProgress = useMemo(() => {
+    return STAGE_ORDER.some((stage) => isRiskAnalysisTaskInProgress(stageTasks[stage]));
+  }, [stageTasks]);
 
-  useEffect(() => {
-    const keys: string[] = [];
-    for (const source of ["rule_tree", "product_knowledge"] as RiskSource[]) {
-      for (const cat of Object.keys(groupedBySource[source] || {})) {
-        keys.push(`${source}_${cat}`);
-      }
-    }
-    setActiveKeys(keys);
-  }, [groupedBySource]);
+  const latestSnapshotStale = latestSnapshot?.is_stale === true;
 
   const handleAnalyze = async () => {
     if (!requirementId) return;
@@ -440,33 +394,24 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     }
   };
 
-  const handleStageAction = async (stage: AnalysisStage) => {
+  const handleUnifiedAnalysis = async () => {
     if (!requirementId) return;
-    setStageActionLoading(stage);
-    setActiveStage(stage);
+    setUnifiedLoading(true);
+    trackEvent("risk.analysis.start", { requirement_id: requirementId });
     try {
-      const accepted = await startRiskAnalysisTask(requirementId, stage);
-      setStageTasks((prev) => ({ ...prev, [stage]: accepted.task }));
-      hydrateStageTaskResult(stage, accepted.task);
-      message.success(
-        stage === "review"
-          ? "已开始后台评审分析"
-          : stage === "pre_dev"
-            ? "已开始后台开发前分析"
-            : "已开始后台提测前审计",
-      );
+      const result = await startUnifiedRiskAnalysis(requirementId);
+      await loadTaskSummary();
+      const stageCount = result.stages.length;
+      message.success(`已开始风险分析（${stageCount} 个阶段）`);
+      trackEvent("risk.analysis.complete", { requirement_id: requirementId, stage_count: stageCount });
     } catch (error) {
-      void refreshStageTask(stage).catch(() => null);
-      const detailCode = getErrorDetailCode(error);
-      if (detailCode === "NO_SNAPSHOT") {
-        message.error("尚未生成有效需求快照，请先执行评审分析。");
-      } else if (detailCode === "STALE_SNAPSHOT") {
-        message.error("需求已变更，当前快照已过期，请先重新执行评审分析。");
-      } else {
-        message.error(getErrorMessage(error, stage === "review" ? "评审分析失败" : stage === "pre_dev" ? "开发前分析失败" : "提测前审计失败"));
-      }
+      message.error(getErrorMessage(error, "启动风险分析失败"));
+      trackEvent("risk.analysis.failure", {
+        requirement_id: requirementId,
+        message: getErrorMessage(error, ""),
+      });
     } finally {
-      setStageActionLoading(null);
+      setUnifiedLoading(false);
     }
   };
 
@@ -529,17 +474,13 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
         message.success(
           stage === "review"
             ? "评审分析完成"
-            : stage === "pre_dev"
-              ? "开发前分析完成"
-              : "提测前审计完成",
+            : "开发前分析完成",
         );
         void (async () => {
           const newRisks = await loadRisks();
           onRisksChange?.(newRisks);
           await loadRequirementInputs();
-          if (stage !== "pre_release") {
-            await loadLatestSnapshot();
-          }
+          await loadLatestSnapshot();
         })();
         return;
       }
@@ -757,28 +698,6 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     </div>
   );
 
-  const buildCollapseItems = (source: RiskSource) => {
-    const cats = groupedBySource[source] || {};
-    return Object.entries(cats).map(([category, items]) => ({
-      key: `${source}_${category}`,
-      label: (
-        <Space>
-          <Tag color={categoryColors[category as RiskCategory]}>
-            {categoryLabels[category as RiskCategory] || category}
-          </Tag>
-          <Badge count={items.length} style={{ backgroundColor: "#8c8c8c" }} />
-        </Space>
-      ),
-      children: (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {items.map(renderRiskCard)}
-        </div>
-      ),
-    }));
-  };
-
-  const ruleTreeItems = buildCollapseItems("rule_tree");
-  const productItems = buildCollapseItems("product_knowledge");
   const latestSnapshotFields = (latestSnapshot?.fields || []).filter(
     (field) => field.field_key !== "rollout_strategy",
   );
@@ -794,24 +713,27 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
     const retainedResultHint =
       isRiskAnalysisTaskInProgress(task) && task.result_json ? "后台重新分析中，当前仍展示上次结果。" : null;
 
-    let type: "info" | "success" | "warning" | "error" = "info";
-    if (task.status === "completed") type = "success";
-    if (task.status === "interrupted") type = "warning";
-    if (task.status === "failed") type = "error";
+    let progressStatus: TaskStatus = "idle";
+    if (task.status === "completed") progressStatus = "success";
+    else if (task.status === "interrupted") progressStatus = "idle";
+    else if (task.status === "failed") progressStatus = "error";
+    else if (isRiskAnalysisTaskInProgress(task)) progressStatus = "running";
+
+    const descParts: string[] = [];
+    if (task.progress_message) descParts.push(task.progress_message);
+    if (retainedResultHint) descParts.push(retainedResultHint);
+    if (task.last_error && task.status !== "completed") descParts.push(task.last_error);
+    const desc = descParts.join(" · ");
 
     return (
-      <Alert
+      <TaskProgressBar
         key={stage}
-        type={type}
-        showIcon
-        message={`${stageLabels[stage]}：${getRiskAnalysisTaskStatusLabel(task.status)}`}
-        description={
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <div>{task.progress_message || "暂无状态说明"}</div>
-            {retainedResultHint && <div>{retainedResultHint}</div>}
-            {task.last_error && task.status !== "completed" && <div>{task.last_error}</div>}
-          </div>
-        }
+        compact={progressStatus !== "running"}
+        title={`${stageLabels[stage]}：${getRiskAnalysisTaskStatusLabel(task.status)}`}
+        description={desc}
+        percent={task.progress_percent ?? undefined}
+        indeterminate={task.progress_percent == null}
+        status={progressStatus}
       />
     );
   }).filter(Boolean);
@@ -827,82 +749,52 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
       }}
     >
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #f0f0f0" }}>
-        <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginBottom: 8 }}>
-          <Tooltip title={riskSummary.pending > 0 ? "请先处理所有待处理风险项" : undefined}>
-            <span>
-              <Button
-                size="small"
-                type="primary"
-                icon={<ScanOutlined />}
-                loading={analyzing}
-                onClick={handleAnalyze}
-                disabled={!requirementId || riskSummary.pending > 0}
-              >
-                分析
-              </Button>
-            </span>
-          </Tooltip>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <Typography.Text strong>风险分析</Typography.Text>
+          <Button
+            size="small"
+            type="primary"
+            icon={<ScanOutlined />}
+            onClick={() => void handleUnifiedAnalysis()}
+            loading={unifiedLoading}
+            disabled={!requirementId || anyTaskInProgress}
+          >
+            开始分析
+          </Button>
         </div>
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 8, padding: "6px 10px" }}
+          message="风险识别仅供参考，不会拦截后续流程。"
+          description={
+            <Space direction="vertical" size={2} style={{ width: "100%" }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                本次分析基于需求正文 + 追问结论，规则树节点不参与本次分析。
+              </Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                处理完风险后，可直接继续生成规则树和测试用例。
+              </Typography.Text>
+            </Space>
+          }
+        />
         <Space size={12} wrap>
           <span>
-            可见风险 <strong>{filteredRisks.length}</strong>
+            可见 <strong>{filteredRisks.length}</strong>
           </span>
           <span>
-            <Badge status="warning" />
-            待处理 <strong>{riskSummary.pending}</strong>
+            <Badge status="warning" />待处理 <strong>{riskSummary.pending}</strong>
           </span>
           <span>
-            <Badge status="success" />
-            已接受 <strong>{riskSummary.accepted}</strong>
+            <Badge status="success" />已接受 <strong>{riskSummary.accepted}</strong>
           </span>
           <span>
-            <Badge status="default" />
-            已忽略 <strong>{riskSummary.ignored}</strong>
+            <Badge status="default" />已忽略 <strong>{riskSummary.ignored}</strong>
           </span>
-        </Space>
-        <Space size={12} wrap style={{ marginTop: 8 }}>
-          <span><Badge color="green" />有效 <strong>{riskSummary.active}</strong></span>
-          <span><Badge color="#bfbfbf" />已过时 <strong>{riskSummary.superseded}</strong></span>
-          <span><Badge color="orange" />重开 <strong>{riskSummary.reopened}</strong></span>
-          <span><Badge color="blue" />已解决 <strong>{riskSummary.resolved}</strong></span>
-        </Space>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
-          <Switch size="small" checked={autoCreateNode} onChange={setAutoCreateNode} />
-          <Tooltip title="开启后，接受风险时自动在规则树上创建对应的异常节点">
-            <Typography.Text type="secondary" style={{ fontSize: 12, cursor: "help" }}>
-              接受时自动创建节点
-            </Typography.Text>
-          </Tooltip>
-        </div>
-        <Space wrap style={{ marginTop: 8 }}>
-          <Button
-            size="small"
-            onClick={() => void handleStageAction("review")}
-            loading={stageActionLoading === "review"}
-            disabled={!requirementId || isRiskAnalysisTaskInProgress(stageTasks.review)}
-          >
-            评审分析
-          </Button>
-          <Button
-            size="small"
-            onClick={() => void handleStageAction("pre_dev")}
-            loading={stageActionLoading === "pre_dev"}
-            disabled={!requirementId || isRiskAnalysisTaskInProgress(stageTasks.pre_dev)}
-          >
-            开发前分析
-          </Button>
-          <Button
-            size="small"
-            onClick={() => void handleStageAction("pre_release")}
-            loading={stageActionLoading === "pre_release"}
-            disabled={!requirementId || isRiskAnalysisTaskInProgress(stageTasks.pre_release)}
-          >
-            提测前审计
-          </Button>
         </Space>
         {latestSnapshotStale && (
-          <Typography.Text type="warning" style={{ display: "block", marginTop: 8 }}>
-            当前最新快照已过期，开发前分析和提测前审计会要求先重新执行评审分析。
+          <Typography.Text type="warning" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
+            当前最新快照已过期，分析会基于最新输入重新生成。
           </Typography.Text>
         )}
         {stageTaskAlerts.length > 0 && (
@@ -910,38 +802,54 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
             {stageTaskAlerts}
           </div>
         )}
-        <Space wrap style={{ marginTop: 8 }}>
-          <Select
-            size="small"
-            style={{ width: 130 }}
-            value={validityFilter}
-            onChange={(value) => setValidityFilter(value)}
-            options={[
-              { label: "全部有效性", value: "all" },
-              { label: "有效", value: "active" },
-              { label: "已过时", value: "superseded" },
-              { label: "重新打开", value: "reopened" },
-              { label: "已解决", value: "resolved" },
-            ]}
-          />
-          <Select
-            size="small"
-            style={{ width: 130 }}
-            value={analysisStageFilter}
-            onChange={(value) => setAnalysisStageFilter(value)}
-            options={[
-              { label: "全部阶段", value: "all" },
-              { label: "评审", value: "review" },
-              { label: "开发前", value: "pre_dev" },
-              { label: "提测前", value: "pre_release" },
-            ]}
-          />
-        </Space>
-        {latestSnapshot && (
-          <Typography.Text type="secondary" style={{ display: "block", marginTop: 8 }}>
-            最新快照：{latestSnapshot.summary || "未生成摘要"}
-          </Typography.Text>
-        )}
+        <Collapse
+          ghost
+          size="small"
+          items={[
+            {
+              key: "advanced",
+              label: <Typography.Text type="secondary" style={{ fontSize: 12 }}>更多筛选与配置</Typography.Text>,
+              children: (
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Space size={12} wrap>
+                    <span><Badge color="green" />有效 <strong>{riskSummary.active}</strong></span>
+                    <span><Badge color="#bfbfbf" />已过时 <strong>{riskSummary.superseded}</strong></span>
+                    <span><Badge color="orange" />重开 <strong>{riskSummary.reopened}</strong></span>
+                    <span><Badge color="blue" />已解决 <strong>{riskSummary.resolved}</strong></span>
+                  </Space>
+                  <Space wrap>
+                    <Select
+                      size="small"
+                      style={{ width: 130 }}
+                      value={validityFilter}
+                      onChange={(value) => setValidityFilter(value)}
+                      options={[
+                        { label: "全部有效性", value: "all" },
+                        { label: "有效", value: "active" },
+                        { label: "已过时", value: "superseded" },
+                        { label: "重新打开", value: "reopened" },
+                        { label: "已解决", value: "resolved" },
+                      ]}
+                    />
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <Switch size="small" checked={autoCreateNode} onChange={setAutoCreateNode} />
+                      <Tooltip title="开启后，接受风险时自动在规则树上创建对应的异常节点">
+                        <Typography.Text type="secondary" style={{ fontSize: 12, cursor: "help" }}>
+                          接受时自动创建节点
+                        </Typography.Text>
+                      </Tooltip>
+                    </div>
+                  </Space>
+                  {latestSnapshot && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      最新快照：{latestSnapshot.summary || "未生成摘要"}
+                    </Typography.Text>
+                  )}
+                </Space>
+              ),
+            },
+          ]}
+        />
       </div>
 
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
@@ -953,23 +861,6 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
                 type="warning"
                 showIcon
                 message="需求已变更，当前快照不是基于最新输入生成，结果可能不可靠，请重新执行评审分析。"
-              />
-            )}
-            {auditResult && (
-              <Alert
-                type={auditResult.blocking_risks.length > 0 ? "warning" : "success"}
-                showIcon
-                message={auditResult.closure_summary || "提测前审计已完成"}
-                description={
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <div>阻塞风险：{auditResult.blocking_risks.length}</div>
-                    <div>重新打开：{auditResult.reopened_risks.length}</div>
-                    <div>已解决：{auditResult.resolved_risks.length}</div>
-                    {auditResult.audit_notes.length > 0 && (
-                      <div>审计备注：{auditResult.audit_notes.join("；")}</div>
-                    )}
-                  </div>
-                }
               />
             )}
             <Collapse
@@ -1066,42 +957,36 @@ export default function RiskPanel({ requirementId, onNodeLocate, onRiskConverted
             <div style={{ textAlign: "center", padding: 32 }}>
               <Spin />
             </div>
-          ) : risks.length === 0 ? (
-            <Empty description="暂无风险项" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          ) : filteredRisks.length === 0 ? (
+            <div style={{ padding: "16px 16px 24px" }}>
+              <Alert
+                type="success"
+                showIcon
+                message="当前没有待处理或历史风险"
+                description="完成澄清后，系统不会拦截你的流程。可继续去「规则树」补全节点或生成用例，这里会持续收集所有 AI 识别到的风险项，供有需要时复盘。"
+              />
+            </div>
           ) : (
-            <>
-              {ruleTreeItems.length > 0 && (
-                <>
-                  <div style={{ padding: "4px 16px", display: "flex", alignItems: "center", gap: 6 }}>
-                    {sourceIcons.rule_tree}
-                    <Typography.Text strong style={{ fontSize: 13 }}>{sourceLabels.rule_tree}</Typography.Text>
-                    <Badge count={risks.filter(r => (r.risk_source || "rule_tree") === "rule_tree").length} style={{ backgroundColor: "#1890ff" }} />
+            <div style={{ padding: "0 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+              {(["review", "pre_dev", "pre_release", "other"] as const).map((stage) => {
+                const items = stageGroupedRisks[stage];
+                if (items.length === 0) return null;
+                const label =
+                  stage === "other"
+                    ? "未归类阶段"
+                    : `${stageLabels[stage] || stage}阶段 · ${items.length} 条`;
+                return (
+                  <div key={stage}>
+                    <Typography.Text strong style={{ fontSize: 12, color: "#6b7a90" }}>
+                      {label}
+                    </Typography.Text>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 6 }}>
+                      {items.map(renderRiskCard)}
+                    </div>
                   </div>
-                  <Collapse
-                    ghost
-                    activeKey={activeKeys}
-                    onChange={(keys) => setActiveKeys(keys as string[])}
-                    items={ruleTreeItems}
-                  />
-                </>
-              )}
-              {productItems.length > 0 && (
-                <>
-                  {ruleTreeItems.length > 0 && <Divider style={{ margin: "8px 0" }} />}
-                  <div style={{ padding: "4px 16px", display: "flex", alignItems: "center", gap: 6 }}>
-                    {sourceIcons.product_knowledge}
-                    <Typography.Text strong style={{ fontSize: 13, color: "#13c2c2" }}>{sourceLabels.product_knowledge}</Typography.Text>
-                    <Badge count={risks.filter(r => r.risk_source === "product_knowledge").length} style={{ backgroundColor: "#13c2c2" }} />
-                  </div>
-                  <Collapse
-                    ghost
-                    activeKey={activeKeys}
-                    onChange={(keys) => setActiveKeys(keys as string[])}
-                    items={productItems}
-                  />
-                </>
-              )}
-            </>
+                );
+              })}
+            </div>
           )}
         </div>
       </div>

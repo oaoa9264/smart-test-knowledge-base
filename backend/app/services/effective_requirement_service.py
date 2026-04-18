@@ -156,7 +156,7 @@ def generate_review_snapshot(
 
     inputs = list_requirement_inputs(db, requirement_id)
 
-    formal_inputs_text = _format_inputs(inputs)
+    formal_inputs_text = _format_inputs(inputs, raw_text=requirement.raw_text)
     product_context = _build_review_product_context(db, requirement, inputs, llm_client)
 
     llm_result = _call_llm_for_review(
@@ -261,20 +261,53 @@ def list_snapshots(
     )
 
 
-def _format_inputs(inputs: List[RequirementInput]) -> str:
+def _format_inputs(inputs: List[RequirementInput], raw_text: str = "") -> str:
     if not inputs:
         return "（暂无正式补充输入）"
-    lines = []
+    _CLARIFICATION_TYPES = {"clarification_confirmed", "clarification_assumption", "clarification_pending"}
+    raw_text_stripped = (raw_text or "").strip()
+    _CLARIFICATION_STATUS_LABELS = {
+        "clarification_confirmed": "✅ 已确认",
+        "clarification_assumption": "⚠️ 按假设推进",
+        "clarification_pending": "❓ 待确认",
+    }
+    regular_lines = []
+    clarification_lines = []
     for inp in inputs:
+        content = (inp.content or "").strip()
+        if not content or content == raw_text_stripped:
+            continue
         itype = inp.input_type.value if hasattr(inp.input_type, "value") else inp.input_type
         label = inp.source_label or ""
         label_part = "（来源：{0}）".format(label) if label else ""
-        lines.append("- [{type}]{label} {content}".format(
-            type=itype,
-            label=label_part,
-            content=inp.content,
-        ))
-    return "\n".join(lines)
+        if itype in _CLARIFICATION_TYPES:
+            status_label = _CLARIFICATION_STATUS_LABELS.get(itype, itype)
+            line = "- [{status}]{label} {content}".format(
+                status=status_label,
+                label=label_part,
+                content=content,
+            )
+            clarification_lines.append(line)
+        else:
+            line = "- [{type}]{label} {content}".format(
+                type=itype,
+                label=label_part,
+                content=content,
+            )
+            regular_lines.append(line)
+    sections = []
+    if regular_lines:
+        sections.append("\n".join(regular_lines))
+    if clarification_lines:
+        sections.append(
+            "【追问分析结论 — 请基于以下结论做深入风险分析】\n"
+            "以下是追问分析阶段已梳理的结论，请将其作为重要上下文：\n"
+            "- 已确认的结论视为硬性约束，分析是否存在遗漏的配套风险\n"
+            "- 按假设推进的项目重点关注假设不成立时的影响\n"
+            "- 待确认的问题直接作为风险输出，并给出具体建议\n\n"
+            + "\n".join(clarification_lines)
+        )
+    return "\n\n".join(sections) if sections else "（暂无正式补充输入）"
 
 
 def _build_review_product_context(

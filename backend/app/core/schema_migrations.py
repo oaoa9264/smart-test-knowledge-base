@@ -217,3 +217,93 @@ def ensure_clarification_review_source_columns(engine: Engine) -> None:
                 "ON clarification_review_records (source_draft_id)"
             )
         )
+
+
+def ensure_clarification_review_async_columns(engine: Engine) -> None:
+    _ensure_additive_columns(
+        engine,
+        "clarification_review_records",
+        {
+            "task_status": "task_status VARCHAR(20) NOT NULL DEFAULT 'completed'",
+            "progress_message": "progress_message TEXT",
+            "progress_percent": "progress_percent INTEGER",
+            "updated_at": "updated_at DATETIME",
+        },
+    )
+    _ensure_additive_columns(
+        engine,
+        "clarification_review_pdf_drafts",
+        {
+            "progress_message": "progress_message TEXT",
+            "progress_percent": "progress_percent INTEGER",
+            "infer_task_status": "infer_task_status VARCHAR(20)",
+        },
+    )
+
+
+def ensure_clarification_review_requirement_link(engine: Engine) -> None:
+    _ensure_additive_columns(
+        engine,
+        "clarification_review_records",
+        {
+            "generated_requirement_id": "generated_requirement_id INTEGER",
+        },
+    )
+    _ensure_additive_columns(
+        engine,
+        "clarification_review_pdf_drafts",
+        {
+            "generated_requirement_id": "generated_requirement_id INTEGER",
+        },
+    )
+
+    # SQLite's ALTER TABLE ADD COLUMN cannot attach FK constraints, so we also
+    # create supporting indexes (FK enforcement itself is handled at the ORM
+    # layer via SET NULL cascades during application-level deletes).
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        existing_tables = set(inspector.get_table_names())
+        if "clarification_review_records" in existing_tables:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "ix_clarification_review_records_generated_requirement_id "
+                    "ON clarification_review_records (generated_requirement_id)"
+                )
+            )
+        if "clarification_review_pdf_drafts" in existing_tables:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "ix_clarification_review_pdf_drafts_generated_requirement_id "
+                    "ON clarification_review_pdf_drafts (generated_requirement_id)"
+                )
+            )
+
+
+def clear_dangling_clarification_review_requirement_links(engine: Engine) -> None:
+    """Emulate ON DELETE SET NULL for legacy SQLite rows where FK is not enforced."""
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        existing_tables = set(inspector.get_table_names())
+        if "requirements" not in existing_tables:
+            return
+
+        if "clarification_review_records" in existing_tables:
+            conn.execute(
+                text(
+                    "UPDATE clarification_review_records "
+                    "SET generated_requirement_id = NULL "
+                    "WHERE generated_requirement_id IS NOT NULL "
+                    "AND generated_requirement_id NOT IN (SELECT id FROM requirements)"
+                )
+            )
+        if "clarification_review_pdf_drafts" in existing_tables:
+            conn.execute(
+                text(
+                    "UPDATE clarification_review_pdf_drafts "
+                    "SET generated_requirement_id = NULL "
+                    "WHERE generated_requirement_id IS NOT NULL "
+                    "AND generated_requirement_id NOT IN (SELECT id FROM requirements)"
+                )
+            )

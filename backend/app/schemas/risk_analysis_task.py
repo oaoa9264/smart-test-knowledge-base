@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel
 
@@ -32,3 +32,8 @@ class RiskAnalysisTaskSummaryRead(BaseModel):
 class RiskAnalysisTaskStartResponse(BaseModel):
     accepted: bool
     task: RiskAnalysisTaskRead
+
+
+class UnifiedRiskAnalysisStartResponse(BaseModel):
+    accepted: bool
+    stages: List[str]

@@ -82,6 +82,7 @@ export default function ProjectListPage() {
   const [viewRequirement, setViewRequirement] = useState<Requirement | null>(null);
   const [editingRequirement, setEditingRequirement] = useState<Requirement | null>(null);
   const [productDocs, setProductDocs] = useState<ProductDoc[]>([]);
+  const [requirementSearch, setRequirementSearch] = useState("");
   const [normalizedDocOpen, setNormalizedDocOpen] = useState(false);
   const [normalizedDocLoading, setNormalizedDocLoading] = useState(false);
   const [normalizedDocDownloading, setNormalizedDocDownloading] = useState(false);
@@ -486,14 +487,43 @@ export default function ProjectListPage() {
             </Space>
           }
         >
+          <div style={{ marginBottom: 12 }}>
+            <Input.Search
+              allowClear
+              value={requirementSearch}
+              placeholder="搜索标题 / 需求原文关键字"
+              onChange={(e) => setRequirementSearch(e.target.value)}
+              style={{ maxWidth: 320 }}
+            />
+          </div>
           <Table<Requirement>
             size="small"
             columns={requirementColumns}
-            dataSource={requirements}
+            dataSource={(() => {
+              const kw = requirementSearch.trim().toLowerCase();
+              if (!kw) return requirements;
+              return requirements.filter((r) => {
+                const title = (r.title || "").toLowerCase();
+                const raw = ((r as Requirement & { raw_text?: string }).raw_text || "").toLowerCase();
+                return title.includes(kw) || raw.includes(kw);
+              });
+            })()}
             rowKey="id"
-            pagination={false}
+            pagination={{
+              pageSize: 20,
+              showSizeChanger: true,
+              pageSizeOptions: ["10", "20", "50", "100"],
+              showTotal: (total) => `共 ${total} 条`,
+              size: "small",
+            }}
+            locale={{ emptyText: selectedProjectId ? "当前项目下暂无需求，点击右上角新建需求" : "请先在左侧选择项目" }}
+            rowClassName={(record) => (record.id === selectedRequirementId ? "requirement-row-selected" : "")}
             onRow={(row) => ({
               onClick: () => setSelectedRequirementId(row.id),
+              style: {
+                cursor: "pointer",
+                background: row.id === selectedRequirementId ? "#f0f7ff" : undefined,
+              },
             })}
           />
         </Card>

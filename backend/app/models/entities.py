@@ -89,6 +89,9 @@ class InputType(str, enum.Enum):
     pm_addendum = "pm_addendum"
     test_clarification = "test_clarification"
     review_note = "review_note"
+    clarification_confirmed = "clarification_confirmed"
+    clarification_assumption = "clarification_assumption"
+    clarification_pending = "clarification_pending"
 
 
 class AnalysisStage(str, enum.Enum):
@@ -325,7 +328,12 @@ class ClarificationReviewRecord(Base):
     llm_message = Column(Text, nullable=True)
     source_draft_id = Column(Integer, nullable=True, index=True)
     source_meta_json = Column(Text, nullable=True)
+    task_status = Column(String(20), nullable=False, default="completed")
+    progress_message = Column(Text, nullable=True)
+    progress_percent = Column(Integer, nullable=True)
+    generated_requirement_id = Column(Integer, ForeignKey("requirements.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
 class ClarificationReviewPdfDraft(Base):
@@ -342,6 +350,9 @@ class ClarificationReviewPdfDraft(Base):
     infer_llm_status = Column(String(20), nullable=True)
     infer_llm_provider = Column(String(64), nullable=True)
     infer_llm_message = Column(Text, nullable=True)
+    infer_task_status = Column(String(20), nullable=True)
+    progress_message = Column(Text, nullable=True)
+    progress_percent = Column(Integer, nullable=True)
     full_text_json = Column(Text, nullable=True)
     page_text_stats_json = Column(Text, nullable=True)
     selected_page_indexes_json = Column(Text, nullable=True)
@@ -350,6 +361,12 @@ class ClarificationReviewPdfDraft(Base):
     strict_result_json = Column(Text, nullable=True)
     inference_result_json = Column(Text, nullable=True)
     expires_at = Column(DateTime, nullable=False, index=True)
+    generated_requirement_id = Column(
+        Integer,
+        ForeignKey("requirements.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

@@ -13,13 +13,16 @@ from app.models.entities import (
     NodeType,
     Project,
     Requirement,
+    RequirementInput,
     RiskItem,
     RiskLevel,
+    RiskValidity,
     RuleNode,
     RuleTreeMessage,
     RuleTreeSession,
     RuleTreeSessionStatus,
 )
+from app.services.requirement_context_helpers import list_requirement_inputs
 from app.services.llm_client import LLMClient
 from app.services.product_doc_service import (
     get_chain_aware_chunks,
@@ -352,6 +355,78 @@ def _build_rule_tree_product_context(
     return "\n\n".join(sections)
 
 
+def _build_supplemental_context(db: Session, requirement_id: int) -> str:
+    """Build supplemental context from RequirementInput + RiskItem for rule tree generation.
+
+    Returns a formatted string to inject into the prompt template's {supplemental_context}.
+    Returns empty string when no supplemental data exists.
+    """
+    inputs = list_requirement_inputs(db, requirement_id)
+    risk_items = (
+        db.query(RiskItem)
+        .filter(
+            RiskItem.requirement_id == requirement_id,
+            RiskItem.validity.in_([RiskValidity.active, RiskValidity.reopened]),
+        )
+        .all()
+    )
+
+    if not inputs and not risk_items:
+        return ""
+
+    _TYPE_LABELS = {
+        "clarification_confirmed": "已确认的需求澄清（必须体现在规则树中）",
+        "clarification_assumption": "风险假设（需要生成对应的异常/边界分支节点）",
+        "clarification_pending": "待确认项（如果影响流程分支，标记为待确认节点）",
+    }
+
+    grouped: Dict[str, List[str]] = {}
+    for item in inputs:
+        content = (item.content or "").strip()
+        if not content:
+            continue
+        input_type = item.input_type.value if hasattr(item.input_type, "value") else item.input_type
+        if input_type == "raw_requirement":
+            continue
+        label = _TYPE_LABELS.get(input_type)
+        if label:
+            grouped.setdefault(input_type, []).append(content)
+        else:
+            grouped.setdefault("other", []).append(
+                "[{type}] {content}".format(type=input_type, content=content)
+            )
+
+    sections = []
+    for type_key in ("clarification_confirmed", "clarification_assumption", "clarification_pending"):
+        items = grouped.get(type_key)
+        if items:
+            label = _TYPE_LABELS[type_key]
+            numbered = "\n".join(
+                "{i}. {c}".format(i=i, c=c) for i, c in enumerate(items, 1)
+            )
+            sections.append("### {label}\n{numbered}".format(label=label, numbered=numbered))
+
+    other_items = grouped.get("other")
+    if other_items:
+        sections.append("### 补充输入\n" + "\n".join(other_items))
+
+    if risk_items:
+        risk_lines = []
+        for ri in risk_items:
+            risk_lines.append(
+                "- [{level}] {desc}（建议：{sug}）".format(
+                    level=ri.risk_level.value if hasattr(ri.risk_level, "value") else ri.risk_level,
+                    desc=ri.description,
+                    sug=ri.suggestion,
+                )
+            )
+        sections.append("### 风险分析结论（关注异常路径覆盖）\n" + "\n".join(risk_lines))
+
+    if not sections:
+        return ""
+    return "\n【补充上下文 — 前序分析结论】\n" + "\n\n".join(sections) + "\n"
+
+
 def _get_session_with_requirement(db: Session, session_id: int) -> Tuple[RuleTreeSession, Requirement]:
     session = db.query(RuleTreeSession).filter(RuleTreeSession.id == session_id).first()
     if not session:
@@ -481,13 +556,18 @@ def run_rule_tree_generation_task(
             )
 
         product_context = _build_rule_tree_product_context(db, requirement)
+        supplemental_context = _build_supplemental_context(db, requirement.id)
         if product_context:
             wrapped_requirement = GENERATE_WITH_PRODUCT_USER_TEMPLATE.format(
                 requirement_text=effective_text,
                 product_context=product_context,
+                supplemental_context=supplemental_context,
             )
         else:
-            wrapped_requirement = GENERATE_USER_TEMPLATE.format(requirement_text=effective_text)
+            wrapped_requirement = GENERATE_USER_TEMPLATE.format(
+                requirement_text=effective_text,
+                supplemental_context=supplemental_context,
+            )
         base_messages = [
             {"role": "system", "content": GENERATE_SYSTEM_PROMPT},
             {"role": "user", "content": wrapped_requirement},
@@ -589,13 +669,18 @@ def generate_with_review(
         )
 
     product_context = _build_rule_tree_product_context(db, requirement)
+    supplemental_context = _build_supplemental_context(db, requirement.id)
     if product_context:
         wrapped_requirement = GENERATE_WITH_PRODUCT_USER_TEMPLATE.format(
             requirement_text=effective_text,
             product_context=product_context,
+            supplemental_context=supplemental_context,
         )
     else:
-        wrapped_requirement = GENERATE_USER_TEMPLATE.format(requirement_text=effective_text)
+        wrapped_requirement = GENERATE_USER_TEMPLATE.format(
+            requirement_text=effective_text,
+            supplemental_context=supplemental_context,
+        )
     base_messages = [
         {"role": "system", "content": GENERATE_SYSTEM_PROMPT},
         {"role": "user", "content": wrapped_requirement},

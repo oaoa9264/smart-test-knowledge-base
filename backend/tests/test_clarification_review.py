@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -6,7 +7,12 @@ from sqlalchemy import inspect
 
 from app.core.database import SessionLocal, engine
 from app.main import app
-from app.models.entities import ClarificationReviewPdfDraft
+from app.models.entities import (
+    ClarificationReviewPdfDraft,
+    ClarificationReviewRecord,
+    Project,
+    Requirement,
+)
 from app.schemas.clarification_review import (
     ClarificationReviewAnalyzeRequest,
     ClarificationReviewRecordRead,
@@ -16,6 +22,19 @@ from app.services import clarification_review_service
 
 
 client = TestClient(app)
+
+
+def _wait_for_record_task(record_id, timeout=10):
+    """Poll until the record's task_status is no longer queued/running."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        resp = client.get(f"/api/ai/clarification-review/records/{record_id}")
+        assert resp.status_code == 200
+        payload = resp.json()
+        if payload["task_status"] not in ("queued", "running"):
+            return payload
+        time.sleep(0.2)
+    raise TimeoutError(f"record {record_id} did not complete within {timeout}s")
 
 
 def test_clarification_review_table_exists():
@@ -119,7 +138,10 @@ def test_clarification_review_analyze_persists_structured_result_and_provider(mo
     )
 
     assert resp.status_code == 201
-    payload = resp.json()
+    initial = resp.json()
+    assert initial["task_status"] == "queued"
+
+    payload = _wait_for_record_task(initial["id"])
     assert payload["llm_status"] == "success"
     assert payload["llm_provider"] == "openai"
     assert payload["result"]["likely_historical_rules"][0]["rule"] == "状态不可回退"
@@ -159,7 +181,10 @@ def test_clarification_review_analyze_saves_failure_meta(monkeypatch):
     )
 
     assert resp.status_code == 201
-    payload = resp.json()
+    initial = resp.json()
+    assert initial["task_status"] == "queued"
+
+    payload = _wait_for_record_task(initial["id"])
     assert payload["llm_status"] == "failed"
     assert payload["llm_provider"] is None
     assert payload["llm_message"] == "boom"
@@ -255,7 +280,8 @@ def test_clarification_review_analyze_uses_rule_text_roles_and_marks_llm_extra(m
     )
 
     assert resp.status_code == 201
-    payload = resp.json()
+    initial = resp.json()
+    payload = _wait_for_record_task(initial["id"])
     assert payload["result"]["configured_roles"] == ["产品", "开发", "财务"]
     assert payload["result"]["priority_questions_by_role"]["开发"] == []
     assert payload["result"]["priority_questions_by_role"]["财务"][0]["question"] == "是否涉及结算"
@@ -293,7 +319,8 @@ def test_clarification_review_analyze_falls_back_to_default_roles_when_rule_text
     )
 
     assert resp.status_code == 201
-    payload = resp.json()
+    initial = resp.json()
+    payload = _wait_for_record_task(initial["id"])
     assert payload["result"]["configured_roles"] == ["产品", "开发", "测试", "运营/业务"]
     assert [item["key"] for item in payload["result"]["role_descriptors"]] == ["产品", "开发", "测试", "运营/业务"]
     assert payload["result"]["priority_questions_by_role"]["测试"] == []
@@ -464,34 +491,41 @@ def test_clarification_review_analyze_appends_pdf_supplement_for_valid_draft(mon
         db.commit()
         db.refresh(draft)
 
+        captured_prompts = {}
+
         class _FakeLLMClient:
             def chat_with_json(self, system_prompt, user_prompt):
-                assert "如果输入包含「PDF 补充参考材料」" in system_prompt
-                assert "【PDF 补充参考材料】" in user_prompt
-                assert "流程图显示审批后发站内信" in user_prompt
-                assert "字段直接证据（strict extraction）" in user_prompt
+                captured_prompts["system"] = system_prompt
+                captured_prompts["user"] = user_prompt
                 return {"priority_questions_by_role": {}}
 
             def get_last_provider(self, method_name=None):
                 del method_name
                 return "openai"
 
-        record = clarification_review_service.analyze_clarification_review(
-            db=db,
-            payload=ClarificationReviewAnalyzeRequest(
-                requirement_text="表单里的最终需求",
-                current_surface_flow="提交后审核",
-                involved_modules="审批中心",
-                known_background="老项目",
-                unknowns="驳回通知未知",
-                rule_text="按结构化结果输出",
-                source_draft_id=draft.id,
-                applied_fields=["requirement_text"],
-            ),
-            llm_client=_FakeLLMClient(),
-        )
+        monkeypatch.setattr(clarification_review_service, "LLMClient", lambda: _FakeLLMClient())
 
-        assert record.llm_status == "success"
+        resp = client.post(
+            "/api/ai/clarification-review/analyze",
+            json={
+                "requirement_text": "表单里的最终需求",
+                "current_surface_flow": "提交后审核",
+                "involved_modules": "审批中心",
+                "known_background": "老项目",
+                "unknowns": "驳回通知未知",
+                "rule_text": "按结构化结果输出",
+                "source_draft_id": draft.id,
+                "applied_fields": ["requirement_text"],
+            },
+        )
+        assert resp.status_code == 201
+        payload = _wait_for_record_task(resp.json()["id"])
+        assert payload["llm_status"] == "success"
+
+        assert "如果输入包含「PDF 补充参考材料」" in captured_prompts.get("system", "")
+        assert "【PDF 补充参考材料】" in captured_prompts.get("user", "")
+        assert "流程图显示审批后发站内信" in captured_prompts.get("user", "")
+        assert "字段直接证据（strict extraction）" in captured_prompts.get("user", "")
     finally:
         db.close()
 
@@ -554,7 +588,8 @@ def test_clarification_review_detail_preserves_pdf_draft_source_for_v2_records(m
     )
 
     assert analyze_resp.status_code == 201
-    payload = analyze_resp.json()
+    initial = analyze_resp.json()
+    payload = _wait_for_record_task(initial["id"])
     assert payload["result"]["result_version"] == 2
     assert payload["result"]["inferred_items"][0]["source_type"] == "pdf_draft"
 
@@ -728,3 +763,321 @@ def test_normalize_clarification_review_result_v2_rebalances_priorities_and_vali
     assert normalized["known_requirement_gaps"][0]["priority"] == "P1"
     assert normalized["known_requirement_gaps"][1]["gap_type"] == "logic_gap"
     assert [item["priority"] for item in normalized["known_requirement_gaps"]] == ["P1", "P0", "P1", "P1"]
+
+
+def _build_completed_record(
+    db,
+    *,
+    project_id=None,
+    known_gaps=None,
+    assumptions=None,
+    questions=None,
+    requirement_text="老项目需求原文",
+    source_draft_id=None,
+):
+    """Create a completed ClarificationReviewRecord fixture in the given session."""
+    input_payload = {
+        "requirement_text": requirement_text,
+        "current_surface_flow": "",
+        "involved_modules": "支付模块",
+        "known_background": "",
+        "unknowns": "",
+        "rule_text": "按结构化结果输出",
+    }
+    result_payload = {
+        "result_version": 2,
+        "inferred_items": [],
+        "assumption_items": assumptions or [],
+        "priority_questions_by_role": questions or {},
+        "configured_roles": ["产品"],
+        "role_descriptors": [],
+        "known_requirement_gaps": known_gaps or [],
+        "likely_historical_rules": [],
+        "missing_critical_rules": [],
+        "risk_assumptions": [],
+        "summary_markdown": "## 摘要",
+        "llm_status": "success",
+    }
+    record = ClarificationReviewRecord(
+        input_payload_json=json.dumps(input_payload, ensure_ascii=False),
+        result_json=json.dumps(result_payload, ensure_ascii=False),
+        rule_text=input_payload["rule_text"],
+        task_status="completed",
+        progress_percent=100,
+        llm_status="success",
+        source_draft_id=source_draft_id,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def test_update_item_resolutions_persists_status_and_note():
+    db = SessionLocal()
+    try:
+        record = _build_completed_record(
+            db,
+            known_gaps=[
+                {
+                    "gap": "驳回后的通知处理规则缺失",
+                    "gap_type": "rule_missing",
+                    "reason": "需求未定义",
+                    "impact": "无法完成链路",
+                    "priority": "P0",
+                    "blocking_reason": "",
+                }
+            ],
+            assumptions=[
+                {
+                    "assumption": "驳回后需要撤回通知",
+                    "basis": "老流程",
+                    "risk": "可能不撤回",
+                }
+            ],
+            questions={
+                "产品": [
+                    {
+                        "question": "驳回后如何处理？",
+                        "why_ask": "链路一致性",
+                        "risk_if_unasked": "链路断裂",
+                        "required_output": "规则表",
+                        "answer_format": "table",
+                    }
+                ]
+            },
+        )
+        updates = [
+            {
+                "item_type": "gap",
+                "index": 0,
+                "resolution_status": "confirmed",
+                "resolution_note": "产品确认按方案A",
+                "resolved_by": "wanghu",
+            },
+            {
+                "item_type": "assumption",
+                "index": 0,
+                "resolution_status": "assume_and_proceed",
+                "resolution_note": "按假设推进",
+                "resolved_by": "wanghu",
+            },
+            {
+                "item_type": "question",
+                "index": 0,
+                "role": "产品",
+                "resolution_status": "dismissed",
+            },
+        ]
+        updated = clarification_review_service.update_item_resolutions(db, record.id, updates)
+        result = json.loads(updated.result_json)
+
+        gap = result["known_requirement_gaps"][0]
+        assert gap["resolution_status"] == "confirmed"
+        assert gap["resolution_note"] == "产品确认按方案A"
+        assert gap["resolved_by"] == "wanghu"
+        assert gap.get("resolved_at")
+
+        assumption = result["assumption_items"][0]
+        assert assumption["resolution_status"] == "assume_and_proceed"
+
+        question = result["priority_questions_by_role"]["产品"][0]
+        assert question["resolution_status"] == "dismissed"
+    finally:
+        db.close()
+
+
+def test_update_item_resolutions_rejects_invalid_status():
+    db = SessionLocal()
+    try:
+        record = _build_completed_record(
+            db,
+            known_gaps=[
+                {
+                    "gap": "缺陷1",
+                    "gap_type": "rule_missing",
+                    "reason": "原因",
+                    "impact": "影响",
+                    "priority": "P1",
+                    "blocking_reason": "",
+                }
+            ],
+        )
+        try:
+            clarification_review_service.update_item_resolutions(
+                db,
+                record.id,
+                [
+                    {
+                        "item_type": "gap",
+                        "index": 0,
+                        "resolution_status": "not-a-status",
+                    }
+                ],
+            )
+        except clarification_review_service.ItemResolutionError as exc:
+            assert "invalid resolution_status" in str(exc)
+        else:
+            raise AssertionError("expected ItemResolutionError for bad status")
+    finally:
+        db.close()
+
+
+def test_create_requirement_from_review_creates_and_links_records():
+    db = SessionLocal()
+    try:
+        project = Project(name=f"fixture-proj-{int(time.time() * 1000)}")
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+
+        draft = ClarificationReviewPdfDraft(
+            file_name="seed.pdf",
+            file_size_bytes=100,
+            page_count=1,
+            status="success",
+            llm_status="success",
+            expires_at=datetime.utcnow() + timedelta(hours=24),
+        )
+        db.add(draft)
+        db.commit()
+        db.refresh(draft)
+
+        record = _build_completed_record(
+            db,
+            known_gaps=[
+                {
+                    "gap": "缺陷A",
+                    "gap_type": "rule_missing",
+                    "reason": "原因A",
+                    "impact": "影响A",
+                    "priority": "P0",
+                    "blocking_reason": "",
+                    "resolution_status": "confirmed",
+                    "resolution_note": "按方案A",
+                }
+            ],
+            assumptions=[
+                {
+                    "assumption": "假设X",
+                    "basis": "依据X",
+                    "risk": "风险X",
+                    "resolution_status": "assume_and_proceed",
+                    "resolution_note": "先按假设推进",
+                }
+            ],
+            source_draft_id=draft.id,
+        )
+
+        requirement = clarification_review_service.create_requirement_from_review(
+            db,
+            record.id,
+            project.id,
+            title="修复验证需求",
+        )
+
+        assert requirement.id is not None
+        assert requirement.project_id == project.id
+        assert "## 需求原文" in requirement.raw_text
+        assert "## 已确认的澄清结论" in requirement.raw_text
+        assert "## 按假设推进的项目" in requirement.raw_text
+        assert "缺陷A" in requirement.raw_text
+        assert "假设X" in requirement.raw_text
+
+        db.refresh(record)
+        assert record.generated_requirement_id == requirement.id
+
+        db.refresh(draft)
+        assert draft.generated_requirement_id == requirement.id
+    finally:
+        db.close()
+
+
+def test_create_requirement_from_review_rejects_duplicate_creation():
+    db = SessionLocal()
+    try:
+        project = Project(name=f"fixture-proj-dup-{int(time.time() * 1000)}")
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+
+        record = _build_completed_record(db)
+
+        clarification_review_service.create_requirement_from_review(
+            db, record.id, project.id, title="一次"
+        )
+
+        try:
+            clarification_review_service.create_requirement_from_review(
+                db, record.id, project.id, title="二次"
+            )
+        except clarification_review_service.CreateRequirementError as exc:
+            assert "already created" in str(exc)
+        else:
+            raise AssertionError("expected CreateRequirementError on duplicate create")
+    finally:
+        db.close()
+
+
+def test_patch_record_items_endpoint_updates_resolution():
+    db = SessionLocal()
+    try:
+        record = _build_completed_record(
+            db,
+            known_gaps=[
+                {
+                    "gap": "API 缺陷",
+                    "gap_type": "rule_missing",
+                    "reason": "原因",
+                    "impact": "影响",
+                    "priority": "P1",
+                    "blocking_reason": "",
+                }
+            ],
+        )
+    finally:
+        db.close()
+
+    resp = client.patch(
+        f"/api/ai/clarification-review/records/{record.id}/items",
+        json={
+            "updates": [
+                {
+                    "item_type": "gap",
+                    "index": 0,
+                    "resolution_status": "confirmed",
+                    "resolution_note": "产品确认",
+                    "resolved_by": "tester",
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    gap = payload["result"]["known_requirement_gaps"][0]
+    assert gap["resolution_status"] == "confirmed"
+    assert gap["resolved_by"] == "tester"
+
+
+def test_post_create_requirement_endpoint_returns_requirement_id():
+    db = SessionLocal()
+    try:
+        project = Project(name=f"fixture-proj-api-{int(time.time() * 1000)}")
+        db.add(project)
+        db.commit()
+        project_id = project.id
+
+        record = _build_completed_record(db)
+        record_id = record.id
+    finally:
+        db.close()
+
+    resp = client.post(
+        f"/api/ai/clarification-review/records/{record_id}/create-requirement",
+        json={"project_id": project_id, "title": "API 创建需求"},
+    )
+    assert resp.status_code == 201, resp.text
+    payload = resp.json()
+    assert payload["requirement"]["id"] > 0
+    assert payload["requirement"]["project_id"] == project_id
+    assert payload["record"]["generated_requirement_id"] == payload["requirement"]["id"]

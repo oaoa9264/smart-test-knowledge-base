@@ -12,7 +12,7 @@ function hasMeaningfulText(value: string | null | undefined): boolean {
 
 function toDateText(value: string): string {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "unknown-date";
+  if (Number.isNaN(date.getTime())) return "未知日期";
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
@@ -65,6 +65,22 @@ function formatSourceType(value: string): string {
   if (value === "input_text") return "输入信息";
   if (value === "pdf_draft") return "PDF 草稿";
   return "模型推断";
+}
+
+export function formatResolutionStatus(value: string | null | undefined): string {
+  const normalized = String(value || "").trim();
+  if (normalized === "confirmed") return "已确认";
+  if (normalized === "assume_and_proceed") return "按假设推进";
+  if (normalized === "dismissed") return "已忽略";
+  return "待处理";
+}
+
+function formatResolvedInfo(resolvedBy: string | null | undefined, resolvedAt: string | null | undefined): string {
+  const who = String(resolvedBy || "").trim();
+  const when = String(resolvedAt || "").trim();
+  if (!who && !when) return "-";
+  if (who && when) return `${who} · ${toDateTimeText(when)}`;
+  return who || toDateTimeText(when);
 }
 
 export function formatGapType(value: string | undefined): string {
@@ -144,13 +160,19 @@ function buildQuestionSection(
       `### ${title}`,
       items.length > 0
         ? buildMarkdownTable(
-            ["问题", "必须产出", "答案形式", "为什么要问", "不问的风险"],
+            ["问题", "必须产出", "答案形式", "为什么要问", "不问的风险", "处理状态", "处理备注", "处理人/时间"],
             items.map((item) => [
               escapeMarkdownTableCell(item.question),
               escapeMarkdownTableCell(item.required_output || "暂无"),
               escapeMarkdownTableCell(formatAnswerFormat(item.answer_format)),
               escapeMarkdownTableCell(item.why_ask),
               escapeMarkdownTableCell(item.risk_if_unasked),
+              escapeMarkdownTableCell(formatResolutionStatus((item as ClarificationReviewQuestionItem & { resolution_status?: string }).resolution_status)),
+              escapeMarkdownTableCell((item as ClarificationReviewQuestionItem & { resolution_note?: string }).resolution_note || "-"),
+              escapeMarkdownTableCell(formatResolvedInfo(
+                (item as ClarificationReviewQuestionItem & { resolved_by?: string }).resolved_by,
+                (item as ClarificationReviewQuestionItem & { resolved_at?: string }).resolved_at,
+              )),
             ]),
           )
         : "暂无",
@@ -165,13 +187,19 @@ function buildGapPrioritySection(title: string, items: ClarificationReviewGapIte
     `## ${title}`,
     items.length > 0
         ? buildMarkdownTable(
-            ["缺陷", "类型", "原因", "影响", "阻塞说明"],
+            ["缺陷", "类型", "原因", "影响", "阻塞说明", "处理状态", "处理备注", "处理人/时间"],
             items.map((item) => [
               escapeMarkdownTableCell(item.gap),
               escapeMarkdownTableCell(formatGapType(item.gap_type)),
               escapeMarkdownTableCell(item.reason),
               escapeMarkdownTableCell(item.impact),
               escapeMarkdownTableCell(item.blocking_reason || "暂无"),
+              escapeMarkdownTableCell(formatResolutionStatus((item as ClarificationReviewGapItem & { resolution_status?: string }).resolution_status)),
+              escapeMarkdownTableCell((item as ClarificationReviewGapItem & { resolution_note?: string }).resolution_note || "-"),
+              escapeMarkdownTableCell(formatResolvedInfo(
+                (item as ClarificationReviewGapItem & { resolved_by?: string }).resolved_by,
+                (item as ClarificationReviewGapItem & { resolved_at?: string }).resolved_at,
+              )),
             ]),
           )
       : emptyText,
@@ -187,8 +215,8 @@ function buildExportMarkdownV2(record: ClarificationReviewRecord): string {
       "## 标题与元信息",
       `- 记录 ID：#${record.id}`,
       `- 分析时间：${toDateTimeText(record.created_at)}`,
-      `- LLM 状态：${normalizePlainText(record.llm_status)}`,
-      `- LLM 提供商：${normalizePlainText(record.llm_provider)}`,
+      `- 模型状态：${normalizePlainText(record.llm_status)}`,
+      `- 模型提供商：${normalizePlainText(record.llm_provider)}`,
     ].join("\n"),
     [
       "## 输入信息",
@@ -211,11 +239,17 @@ function buildExportMarkdownV2(record: ClarificationReviewRecord): string {
     ),
     buildTableSection(
       "风险假设",
-      ["假设", "依据", "风险"],
+      ["假设", "依据", "风险", "处理状态", "处理备注", "处理人/时间"],
       (record.result.assumption_items || []).map((item) => [
         escapeMarkdownTableCell(item.assumption),
         escapeMarkdownTableCell(item.basis),
         escapeMarkdownTableCell(item.risk),
+        escapeMarkdownTableCell(formatResolutionStatus((item as typeof item & { resolution_status?: string }).resolution_status)),
+        escapeMarkdownTableCell((item as typeof item & { resolution_note?: string }).resolution_note || "-"),
+        escapeMarkdownTableCell(formatResolvedInfo(
+          (item as typeof item & { resolved_by?: string }).resolved_by,
+          (item as typeof item & { resolved_at?: string }).resolved_at,
+        )),
       ]),
       "暂无风险假设",
     ),
@@ -237,8 +271,8 @@ function buildExportMarkdownLegacy(record: ClarificationReviewRecord): string {
       "## 标题与元信息",
       `- 记录 ID：#${record.id}`,
       `- 分析时间：${toDateTimeText(record.created_at)}`,
-      `- LLM 状态：${normalizePlainText(record.llm_status)}`,
-      `- LLM 提供商：${normalizePlainText(record.llm_provider)}`,
+      `- 模型状态：${normalizePlainText(record.llm_status)}`,
+      `- 模型提供商：${normalizePlainText(record.llm_provider)}`,
     ].join("\n"),
     [
       "## 输入信息",
@@ -271,21 +305,33 @@ function buildExportMarkdownLegacy(record: ClarificationReviewRecord): string {
     buildQuestionSection(roleDescriptors, record.result.priority_questions_by_role || {}),
     buildTableSection(
       "已识别需求缺陷",
-      ["缺陷", "原因", "影响"],
+      ["缺陷", "原因", "影响", "处理状态", "处理备注", "处理人/时间"],
       record.result.known_requirement_gaps.map((item) => [
         escapeMarkdownTableCell(item.gap),
         escapeMarkdownTableCell(item.reason),
         escapeMarkdownTableCell(item.impact),
+        escapeMarkdownTableCell(formatResolutionStatus((item as typeof item & { resolution_status?: string }).resolution_status)),
+        escapeMarkdownTableCell((item as typeof item & { resolution_note?: string }).resolution_note || "-"),
+        escapeMarkdownTableCell(formatResolvedInfo(
+          (item as typeof item & { resolved_by?: string }).resolved_by,
+          (item as typeof item & { resolved_at?: string }).resolved_at,
+        )),
       ]),
       "暂无缺陷",
     ),
     buildTableSection(
       "风险假设",
-      ["假设", "依据", "风险"],
+      ["假设", "依据", "风险", "处理状态", "处理备注", "处理人/时间"],
       record.result.risk_assumptions.map((item) => [
         escapeMarkdownTableCell(item.assumption),
         escapeMarkdownTableCell(item.basis),
         escapeMarkdownTableCell(item.risk),
+        escapeMarkdownTableCell(formatResolutionStatus((item as typeof item & { resolution_status?: string }).resolution_status)),
+        escapeMarkdownTableCell((item as typeof item & { resolution_note?: string }).resolution_note || "-"),
+        escapeMarkdownTableCell(formatResolvedInfo(
+          (item as typeof item & { resolved_by?: string }).resolved_by,
+          (item as typeof item & { resolved_at?: string }).resolved_at,
+        )),
       ]),
       "暂无风险假设",
     ),

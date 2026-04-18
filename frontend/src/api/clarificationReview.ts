@@ -4,14 +4,22 @@ import type {
   ClarificationReviewPdfDraft,
   ClarificationReviewRecord,
   ClarificationReviewRecordSummary,
+  ResolutionStatus,
 } from "../types";
+
+export interface ItemResolutionUpdate {
+  item_type: "gap" | "assumption" | "question";
+  role?: string;
+  index: number;
+  resolution_status: ResolutionStatus;
+  resolution_note?: string;
+  resolved_by?: string;
+}
 
 export async function analyzeClarificationReview(
   payload: ClarificationReviewAnalyzeRequest,
 ): Promise<ClarificationReviewRecord> {
-  const { data } = await http.post<ClarificationReviewRecord>("/api/ai/clarification-review/analyze", payload, {
-    timeout: 600000,
-  });
+  const { data } = await http.post<ClarificationReviewRecord>("/api/ai/clarification-review/analyze", payload);
   return data;
 }
 
@@ -23,7 +31,6 @@ export async function createClarificationReviewPdfDraft(file: File): Promise<Cla
     formData,
     {
       headers: { "Content-Type": "multipart/form-data" },
-      timeout: 180000,
     },
   );
   return data;
@@ -37,8 +44,6 @@ export async function fetchClarificationReviewPdfDraft(draftId: number): Promise
 export async function inferClarificationReviewPdfDraft(draftId: number): Promise<ClarificationReviewPdfDraft> {
   const { data } = await http.post<ClarificationReviewPdfDraft>(
     `/api/ai/clarification-review/pdf-drafts/${draftId}/infer`,
-    undefined,
-    { timeout: 180000 },
   );
   return data;
 }
@@ -57,4 +62,32 @@ export async function fetchClarificationReviewRecord(recordId: number): Promise<
 
 export async function deleteClarificationReviewRecord(recordId: number): Promise<void> {
   await http.delete(`/api/ai/clarification-review/records/${recordId}`);
+}
+
+export async function updateClarificationReviewItemResolutions(
+  recordId: number,
+  updates: ItemResolutionUpdate[],
+): Promise<ClarificationReviewRecord> {
+  const { data } = await http.patch<ClarificationReviewRecord>(
+    `/api/ai/clarification-review/records/${recordId}/items`,
+    { updates },
+  );
+  return data;
+}
+
+export interface CreateRequirementFromReviewResponse {
+  requirement: { id: number; project_id: number; title: string };
+  record: ClarificationReviewRecord;
+}
+
+export async function createRequirementFromReview(
+  recordId: number,
+  projectId: number,
+  title?: string,
+): Promise<CreateRequirementFromReviewResponse> {
+  const { data } = await http.post<CreateRequirementFromReviewResponse>(
+    `/api/ai/clarification-review/records/${recordId}/create-requirement`,
+    { project_id: projectId, title: title || "" },
+  );
+  return data;
 }

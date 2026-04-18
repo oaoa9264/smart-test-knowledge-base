@@ -3,12 +3,20 @@ export type NodeType = "root" | "condition" | "branch" | "action" | "exception";
 export type NodeStatus = "active" | "modified" | "deleted";
 export type TestCaseStatus = "active" | "needs_review" | "invalidated";
 export type LLMStatus = "success" | "failed";
-export type DraftStatus = "pending" | "extracting" | "partial_success" | "success" | "failed";
+export type DraftStatus = "pending" | "queued" | "extracting" | "partial_success" | "success" | "failed";
+
+export interface LLMErrorDetail {
+  code: string;
+  message: string;
+  retryable: boolean;
+  detail_url?: string | null;
+}
 
 export interface LLMExecutionMeta {
   llm_status?: LLMStatus | null;
   llm_provider?: string | null;
   llm_message?: string | null;
+  llm_error?: LLMErrorDetail | null;
 }
 
 export interface Project {
@@ -353,12 +361,18 @@ export interface ClarificationReviewAnalyzeRequest {
   applied_fields?: string[];
 }
 
+export type ResolutionStatus = "pending" | "confirmed" | "assume_and_proceed" | "dismissed";
+
 export interface ClarificationReviewQuestionItem {
   question: string;
   why_ask: string;
   risk_if_unasked: string;
   required_output?: string;
   answer_format?: "table" | "flow" | "text" | "";
+  resolution_status?: ResolutionStatus;
+  resolution_note?: string;
+  resolved_by?: string;
+  resolved_at?: string;
 }
 
 export interface ClarificationReviewRuleItem {
@@ -379,12 +393,20 @@ export interface ClarificationReviewGapItem {
   gap_type?: "rule_missing" | "logic_gap" | "boundary_undefined" | "data_missing" | "process_gap" | "";
   priority?: "P0" | "P1" | "P2" | "";
   blocking_reason?: string;
+  resolution_status?: ResolutionStatus;
+  resolution_note?: string;
+  resolved_by?: string;
+  resolved_at?: string;
 }
 
 export interface ClarificationReviewAssumptionItem {
   assumption: string;
   basis: string;
   risk: string;
+  resolution_status?: ResolutionStatus;
+  resolution_note?: string;
+  resolved_by?: string;
+  resolved_at?: string;
 }
 
 export interface ClarificationReviewInferredItem {
@@ -449,6 +471,9 @@ export interface ClarificationReviewPdfDraft {
   infer_llm_status: LLMStatus | null;
   infer_llm_provider: string | null;
   infer_llm_message: string | null;
+  infer_task_status: "queued" | "running" | "completed" | "failed" | null;
+  progress_message: string | null;
+  progress_percent: number | null;
   strict_result: ClarificationReviewPdfResult | null;
   inference_result: ClarificationReviewPdfResult | null;
   expires_at: string;
@@ -462,7 +487,10 @@ export interface ClarificationReviewRecordSummary {
   llm_provider: string | null;
   created_at: string;
   requirement_text_preview: string;
+  task_status: "queued" | "running" | "completed" | "failed" | "interrupted";
+  progress_percent: number | null;
   source_meta: ClarificationReviewSourceMeta | null;
+  generated_requirement_id: number | null;
 }
 
 export interface ClarificationReviewRecord {
@@ -473,7 +501,11 @@ export interface ClarificationReviewRecord {
   llm_status: LLMStatus;
   llm_provider: string | null;
   llm_message: string | null;
+  task_status: "queued" | "running" | "completed" | "failed" | "interrupted";
+  progress_message: string | null;
+  progress_percent: number | null;
   source_meta: ClarificationReviewSourceMeta | null;
+  generated_requirement_id: number | null;
   created_at: string;
 }
 
@@ -589,22 +621,6 @@ export interface MatchedEvidence {
   match_type: string;
 }
 
-export interface BlockingRisk {
-  risk_id: string;
-  reason: string;
-  severity: string;
-}
-
-export interface ReopenedRisk {
-  risk_id: string;
-  reason: string;
-}
-
-export interface ResolvedRisk {
-  risk_id: string;
-  reason: string;
-}
-
 export interface ReviewSnapshotResponse {
   snapshot: EffectiveSnapshot;
   risks: RiskItemCompact[];
@@ -627,14 +643,6 @@ export interface PredevAnalysisResponse {
   risks: RiskItemCompact[];
   conflicts: ConflictItem[];
   matched_evidence: MatchedEvidence[];
-}
-
-export interface PrereleaseAuditResponse {
-  closure_summary: string;
-  blocking_risks: BlockingRisk[];
-  reopened_risks: ReopenedRisk[];
-  resolved_risks: ResolvedRisk[];
-  audit_notes: string[];
 }
 
 export type RiskAnalysisTaskStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
@@ -664,6 +672,11 @@ export interface RiskAnalysisTaskSummary {
 export interface RiskAnalysisTaskStartResponse {
   accepted: boolean;
   task: RiskAnalysisTask;
+}
+
+export interface UnifiedRiskAnalysisStartResponse {
+  accepted: boolean;
+  stages: AnalysisStage[];
 }
 
 export interface NormalizedRequirementDocTask {

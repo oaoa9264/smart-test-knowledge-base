@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.schemas.clarification_review_pdf import PdfDraftInferResponse, PdfDraftRead
 from app.services import pdf_draft_service
+from app.services.pdf_draft_service import PdfDraftInferConflictError
 
 
 router = APIRouter(prefix="/api/ai/clarification-review/pdf-drafts", tags=["clarification-review"])
@@ -40,6 +41,8 @@ def infer_pdf_draft_endpoint(draft_id: int, db: Session = Depends(get_db)):
         draft = pdf_draft_service.infer_pdf_draft(db=db, draft_id=draft_id)
     except pdf_draft_service.PdfDraftNotFoundError as exc:
         raise HTTPException(status_code=404, detail="pdf draft not found") from exc
+    except PdfDraftInferConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -60,6 +63,9 @@ def _serialize_pdf_draft(draft) -> PdfDraftRead:
         infer_llm_status=draft.infer_llm_status,
         infer_llm_provider=draft.infer_llm_provider,
         infer_llm_message=draft.infer_llm_message,
+        infer_task_status=draft.infer_task_status,
+        progress_message=draft.progress_message,
+        progress_percent=draft.progress_percent,
         strict_result=_decode_result(draft.strict_result_json),
         inference_result=_decode_result(draft.inference_result_json),
         expires_at=draft.expires_at,

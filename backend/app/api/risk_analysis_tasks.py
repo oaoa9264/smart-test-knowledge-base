@@ -9,10 +9,12 @@ from app.schemas.risk_analysis_task import (
     RiskAnalysisTaskRead,
     RiskAnalysisTaskStartResponse,
     RiskAnalysisTaskSummaryRead,
+    UnifiedRiskAnalysisStartResponse,
 )
 from app.services.risk_analysis_task_service import (
     RiskAnalysisTaskConflictError,
     start_risk_analysis_task,
+    start_unified_risk_analysis,
 )
 
 router = APIRouter(tags=["risk-analysis-tasks"])
@@ -51,6 +53,31 @@ def get_risk_analysis_task_summary(requirement_id: int, db: Session = Depends(ge
         review=RiskAnalysisTaskRead.from_orm(review_task) if review_task else None,
         pre_dev=RiskAnalysisTaskRead.from_orm(pre_dev_task) if pre_dev_task else None,
         pre_release=RiskAnalysisTaskRead.from_orm(pre_release_task) if pre_release_task else None,
+    )
+
+
+# IMPORTANT: unified endpoint must be defined BEFORE the {stage} endpoints,
+# otherwise FastAPI matches "unified" as a {stage} path parameter.
+@router.post(
+    "/api/requirements/{requirement_id}/analysis-tasks/unified",
+    response_model=UnifiedRiskAnalysisStartResponse,
+)
+def start_unified_requirement_risk_analysis(
+    requirement_id: int,
+    db: Session = Depends(get_db),
+):
+    _get_requirement_or_404(db, requirement_id)
+
+    try:
+        stages = start_unified_risk_analysis(db, requirement_id)
+    except RiskAnalysisTaskConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return UnifiedRiskAnalysisStartResponse(
+        accepted=True,
+        stages=[s.value for s in stages],
     )
 
 

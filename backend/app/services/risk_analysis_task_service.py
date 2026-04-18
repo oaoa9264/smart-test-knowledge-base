@@ -1,6 +1,8 @@
 import json
+import logging
 import threading
 from datetime import datetime
+from typing import List
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
@@ -176,7 +178,9 @@ def run_risk_analysis_task(task_id: int, db_session_factory=SessionLocal) -> Non
         db.close()
 
 
-def start_risk_analysis_task(db: Session, requirement_id: int, stage: AnalysisStage) -> RiskAnalysisTask:
+def start_risk_analysis_task(
+    db: Session, requirement_id: int, stage: AnalysisStage, auto_launch: bool = True,
+) -> RiskAnalysisTask:
     task = get_risk_analysis_task(db, requirement_id, stage)
     if task and task.status in _IN_PROGRESS_STATUSES:
         raise RiskAnalysisTaskConflictError("当前阶段分析进行中，请稍后再试")
@@ -198,5 +202,171 @@ def start_risk_analysis_task(db: Session, requirement_id: int, stage: AnalysisSt
     db.commit()
     db.refresh(task)
 
-    _launch_risk_analysis_task_worker(task.id)
+    if auto_launch:
+        _launch_risk_analysis_task_worker(task.id)
     return task
+
+
+logger = logging.getLogger(__name__)
+
+_UNIFIED_STAGE_ORDER = [
+    AnalysisStage.review,
+    AnalysisStage.pre_dev,
+    AnalysisStage.pre_release,
+]
+
+_UNIFIED_PROGRESS_MESSAGES = {
+    AnalysisStage.review: "统一分析：正在执行评审分析",
+    AnalysisStage.pre_dev: "统一分析：正在执行开发前分析",
+    AnalysisStage.pre_release: "统一分析：正在执行发布前审计",
+}
+
+
+def start_unified_risk_analysis(db: Session, requirement_id: int) -> List[AnalysisStage]:
+    """Determine which stages need execution and launch a unified background worker.
+
+    Returns the list of stages that will be executed.
+    """
+    from app.models.entities import NodeStatus, Requirement, RuleNode
+    from app.services.effective_requirement_service import (
+        get_latest_snapshot,
+        is_snapshot_stale,
+    )
+    from app.services.requirement_context_helpers import list_requirement_inputs
+
+    requirement = db.query(Requirement).filter(Requirement.id == requirement_id).first()
+    if not requirement:
+        raise ValueError("requirement not found")
+
+    # Check for any in-progress tasks
+    for stage in _UNIFIED_STAGE_ORDER:
+        task = get_risk_analysis_task(db, requirement_id, stage)
+        if task and task.status in _IN_PROGRESS_STATUSES:
+            raise RiskAnalysisTaskConflictError("当前有阶段分析进行中，请稍后再试")
+
+    inputs = list_requirement_inputs(db, requirement_id)
+    review_snapshot = get_latest_snapshot(db, requirement_id, stage="review")
+
+    stages_to_run: List[AnalysisStage] = []
+
+    # 1. Review: needed if no snapshot or snapshot is stale
+    need_review = not review_snapshot or is_snapshot_stale(requirement, inputs, review_snapshot)
+    if need_review:
+        stages_to_run.append(AnalysisStage.review)
+
+    # 2. Pre-dev: needed if rule tree nodes exist
+    has_nodes = (
+        db.query(RuleNode)
+        .filter(
+            RuleNode.requirement_id == requirement_id,
+            RuleNode.status != NodeStatus.deleted,
+        )
+        .count()
+        > 0
+    )
+    if has_nodes:
+        stages_to_run.append(AnalysisStage.pre_dev)
+
+    # 3. Pre-release: only add when there is already a set of committed nodes
+    #    AND the latest review/pre_dev runs didn't just get queued (avoid redundant work).
+    #    We keep the gating conservative: pre_release runs only if rule tree
+    #    has at least one active node AND there exists at least one test case.
+    from app.models.entities import TestCase
+
+    has_test_cases = (
+        db.query(TestCase).filter(TestCase.requirement_id == requirement_id).count() > 0
+    )
+    if has_nodes and has_test_cases:
+        stages_to_run.append(AnalysisStage.pre_release)
+
+    # Minimum: always run review
+    if not stages_to_run:
+        stages_to_run = [AnalysisStage.review]
+
+    # Create/reset tasks for all stages upfront so frontend can track them
+    for stage in stages_to_run:
+        start_risk_analysis_task(db, requirement_id, stage, auto_launch=False)
+
+    _launch_unified_analysis_worker(requirement_id, stages_to_run)
+    return stages_to_run
+
+
+def _launch_unified_analysis_worker(
+    requirement_id: int, stages: List[AnalysisStage],
+) -> None:
+    worker = threading.Thread(
+        target=_run_unified_analysis,
+        kwargs={"requirement_id": requirement_id, "stages": stages},
+        daemon=True,
+    )
+    worker.start()
+
+
+def _run_unified_analysis(
+    requirement_id: int,
+    stages: List[AnalysisStage],
+) -> None:
+    """Execute stages sequentially in a background thread."""
+    for stage in stages:
+        task_id = None
+        db = SessionLocal()
+        try:
+            task = get_risk_analysis_task(db, requirement_id, stage)
+            if not task:
+                logger.warning(
+                    "Unified analysis: task for stage %s not found, skipping", stage.value,
+                )
+                continue
+
+            task_id = task.id
+            # Update progress message to show unified context
+            task.progress_message = _UNIFIED_PROGRESS_MESSAGES.get(
+                stage, _STAGE_RUNNING_MESSAGES[stage],
+            )
+            db.commit()
+        except Exception:
+            logger.exception("Unified analysis: failed to update progress for stage %s", stage.value)
+            if task_id is None:
+                continue
+        finally:
+            db.close()
+
+        # run_risk_analysis_task creates its own DB session
+        try:
+            run_risk_analysis_task(task_id=task_id, db_session_factory=SessionLocal)
+        except Exception:
+            logger.exception(
+                "Unified analysis: run_risk_analysis_task crashed for stage %s (task_id=%s)",
+                stage.value, task_id,
+            )
+            # Ensure the task is marked failed even if run_risk_analysis_task raised unexpectedly
+            db = SessionLocal()
+            try:
+                stuck_task = db.query(RiskAnalysisTask).filter(RiskAnalysisTask.id == task_id).first()
+                if stuck_task and stuck_task.status in _IN_PROGRESS_STATUSES:
+                    stuck_task.status = RiskAnalysisTaskStatus.failed
+                    stuck_task.progress_message = "分析执行异常中断"
+                    stuck_task.progress_percent = 100
+                    stuck_task.last_error = "后台任务异常退出"
+                    stuck_task.current_task_finished_at = datetime.utcnow()
+                    db.commit()
+            except Exception:
+                logger.exception("Unified analysis: failed to mark task %s as failed", task_id)
+            finally:
+                db.close()
+            break
+
+        # Check if stage succeeded before continuing
+        db = SessionLocal()
+        try:
+            task = db.query(RiskAnalysisTask).filter(RiskAnalysisTask.id == task_id).first()
+            if not task or task.status != RiskAnalysisTaskStatus.completed:
+                logger.warning(
+                    "Unified analysis: stage %s did not complete successfully (status=%s), "
+                    "stopping chain",
+                    stage.value,
+                    task.status.value if task else "missing",
+                )
+                break
+        finally:
+            db.close()

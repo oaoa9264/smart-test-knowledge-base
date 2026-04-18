@@ -57,6 +57,9 @@ class PdfDraftRead(BaseModel):
     infer_llm_status: Optional[str] = None
     infer_llm_provider: Optional[str] = None
     infer_llm_message: Optional[str] = None
+    infer_task_status: Optional[str] = None
+    progress_message: Optional[str] = None
+    progress_percent: Optional[int] = None
     strict_result: Optional[PdfDraftResult] = None
     inference_result: Optional[PdfDraftResult] = None
     expires_at: datetime
