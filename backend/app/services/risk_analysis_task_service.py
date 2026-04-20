@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import List
 
 from fastapi.encoders import jsonable_encoder
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -222,6 +223,25 @@ _UNIFIED_PROGRESS_MESSAGES = {
 }
 
 
+def _requirement_has_test_cases(db: Session, requirement_id: int, project_id: int) -> bool:
+    from app.models.entities import RuleNode, RulePath, TestCase
+
+    return (
+        db.query(TestCase.id)
+        .filter(TestCase.project_id == project_id)
+        .outerjoin(TestCase.bound_rule_nodes)
+        .outerjoin(TestCase.bound_paths)
+        .filter(
+            or_(
+                RuleNode.requirement_id == requirement_id,
+                RulePath.requirement_id == requirement_id,
+            )
+        )
+        .first()
+        is not None
+    )
+
+
 def start_unified_risk_analysis(db: Session, requirement_id: int) -> List[AnalysisStage]:
     """Determine which stages need execution and launch a unified background worker.
 
@@ -271,11 +291,7 @@ def start_unified_risk_analysis(db: Session, requirement_id: int) -> List[Analys
     #    AND the latest review/pre_dev runs didn't just get queued (avoid redundant work).
     #    We keep the gating conservative: pre_release runs only if rule tree
     #    has at least one active node AND there exists at least one test case.
-    from app.models.entities import TestCase
-
-    has_test_cases = (
-        db.query(TestCase).filter(TestCase.requirement_id == requirement_id).count() > 0
-    )
+    has_test_cases = _requirement_has_test_cases(db, requirement_id, requirement.project_id)
     if has_nodes and has_test_cases:
         stages_to_run.append(AnalysisStage.pre_release)
 

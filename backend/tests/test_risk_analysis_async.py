@@ -52,6 +52,50 @@ def _create_task(requirement_id: int, stage, status):
         db.close()
 
 
+def _create_rule_node(requirement_id: int) -> str:
+    db = SessionLocal()
+    try:
+        node = entities.RuleNode(
+            id="node-{0}".format(datetime.utcnow().timestamp()),
+            requirement_id=requirement_id,
+            node_type=entities.NodeType.action,
+            content="校验订单状态",
+            risk_level=entities.RiskLevel.medium,
+            status=entities.NodeStatus.active,
+        )
+        db.add(node)
+        db.commit()
+        return node.id
+    finally:
+        db.close()
+
+
+def _create_test_case(project_id: int, bound_rule_node_ids=None):
+    db = SessionLocal()
+    try:
+        case = entities.TestCase(
+            project_id=project_id,
+            title="测试用例-{0}".format(datetime.utcnow().timestamp()),
+            precondition="准备数据",
+            steps="执行步骤",
+            expected_result="预期结果",
+            risk_level=entities.RiskLevel.medium,
+            status=entities.TestCaseStatus.active,
+        )
+        if bound_rule_node_ids:
+            nodes = (
+                db.query(entities.RuleNode)
+                .filter(entities.RuleNode.id.in_(bound_rule_node_ids))
+                .all()
+            )
+            case.bound_rule_nodes = nodes
+        db.add(case)
+        db.commit()
+        return case.id
+    finally:
+        db.close()
+
+
 def test_risk_analysis_task_table_and_columns_exist():
     assert hasattr(entities, "RiskAnalysisTask"), "RiskAnalysisTask model should exist"
 
@@ -229,6 +273,60 @@ def test_start_pre_dev_and_pre_release_tasks_return_accepted():
     assert pre_dev_resp.json()["task"]["stage"] == "pre_dev"
     assert pre_release_resp.status_code == 200
     assert pre_release_resp.json()["task"]["stage"] == "pre_release"
+
+
+def test_start_unified_analysis_ignores_unbound_project_testcases_for_prerelease(monkeypatch):
+    requirement_id = _create_requirement_id()
+    _create_rule_node(requirement_id)
+
+    db = SessionLocal()
+    try:
+        requirement = db.query(entities.Requirement).filter(entities.Requirement.id == requirement_id).first()
+        _create_test_case(project_id=requirement.project_id)
+
+        monkeypatch.setattr(risk_task_service, "_launch_unified_analysis_worker", lambda *args, **kwargs: None)
+
+        import app.services.effective_requirement_service as effective_requirement_service
+        import app.services.requirement_context_helpers as requirement_context_helpers
+
+        monkeypatch.setattr(effective_requirement_service, "get_latest_snapshot", lambda *args, **kwargs: None)
+        monkeypatch.setattr(effective_requirement_service, "is_snapshot_stale", lambda *args, **kwargs: False)
+        monkeypatch.setattr(requirement_context_helpers, "list_requirement_inputs", lambda *args, **kwargs: [])
+
+        stages = risk_task_service.start_unified_risk_analysis(db, requirement_id)
+
+        assert stages == [entities.AnalysisStage.review, entities.AnalysisStage.pre_dev]
+    finally:
+        db.close()
+
+
+def test_start_unified_analysis_includes_prerelease_for_requirement_bound_testcases(monkeypatch):
+    requirement_id = _create_requirement_id()
+    node_id = _create_rule_node(requirement_id)
+
+    db = SessionLocal()
+    try:
+        requirement = db.query(entities.Requirement).filter(entities.Requirement.id == requirement_id).first()
+        _create_test_case(project_id=requirement.project_id, bound_rule_node_ids=[node_id])
+
+        monkeypatch.setattr(risk_task_service, "_launch_unified_analysis_worker", lambda *args, **kwargs: None)
+
+        import app.services.effective_requirement_service as effective_requirement_service
+        import app.services.requirement_context_helpers as requirement_context_helpers
+
+        monkeypatch.setattr(effective_requirement_service, "get_latest_snapshot", lambda *args, **kwargs: None)
+        monkeypatch.setattr(effective_requirement_service, "is_snapshot_stale", lambda *args, **kwargs: False)
+        monkeypatch.setattr(requirement_context_helpers, "list_requirement_inputs", lambda *args, **kwargs: [])
+
+        stages = risk_task_service.start_unified_risk_analysis(db, requirement_id)
+
+        assert stages == [
+            entities.AnalysisStage.review,
+            entities.AnalysisStage.pre_dev,
+            entities.AnalysisStage.pre_release,
+        ]
+    finally:
+        db.close()
 
 
 def test_review_worker_persists_snapshot_and_result_json(monkeypatch):
